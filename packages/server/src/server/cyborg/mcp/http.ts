@@ -140,9 +140,22 @@ export async function handleMcpRequest(
     return sendJsonRpcError(res, 400, "invalid JSON body");
   }
 
+  // Tasks feature gate: the authoritative server-side signal is "the workspace has
+  // ≥1 tasks_projects row" (provisioned on workspace/project creation). When Tasks
+  // has never been provisioned for this workspace the task- and page-management
+  // tools are withheld entirely. Fail-closed: a read failure disables them (a
+  // workspace with no resolvable Tasks state shouldn't advertise Tasks tools).
+  let tasksEnabled = false;
+  try {
+    tasksEnabled = (await deps.pg.getTasksProjects(token.workspaceId)).length > 0;
+  } catch {
+    tasksEnabled = false;
+  }
+
   const server = buildWorkspaceMcpServer(ctx, {
     pg: deps.pg,
     relay: deps.relay,
+    tasksEnabled,
     broadcastTasksChanged: deps.broadcastTasksChanged,
   });
   const transport = new StreamableHTTPServerTransport({

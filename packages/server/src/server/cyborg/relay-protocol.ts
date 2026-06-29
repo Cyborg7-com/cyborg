@@ -89,10 +89,25 @@ export const CyboReadRequestSchema = z.object({
   requestId: z.string(),
   workspaceId: z.string(),
   cyboId: z.string(),
-  kind: z.enum(["channels", "history", "search", "tasks", "members", "roster", "projects"]),
+  kind: z.enum([
+    "channels",
+    "history",
+    "search",
+    "tasks",
+    "members",
+    "roster",
+    "projects",
+    // kind:"pages" — list a Tasks-project's pages (docs); kind:"page" — read one
+    // page by id. Both owner-scoped relay-side (a cybo inherits its owner's page
+    // visibility), so a cloud daemon (no PG handle) can surface documented Pages.
+    "pages",
+    "page",
+  ]),
   // kind:"history"/"search"/"members" params
   channelId: z.string().optional(),
   limit: z.number().optional(),
+  // kind:"page" — the page id to read.
+  pageId: z.string().optional(),
   // kind:"search" — text to match within the (membership-gated) channel
   query: z.string().optional(),
   // kind:"tasks" filters (mirror cyborg7_list_tasks). status/assigneeId map to the
@@ -187,6 +202,33 @@ export const CyboReadResponseSchema = z.object({
         chatProjectId: z.string().nullable(),
       }),
     )
+    .optional(),
+
+  // kind:"pages" — a Tasks-project's pages VISIBLE to the cybo's owner (public +
+  // legacy null-owner + the owner's own), as a compact hierarchy projection (no
+  // body) so the cybo can see the doc tree. `parentId` null = a root page.
+  pages: z
+    .array(
+      z.object({
+        id: z.string(),
+        title: z.string(),
+        parentId: z.string().nullable(),
+        icon: z.string().nullable(),
+      }),
+    )
+    .optional(),
+
+  // kind:"page" — a single page WITH its body content (the document text), gated
+  // by the same owner visibility as `pages`. Null when the page is missing/hidden.
+  page: z
+    .object({
+      id: z.string(),
+      title: z.string(),
+      content: z.string(),
+      parentId: z.string().nullable(),
+      icon: z.string().nullable(),
+    })
+    .nullable()
     .optional(),
 });
 

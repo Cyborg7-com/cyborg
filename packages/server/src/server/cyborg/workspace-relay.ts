@@ -954,9 +954,20 @@ export class WorkspaceRelay {
       requestId: string;
       workspaceId: string;
       cyboId: string;
-      kind: "channels" | "history" | "search" | "tasks" | "members" | "roster" | "projects";
+      kind:
+        | "channels"
+        | "history"
+        | "search"
+        | "tasks"
+        | "members"
+        | "roster"
+        | "projects"
+        | "pages"
+        | "page";
       channelId?: string;
       limit?: number;
+      // kind:"page" — the page id to read.
+      pageId?: string;
       query?: string;
       status?: string;
       assigneeId?: string;
@@ -1049,48 +1060,16 @@ export class WorkspaceRelay {
         this.send(ws, reply);
         return;
       }
+      if (msg.kind === "pages" || msg.kind === "page") {
+        // Documented Pages read — owner-ACL gated. Extracted to keep handleCyboRead
+        // under the complexity cap.
+        await this.handleCyboPagesRead(ws, msg, fail);
+        return;
+      }
       if (msg.kind === "members") {
-        // channel-scoped + membership-gated (same fail-safe as history/search): a
-        // cybo can only list the members of a channel it has joined.
-        if (!msg.channelId) {
-          fail("channelId required");
-          return;
-        }
-        const isMember = await this.pg.isCyboChannelMember(msg.channelId, msg.cyboId);
-        if (!isMember) {
-          fail("not a member of this channel — ask a workspace admin to add this cybo");
-          return;
-        }
-        // Humans come from getChannelMembers (innerJoins users — cybo rows are
-        // DROPPED there), so cybos MUST be unioned in separately from
-        // getChannelCyboMembers and resolved to their display name/role via the
-        // workspace cybo roster.
-        const [humans, cyboIds, cybos] = await Promise.all([
-          this.pg.getChannelMembers(msg.channelId),
-          this.pg.getChannelCyboMembers(msg.channelId),
-          this.pg.getCybos(msg.workspaceId),
-        ]);
-        const cyboById = new Map(cybos.map((c) => [c.id, c]));
-        const reply: CyboReadResponse = {
-          type: "cybo_read_response",
-          requestId: msg.requestId,
-          ok: true,
-          members: [
-            ...humans.map((h) => ({
-              id: h.userId,
-              name: h.name,
-              role: h.role,
-              memberType: "user" as const,
-            })),
-            ...cyboIds.map((id) => ({
-              id,
-              name: cyboById.get(id)?.name ?? null,
-              role: cyboById.get(id)?.role ?? null,
-              memberType: "cybo" as const,
-            })),
-          ],
-        };
-        this.send(ws, reply);
+        // channel-scoped + membership-gated; extracted to keep handleCyboRead under
+        // the complexity cap (behavior unchanged).
+        await this.handleCyboMembersRead(ws, msg, fail);
         return;
       }
       if (msg.kind === "tasks") {
@@ -1199,6 +1178,147 @@ export class WorkspaceRelay {
     } catch (err) {
       fail(`cybo read failed: ${err instanceof Error ? err.message : String(err)}`);
     }
+  }
+
+  // Channel members read over the relay (kind:"members"). Channel-scoped +
+  // membership-gated (same fail-safe as history/search): a cybo can only list the
+  // members of a channel it has joined. Extracted verbatim from handleCyboRead.
+  private async handleCyboMembersRead(
+    ws: WebSocket,
+    msg: { requestId: string; workspaceId: string; cyboId: string; channelId?: string },
+    fail: (error: string) => void,
+  ): Promise<void> {
+    if (!this.pg) {
+      fail("cybo reads need the shared workspace store (relay has no PG)");
+      return;
+    }
+    if (!msg.channelId) {
+      fail("channelId required");
+      return;
+    }
+    const isMember = await this.pg.isCyboChannelMember(msg.channelId, msg.cyboId);
+    if (!isMember) {
+      fail("not a member of this channel — ask a workspace admin to add this cybo");
+      return;
+    }
+    // Humans come from getChannelMembers (innerJoins users — cybo rows are DROPPED
+    // there), so cybos MUST be unioned in separately from getChannelCyboMembers and
+    // resolved to their display name/role via the workspace cybo roster.
+    const [humans, cyboIds, cybos] = await Promise.all([
+      this.pg.getChannelMembers(msg.channelId),
+      this.pg.getChannelCyboMembers(msg.channelId),
+      this.pg.getCybos(msg.workspaceId),
+    ]);
+    const cyboById = new Map(cybos.map((c) => [c.id, c]));
+    this.send(ws, {
+      type: "cybo_read_response",
+      requestId: msg.requestId,
+      ok: true,
+      members: [
+        ...humans.map((h) => ({
+          id: h.userId,
+          name: h.name,
+          role: h.role,
+          memberType: "user" as const,
+        })),
+        ...cyboIds.map((id) => ({
+          id,
+          name: cyboById.get(id)?.name ?? null,
+          role: cyboById.get(id)?.role ?? null,
+          memberType: "cybo" as const,
+        })),
+      ],
+    } satisfies CyboReadResponse);
+  }
+
+  // Documented Pages read over the relay (kind:"pages" = list a project's pages;
+  // kind:"page" = read one page WITH its body). SECURITY (owner ACL): a cybo
+  // inherits its OWNER's page visibility — it must never see a project/page the
+  // owning user can't. Resolve the owner (cybos.created_by), confirm the owner is
+  // still a member (a cybo must not outlive its owner's access), then scope every
+  // read with the owner's id so getProjectPages applies its public/null-owner/
+  // own-owner filter — the SAME gate the UI's page reads apply for the human.
+  private async handleCyboPagesRead(
+    ws: WebSocket,
+    msg: {
+      requestId: string;
+      workspaceId: string;
+      cyboId: string;
+      projectId?: string;
+      pageId?: string;
+      // Only "pages"/"page" reach here; typed broad so the caller's narrowed union
+      // assigns without a cast.
+      kind: string;
+    },
+    fail: (error: string) => void,
+  ): Promise<void> {
+    if (!this.pg) {
+      fail("cybo reads need the shared workspace store (relay has no PG)");
+      return;
+    }
+    const ownerId = (await this.pg.getCybos(msg.workspaceId)).find(
+      (c) => c.id === msg.cyboId,
+    )?.created_by;
+    if (!ownerId) {
+      fail("cybo not found in this workspace");
+      return;
+    }
+    if (!(await this.pg.isMember(msg.workspaceId, ownerId))) {
+      fail("cybo owner is no longer a member of this workspace");
+      return;
+    }
+    if (msg.kind === "pages") {
+      if (!msg.projectId) {
+        fail("projectId required");
+        return;
+      }
+      // Project-level gate first (the owner must be able to SEE the project), then
+      // the page-level owner filter inside getProjectPages.
+      if (!(await this.pg.assertProjectVisible(msg.projectId, ownerId))) {
+        fail("project not found");
+        return;
+      }
+      const pages = await this.pg.getProjectPages(msg.projectId, ownerId);
+      this.send(ws, {
+        type: "cybo_read_response",
+        requestId: msg.requestId,
+        ok: true,
+        pages: pages.map((p) => ({ id: p.id, title: p.title, parentId: p.parentId, icon: p.icon })),
+      } satisfies CyboReadResponse);
+      return;
+    }
+    // kind === "page": read one page by id, gated by the SAME owner visibility.
+    if (!msg.pageId) {
+      fail("pageId required");
+      return;
+    }
+    const projectId = await this.pg.getPageProjectId(msg.pageId);
+    if (!projectId || !(await this.pg.assertProjectVisible(projectId, ownerId))) {
+      fail("page not found in this workspace");
+      return;
+    }
+    // getPageById applies NO page-level visibility filter, so resolve the page out of
+    // the OWNER-VISIBLE set (one query, no N+1) — a private page owned by another
+    // member is absent here and never leaks to the cybo.
+    const found = (await this.pg.getProjectPages(projectId, ownerId)).find(
+      (p) => p.id === msg.pageId,
+    );
+    if (!found) {
+      fail("page not found in this workspace");
+      return;
+    }
+    this.send(ws, {
+      type: "cybo_read_response",
+      requestId: msg.requestId,
+      ok: true,
+      page: {
+        id: found.id,
+        title: found.title,
+        content: found.content,
+        parentId: found.parentId,
+        icon: found.icon,
+      },
+    } satisfies CyboReadResponse);
   }
 
   // Resolve the WRITER identity, its task-creator attribution, and its project-

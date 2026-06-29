@@ -1778,6 +1778,29 @@ export async function createPaseoDaemon(
     type Cyborg7McpTransportMap = Map<string, InstanceType<typeof StreamableHTTPServerTransport>>;
     const cyborg7McpTransports: Cyborg7McpTransportMap = new Map();
 
+    // Tasks feature gate: the workspace has Tasks provisioned iff it has ≥1
+    // tasks_projects row. Resolve via the same chain the tools use — direct PG
+    // (connected daemon), the relay round-trip (cloud cybo; the only authoritative
+    // source when the daemon has no PG handle and a near-empty SQLite cache), then
+    // local SQLite (solo). Fail-OPEN: a transient relay/PG blip defaults to ENABLED
+    // so a Tasks workspace's task tools aren't stripped mid-conversation (the cybo
+    // tools degrade gracefully at execution); the external PAT server fails closed.
+    const resolveTasksEnabled = async (workspaceId: string, cyboId?: string): Promise<boolean> => {
+      try {
+        if (cyborgStorage.pg) {
+          return (await cyborgStorage.pg.getTasksProjects(workspaceId)).length > 0;
+        }
+        if (cyborgRelayClient && cyboId) {
+          const res = await cyborgRelayClient.cyboRead({ workspaceId, cyboId, kind: "projects" });
+          // null = relay unreachable → fail-open ENABLED; a definite answer decides.
+          return res ? res.ok && (res.projects?.length ?? 0) > 0 : true;
+        }
+        return cyborgStorage.sqlite.getTasksProjects(workspaceId).length > 0;
+      } catch {
+        return true;
+      }
+    };
+
     const createCyborg7McpTransport = async (workspaceId: string, agentId: string) => {
       // Real enforcement of the cybo's platform_permissions: resolve the agent's
       // cybo and only expose the cyborg7_* tools it's been granted. A non-cybo
@@ -1799,6 +1822,7 @@ export async function createPaseoDaemon(
           }
         }
       }
+      const tasksEnabled = await resolveTasksEnabled(workspaceId, binding?.cybo_id ?? undefined);
       const mcpServer = createCyborg7McpServer(
         {
           storage: cyborgStorage,
@@ -1832,6 +1856,8 @@ export async function createPaseoDaemon(
           // The channel this agent is bound to, so create_task can auto-resolve the
           // channel's Tasks-project when the cybo doesn't pass an explicit channelId.
           channelId: binding?.channel_id ?? undefined,
+          // Withhold the task + Page tools when the workspace has no Tasks provisioned.
+          tasksEnabled,
         },
       );
 

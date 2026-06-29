@@ -41,6 +41,13 @@ export interface Cyborg7McpContext {
   // falls back to this when the caller passes no channelId, so a channel-bound
   // cybo's tasks file under that channel's Tasks-project instead of the Inbox.
   channelId?: string;
+  // Whether the Tasks feature is provisioned for this workspace (the authoritative
+  // signal is "the workspace has ≥1 tasks_projects row"; resolved in bootstrap.ts).
+  // When false the task tools (list/create/update/archive/delete/bulk + list_projects)
+  // AND the Page read tools (list_pages/read_page) are NOT registered, since pages
+  // are part of Tasks. OMITTED defaults to ENABLED (bootstrap always passes the real
+  // value, so the default only affects unit tests that don't exercise the gate).
+  tasksEnabled?: boolean;
 }
 
 export interface Cyborg7McpDeps {
@@ -53,9 +60,20 @@ export interface Cyborg7McpDeps {
   cyboRead?: (req: {
     workspaceId: string;
     cyboId: string;
-    kind: "channels" | "history" | "search" | "tasks" | "members" | "roster" | "projects";
+    kind:
+      | "channels"
+      | "history"
+      | "search"
+      | "tasks"
+      | "members"
+      | "roster"
+      | "projects"
+      | "pages"
+      | "page";
     channelId?: string;
     limit?: number;
+    // kind:"page" — the page id to read.
+    pageId?: string;
     query?: string;
     status?: string;
     assigneeId?: string;
@@ -110,6 +128,23 @@ export interface Cyborg7McpDeps {
       isInbox: boolean;
       chatProjectId: string | null;
     }[];
+    // kind:"pages" — a Tasks-project's pages VISIBLE to the cybo's owner, as a
+    // compact hierarchy projection (no body). `parentId` null = a root page.
+    pages?: {
+      id: string;
+      title: string;
+      parentId: string | null;
+      icon: string | null;
+    }[];
+    // kind:"page" — a single page WITH its body content, owner-visibility gated.
+    // null when missing/hidden.
+    page?: {
+      id: string;
+      title: string;
+      content: string;
+      parentId: string | null;
+      icon: string | null;
+    } | null;
   } | null>;
   // Relay round-trip for cloud-workspace task WRITES — same rationale: a cloud
   // daemon's local task write never reaches the shared PG the UI reads. null =
@@ -262,6 +297,11 @@ export function createCyborg7McpServer(deps: Cyborg7McpDeps, ctx: Cyborg7McpCont
       : null;
   // granted set → only listed grants; no grants → unrestricted (lax) or deny (strict).
   const allows = (permission: string): boolean => (granted ? granted.has(permission) : !strict);
+
+  // Tasks feature gate (see Cyborg7McpContext.tasksEnabled). Pages are part of Tasks,
+  // so both the task tools and the Page read tools hang off this single flag, on top
+  // of any `allows()` platform-permission check. Defaults to on.
+  const tasksEnabled = ctx.tasksEnabled !== false;
 
   const mcpText = (s: string) => ({ content: [{ type: "text" as const, text: s }] });
 
@@ -696,7 +736,7 @@ export function createCyborg7McpServer(deps: Cyborg7McpDeps, ctx: Cyborg7McpCont
     },
   );
 
-  if (allows("create_task")) {
+  if (tasksEnabled && allows("create_task")) {
     server.tool(
       "cyborg7_create_task",
       "Create a task in the workspace. Only title is required; every other field is " +
@@ -866,126 +906,255 @@ export function createCyborg7McpServer(deps: Cyborg7McpDeps, ctx: Cyborg7McpCont
     );
   }
 
-  server.tool(
-    "cyborg7_list_tasks",
-    "List tasks in the workspace. Filter by status, assignee, project, workflow " +
-      "state, priority, or label. Each line shows the per-project sequence id, state/" +
-      "priority, and any label/module ids.",
-    {
-      status: z
-        .string()
-        .optional()
-        .describe("Filter by status: todo | in_progress | pending_review | done"),
-      assignee: z
-        .string()
-        .optional()
-        .describe("Filter by assignee ID (a human userId or a cybo id)"),
-      // Tasks Redesign (Plane-style) — additive filters, all optional. Honored on
-      // cloud workspaces (the relay's richer task read); the local fallback only
-      // filters on status/assignee.
-      projectId: z.string().optional().describe("Filter to a Tasks-project by id"),
-      state: z
-        .string()
-        .optional()
-        .describe("Filter by workflow-state id or name within the project's catalog"),
-      priority: z
-        .enum(["urgent", "high", "medium", "low", "none"])
-        .optional()
-        .describe("Filter by priority"),
-      label: z.string().optional().describe("Filter by label NAME"),
-    },
-    async ({ status, assignee, projectId, state, priority, label }) => {
-      let tasks: Awaited<ReturnType<typeof readTasks>>;
-      try {
-        tasks = await readTasks({
-          status: status ?? undefined,
-          assigneeId: assignee ?? undefined,
-          projectId: projectId ?? undefined,
-          state: state ?? undefined,
-          priority: priority ?? undefined,
-          label: label ?? undefined,
-        });
-      } catch (err) {
-        return mcpText(`Error: ${err instanceof Error ? err.message : "could not list tasks"}`);
-      }
-
-      const formatted = tasks
-        .map((t) => {
-          // Prefer the per-project sequence id (the human-facing handle); fall back
-          // to the raw task id on an old relay that doesn't carry one.
-          const handle = t.sequence_id != null ? `#${t.sequence_id}` : t.id;
-          const meta: string[] = [];
-          if (t.priority && t.priority !== "none") meta.push(`prio:${t.priority}`);
-          if (t.assignee_id) meta.push(`-> ${t.assignee_id}`);
-          if (t.label_ids && t.label_ids.length > 0) meta.push(`labels:${t.label_ids.join(",")}`);
-          if (t.module_ids && t.module_ids.length > 0)
-            meta.push(`modules:${t.module_ids.join(",")}`);
-          const suffix = meta.length > 0 ? ` (${meta.join("; ")})` : "";
-          return `[${t.status}] ${handle}: ${t.title}${suffix}`;
-        })
-        .join("\n");
-
-      return { content: [{ type: "text" as const, text: formatted || "(no tasks)" }] };
-    },
-  );
-
-  server.tool(
-    "cyborg7_list_projects",
-    "List the workspace's Tasks-projects — the buckets a task can be filed under. " +
-      "Call this BEFORE cyborg7_create_task whenever you're unsure which project a task " +
-      "belongs to: pick the entry whose work matches and pass its `id` as create_task's " +
-      "`projectId`. The entry with `isInbox: true` is the workspace catch-all for tasks " +
-      "with no channel or project. Each entry carries its short `identifier` (the task-" +
-      "key prefix, e.g. ENG) and human `name`. Returns a JSON array of " +
-      "{ id, identifier, name, color, isInbox, chatProjectId }.",
-    {
-      includeArchived: z
-        .boolean()
-        .optional()
-        .describe("Include archived projects. Defaults to false (active projects only)."),
-    },
-    async ({ includeArchived }) => {
-      // Same connected-vs-solo resolution as cyborg7_list_tasks/readTasks: a CLOUD
-      // workspace's Tasks-projects live ONLY in the relay's PG (this daemon has no
-      // DATABASE_URL and its local SQLite catalog is near-empty), so a cybo on a
-      // cloud daemon round-trips to the relay's cyboRead "projects" kind — which
-      // returns the SAME enriched shape ({ id, identifier, name, color, isInbox,
-      // chatProjectId }) the UI/board read from the shared PG. On a relay miss
-      // (unreachable / old relay → null) we fall through cleanly to the local SQLite
-      // catalog below (solo mode, or a seeded cache). NOTE: the relay's projects
-      // read returns the workspace's full set (its response carries no archived
-      // flag), so `includeArchived` narrows only the local fallback.
-      try {
-        if (cyboRead && ctx.cyboId) {
-          const res = await cyboRead({
-            workspaceId: ctx.workspaceId,
-            cyboId: ctx.cyboId,
-            kind: "projects",
+  // Task READ tools — gated on the workspace having Tasks provisioned (a non-Tasks
+  // workspace exposes neither the read nor the write task surface).
+  if (tasksEnabled)
+    server.tool(
+      "cyborg7_list_tasks",
+      "List tasks in the workspace. Filter by status, assignee, project, workflow " +
+        "state, priority, or label. Each line shows the per-project sequence id, state/" +
+        "priority, and any label/module ids.",
+      {
+        status: z
+          .string()
+          .optional()
+          .describe("Filter by status: todo | in_progress | pending_review | done"),
+        assignee: z
+          .string()
+          .optional()
+          .describe("Filter by assignee ID (a human userId or a cybo id)"),
+        // Tasks Redesign (Plane-style) — additive filters, all optional. Honored on
+        // cloud workspaces (the relay's richer task read); the local fallback only
+        // filters on status/assignee.
+        projectId: z.string().optional().describe("Filter to a Tasks-project by id"),
+        state: z
+          .string()
+          .optional()
+          .describe("Filter by workflow-state id or name within the project's catalog"),
+        priority: z
+          .enum(["urgent", "high", "medium", "low", "none"])
+          .optional()
+          .describe("Filter by priority"),
+        label: z.string().optional().describe("Filter by label NAME"),
+      },
+      async ({ status, assignee, projectId, state, priority, label }) => {
+        let tasks: Awaited<ReturnType<typeof readTasks>>;
+        try {
+          tasks = await readTasks({
+            status: status ?? undefined,
+            assigneeId: assignee ?? undefined,
+            projectId: projectId ?? undefined,
+            state: state ?? undefined,
+            priority: priority ?? undefined,
+            label: label ?? undefined,
           });
-          if (res) {
-            if (!res.ok) throw new Error(res.error ?? "relay read failed");
-            return mcpText(JSON.stringify(res.projects ?? []));
-          }
-          // null = relay unreachable / old relay — fall through to local SQLite.
+        } catch (err) {
+          return mcpText(`Error: ${err instanceof Error ? err.message : "could not list tasks"}`);
         }
-        // Local Tasks-project catalog. tasks_projects has no name column — the
-        // display name is the linked chat project's name (chat_project_id ->
-        // projects.name), or "Inbox" for the synthetic catch-all (chat_project_id
-        // null). Build the lookup once.
-        const nameById = new Map(
-          storage.getProjects(ctx.workspaceId).map((p) => [p.id, p.name] as [string, string]),
-        );
-        const out = buildTasksProjectList(
-          storage.sqlite.getTasksProjects(ctx.workspaceId),
-          nameById,
-          includeArchived ?? false,
-        );
-        return mcpText(JSON.stringify(out));
-      } catch (err) {
-        return mcpText(`Error: ${err instanceof Error ? err.message : "could not list projects"}`);
+
+        const formatted = tasks
+          .map((t) => {
+            // Prefer the per-project sequence id (the human-facing handle); fall back
+            // to the raw task id on an old relay that doesn't carry one.
+            const handle = t.sequence_id != null ? `#${t.sequence_id}` : t.id;
+            const meta: string[] = [];
+            if (t.priority && t.priority !== "none") meta.push(`prio:${t.priority}`);
+            if (t.assignee_id) meta.push(`-> ${t.assignee_id}`);
+            if (t.label_ids && t.label_ids.length > 0) meta.push(`labels:${t.label_ids.join(",")}`);
+            if (t.module_ids && t.module_ids.length > 0)
+              meta.push(`modules:${t.module_ids.join(",")}`);
+            const suffix = meta.length > 0 ? ` (${meta.join("; ")})` : "";
+            return `[${t.status}] ${handle}: ${t.title}${suffix}`;
+          })
+          .join("\n");
+
+        return { content: [{ type: "text" as const, text: formatted || "(no tasks)" }] };
+      },
+    );
+
+  if (tasksEnabled)
+    server.tool(
+      "cyborg7_list_projects",
+      "List the workspace's Tasks-projects — the buckets a task can be filed under. " +
+        "Call this BEFORE cyborg7_create_task whenever you're unsure which project a task " +
+        "belongs to: pick the entry whose work matches and pass its `id` as create_task's " +
+        "`projectId`. The entry with `isInbox: true` is the workspace catch-all for tasks " +
+        "with no channel or project. Each entry carries its short `identifier` (the task-" +
+        "key prefix, e.g. ENG) and human `name`. Returns a JSON array of " +
+        "{ id, identifier, name, color, isInbox, chatProjectId }.",
+      {
+        includeArchived: z
+          .boolean()
+          .optional()
+          .describe("Include archived projects. Defaults to false (active projects only)."),
+      },
+      async ({ includeArchived }) => {
+        // Same connected-vs-solo resolution as cyborg7_list_tasks/readTasks: a CLOUD
+        // workspace's Tasks-projects live ONLY in the relay's PG (this daemon has no
+        // DATABASE_URL and its local SQLite catalog is near-empty), so a cybo on a
+        // cloud daemon round-trips to the relay's cyboRead "projects" kind — which
+        // returns the SAME enriched shape ({ id, identifier, name, color, isInbox,
+        // chatProjectId }) the UI/board read from the shared PG. On a relay miss
+        // (unreachable / old relay → null) we fall through cleanly to the local SQLite
+        // catalog below (solo mode, or a seeded cache). NOTE: the relay's projects
+        // read returns the workspace's full set (its response carries no archived
+        // flag), so `includeArchived` narrows only the local fallback.
+        try {
+          if (cyboRead && ctx.cyboId) {
+            const res = await cyboRead({
+              workspaceId: ctx.workspaceId,
+              cyboId: ctx.cyboId,
+              kind: "projects",
+            });
+            if (res) {
+              if (!res.ok) throw new Error(res.error ?? "relay read failed");
+              return mcpText(JSON.stringify(res.projects ?? []));
+            }
+            // null = relay unreachable / old relay — fall through to local SQLite.
+          }
+          // Local Tasks-project catalog. tasks_projects has no name column — the
+          // display name is the linked chat project's name (chat_project_id ->
+          // projects.name), or "Inbox" for the synthetic catch-all (chat_project_id
+          // null). Build the lookup once.
+          const nameById = new Map(
+            storage.getProjects(ctx.workspaceId).map((p) => [p.id, p.name] as [string, string]),
+          );
+          const out = buildTasksProjectList(
+            storage.sqlite.getTasksProjects(ctx.workspaceId),
+            nameById,
+            includeArchived ?? false,
+          );
+          return mcpText(JSON.stringify(out));
+        } catch (err) {
+          return mcpText(
+            `Error: ${err instanceof Error ? err.message : "could not list projects"}`,
+          );
+        }
+      },
+    );
+
+  // ─── Documented Pages (read-only) ───────────────────────────────────
+  //
+  // When Tasks is enabled a cybo can READ the workspace's Pages (docs): list a
+  // project's page hierarchy and read a page's body. Resolution mirrors the task
+  // reads — relay round-trip (cloud; owner-visibility gated relay-side) → direct PG
+  // → local SQLite (solo). READ-ONLY: a cybo never creates/updates/deletes a page
+  // through this MCP. Owner ACL: a cybo inherits its OWNER's page visibility, so a
+  // private page owned by another member is never surfaced.
+  if (tasksEnabled) {
+    interface PageBrief {
+      id: string;
+      title: string;
+      parentId: string | null;
+      icon: string | null;
+    }
+    const briefOf = (p: {
+      id: string;
+      title: string;
+      parentId: string | null;
+      icon: string | null;
+    }): PageBrief => ({ id: p.id, title: p.title, parentId: p.parentId, icon: p.icon });
+
+    const readProjectPages = async (projectId: string): Promise<PageBrief[]> => {
+      if (cyboRead && ctx.cyboId) {
+        const res = await cyboRead({
+          workspaceId: ctx.workspaceId,
+          cyboId: ctx.cyboId,
+          kind: "pages",
+          projectId,
+        });
+        if (res) {
+          if (!res.ok) throw new Error(res.error ?? "relay read failed");
+          return res.pages ?? [];
+        }
+        // null = relay unreachable — fall through to local stores.
       }
-    },
-  );
+      if (storage.pg) {
+        // Direct-PG daemon: gate the project for the cybo, then return the public +
+        // null-owner pages. A cybo owns no pages, so passing its id yields exactly
+        // that safe subset (never another member's private page).
+        if (ctx.cyboId && !(await storage.pg.assertProjectVisibleForCybo(projectId, ctx.cyboId))) {
+          throw new Error("project not found");
+        }
+        const pages = await storage.pg.getProjectPages(projectId, ctx.cyboId ?? ctx.agentId);
+        return pages.map(briefOf);
+      }
+      // Solo (local SQLite): channels are workspace-visible locally, so the read
+      // applies only its public/null-owner/own-owner filter.
+      return storage.getProjectPages(projectId, ctx.cyboId ?? ctx.agentId).map(briefOf);
+    };
+
+    server.tool(
+      "cyborg7_list_pages",
+      "List the documented Pages (docs/wiki) in a Tasks-project as a flat hierarchy. " +
+        "Each entry is { id, title, parentId, icon } — parentId null means a root page; " +
+        "follow parentId to reconstruct the tree. Pass a page id to cyborg7_read_page to " +
+        "read its body. Use cyborg7_list_projects first to find the projectId.",
+      {
+        projectId: z.string().describe("The Tasks-project id whose pages to list"),
+      },
+      async ({ projectId }) => {
+        try {
+          return mcpText(JSON.stringify(await readProjectPages(projectId)));
+        } catch (err) {
+          return mcpText(`Error: ${err instanceof Error ? err.message : "could not list pages"}`);
+        }
+      },
+    );
+
+    interface PageFull extends PageBrief {
+      content: string;
+    }
+    const readOnePage = async (pageId: string): Promise<PageFull | null> => {
+      if (cyboRead && ctx.cyboId) {
+        const res = await cyboRead({
+          workspaceId: ctx.workspaceId,
+          cyboId: ctx.cyboId,
+          kind: "page",
+          pageId,
+        });
+        if (res) {
+          if (!res.ok) throw new Error(res.error ?? "relay read failed");
+          return res.page ?? null;
+        }
+        // null = relay unreachable — fall through to local stores.
+      }
+      if (storage.pg) {
+        const projectId = await storage.pg.getPageProjectId(pageId);
+        if (!projectId) return null;
+        if (ctx.cyboId && !(await storage.pg.assertProjectVisibleForCybo(projectId, ctx.cyboId))) {
+          return null;
+        }
+        // getPageById applies no page-level visibility filter — resolve the page out
+        // of the OWNER-VISIBLE set (one query, no N+1) so a private page never leaks.
+        const visible = await storage.pg.getProjectPages(projectId, ctx.cyboId ?? ctx.agentId);
+        const found = visible.find((p) => p.id === pageId);
+        return found ? { ...briefOf(found), content: found.content } : null;
+      }
+      // Solo: anchor the page to this workspace.
+      const page = storage.getPage(pageId);
+      if (!page || page.workspaceId !== ctx.workspaceId) return null;
+      return { ...briefOf(page), content: page.content };
+    };
+
+    server.tool(
+      "cyborg7_read_page",
+      "Read a single documented Page (doc) by id, including its body content. Get a " +
+        "page id from cyborg7_list_pages. Returns { id, title, content, parentId, icon }.",
+      {
+        pageId: z.string().describe("The page id to read (from cyborg7_list_pages)"),
+      },
+      async ({ pageId }) => {
+        try {
+          const page = await readOnePage(pageId);
+          if (!page) return mcpText(`Error: page '${pageId}' not found in this workspace`);
+          return mcpText(JSON.stringify(page));
+        } catch (err) {
+          return mcpText(`Error: ${err instanceof Error ? err.message : "could not read page"}`);
+        }
+      },
+    );
+  }
 
   // ─── Cross-session context (cybo recall) — OWNER-SCOPED reads ───────
   //
@@ -1109,7 +1278,7 @@ export function createCyborg7McpServer(deps: Cyborg7McpDeps, ctx: Cyborg7McpCont
     );
   }
 
-  if (allows("create_task")) {
+  if (tasksEnabled && allows("create_task")) {
     server.tool(
       "cyborg7_update_task",
       "Update a task: change its board status/state, (re)assign it, re-prioritize, " +
@@ -1331,7 +1500,7 @@ export function createCyborg7McpServer(deps: Cyborg7McpDeps, ctx: Cyborg7McpCont
   // existing create_task grant — no new permission. Each op is workspace-anchored
   // (IDOR guard, the #920 lesson) on BOTH paths: cloud via the relay's per-task
   // anchor in handleCyboWrite, solo via getTaskById + a workspace_id check.
-  if (allows("create_task")) {
+  if (tasksEnabled && allows("create_task")) {
     server.tool(
       "cyborg7_archive_task",
       "Archive (or restore) a task. Archived tasks are hidden from the active board " +
