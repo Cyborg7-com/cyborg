@@ -1,0 +1,71 @@
+name: Feature request
+description: Suggest a new feature or an improvement to Cyborg7
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to suggest an improvement.
+
+        Feature requests describe something Cyborg7 should be able to do. If you
+        have a usage question or need help getting something working, please open
+        a [Discussion](../../discussions) instead — this form is not for support.
+
+        Before opening a new request, please **search existing issues and
+        discussions** (open and closed) to avoid duplicates.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Describe the problem or motivation behind this request. What are you trying to do, and what gets in the way today?
+      placeholder: |
+        I'm always frustrated when ...
+        Today there is no way to ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: A clear and concise description of what you want to happen.
+      placeholder: Describe the feature or change you'd like to see.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Any alternative solutions or workarounds you've considered.
+      placeholder: I also looked at ...
+    validations:
+      required: false
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part?
+      description: The area of Cyborg7 this request applies to.
+      options:
+        - Daemon/Server
+        - UI
+        - Relay
+        - CLI
+        - Cybo runner
+        - Desktop
+        - Docs
+        - Other
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: before-submitting
+    attributes:
+      label: Before submitting
+      options:
+        - label: I have searched existing issues and discussions and this is not a duplicate.
+          required: true
+        - label: This is a feature request, not a support question (support goes to [Discussions](../../discussions)).
+          required: true

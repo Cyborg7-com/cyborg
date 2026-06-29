@@ -1,0 +1,17 @@
+-- 0023_workspace_agent_autonomy.sql
+-- Per-workspace agent-autonomy switch (DEFAULT ON).
+--
+-- Additive + IDEMPOTENT (ADD COLUMN IF NOT EXISTS), matching the repo's
+-- hand-applied-prod convention — see 0016_workspace_disable.sql /
+-- 0022_tasks_watcher_dispatch.sql. Hand-authored because drizzle-kit generate is
+-- blocked by the pre-existing 0008/0009/0010 snapshot collision; the runtime
+-- migrator applies plain .sql + _journal.json. Safe to run twice.
+--
+-- The new nullable column defaults to NULL so every existing workspace stays
+-- byte-identical (NULL/true = autonomy ON, today's behavior); only an explicit
+-- false turns the channel watcher off. The getter is `!== false`, so old rows
+-- keep autonomy and the OLD relay tolerates the column.
+--
+-- The 0023 journal `when` is stamped ABOVE the live DB's max applied `when`
+-- (0022 = 1782800000000) so the stock migrator never silently skips it on prod.
+ALTER TABLE "workspaces" ADD COLUMN IF NOT EXISTS "agent_autonomy_enabled" boolean;

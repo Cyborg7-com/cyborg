@@ -1,0 +1,300 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1781117992203,
+      "tag": "0000_init",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1781118488396,
+      "tag": "0001_message_search_tsv",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1781207551859,
+      "tag": "0002_webhooks_and_message_card",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1781306225629,
+      "tag": "0003_daemon_label_user_set",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1781560639533,
+      "tag": "0004_schedule_runs_and_lifecycle",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1781625123604,
+      "tag": "0005_daemon_access_scopes",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1781712000000,
+      "tag": "0006_webhook_cybo_triggers",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1781798400000,
+      "tag": "0008_drafts",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1781798400000,
+      "tag": "0009_saved_messages",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1781798400000,
+      "tag": "0010_scheduled_messages",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1782000000000,
+      "tag": "0011_archived_session_resumed_agent",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1781884800000,
+      "tag": "0012_outgoing_webhooks",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1781884800000,
+      "tag": "0013_prompt_templates",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1781884800000,
+      "tag": "0014_group_dm_channels",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1782300000000,
+      "tag": "0015_superadmin",
+      "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "7",
+      "when": 1782400000000,
+      "tag": "0016_workspace_disable",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1781815897199,
+      "tag": "0017_license_pools_allocations",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1782500000000,
+      "tag": "0018_daemon_deployment_edition",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1782600000000,
+      "tag": "0019_webauthn_passkeys",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1782700000000,
+      "tag": "0020_backfill_orphan_workspace_memberships",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1782700000001,
+      "tag": "0021_agent_session_usage",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1782800000000,
+      "tag": "0022_tasks_watcher_dispatch",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1782900000000,
+      "tag": "0023_workspace_agent_autonomy",
+      "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1783000000000,
+      "tag": "0024_tasks_sort_archive_draft_startdate",
+      "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1783000001000,
+      "tag": "0025_token_usage_daily",
+      "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1783000002000,
+      "tag": "0026_backfill_token_usage_daily",
+      "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1783000003000,
+      "tag": "0027_agent_sessions_cybo_index",
+      "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "7",
+      "when": 1783000004000,
+      "tag": "0028_daemon_access_requests",
+      "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1783000005000,
+      "tag": "0029_tasks_projects_states",
+      "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1783000006000,
+      "tag": "0030_task_satellites",
+      "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "7",
+      "when": 1783000007000,
+      "tag": "0031_cycles_modules",
+      "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1783000008000,
+      "tag": "0032_backfill_projects_states",
+      "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1783000009000,
+      "tag": "0033_terminal_aliases",
+      "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1783000010000,
+      "tag": "0034_github_sync",
+      "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1783000012000,
+      "tag": "0035_schedules_task_id",
+      "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "7",
+      "when": 1783000013000,
+      "tag": "0036_persist_agent_bindings",
+      "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1783000014000,
+      "tag": "0037_tasks_pages",
+      "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1783000015000,
+      "tag": "0038_tasks_pages_icon",
+      "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1783000016000,
+      "tag": "0039_github_bidirectional_pr",
+      "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "7",
+      "when": 1783000017000,
+      "tag": "0040_cybo_home_daemon",
+      "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1783000018000,
+      "tag": "0041_autonomy_dials",
+      "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "7",
+      "when": 1783000019000,
+      "tag": "0042_tasks_pages_nesting",
+      "breakpoints": true
+    }
+  ]
+}

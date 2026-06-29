@@ -1,0 +1,1 @@
+ALTER TABLE "daemons" ADD COLUMN "label_user_set" boolean DEFAULT false NOT NULL;

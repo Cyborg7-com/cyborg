@@ -1,0 +1,38 @@
+{
+  "name": "@cyborg7/cybo",
+  "version": "0.2.6",
+  "private": false,
+  "description": "Standalone runtime for Cybo agents — powered by PI, runs without a daemon",
+  "license": "MIT",
+  "bin": {
+    "cybo": "cybo.mjs",
+    "pi": "pi.mjs"
+  },
+  "files": [
+    "dist",
+    "cybo.mjs",
+    "pi.mjs",
+    "docs",
+    "README.md"
+  ],
+  "type": "module",
+  "main": "dist/index.js",
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "tsc"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "^0.78.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.9.0",
+    "typescript": "^5.8.3"
+  },
+  "engines": {
+    "node": ">=20.19"
+  }
+}

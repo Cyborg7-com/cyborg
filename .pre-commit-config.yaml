@@ -1,0 +1,21 @@
+# Pre-commit secret-scanning gate (TruffleHog).
+#
+# Install once:   pipx install pre-commit && pre-commit install
+# Run manually:   pre-commit run --all-files
+#
+# This complements the existing lefthook hooks (oxlint/oxfmt) — it does not
+# replace them. TruffleHog scans the staged diff and FAILS the commit if it
+# finds a VERIFIED secret (a live, provider-validated credential), so a real
+# secret can never be committed to either the private or the public repo.
+repos:
+  - repo: https://github.com/trufflesecurity/trufflehog
+    rev: v3.95.5
+    hooks:
+      - id: trufflehog
+        name: TruffleHog (verified secrets)
+        # Scan the staged files the pre-commit framework passes in, and fail on a
+        # verified hit. (`git --since-commit HEAD` would scan commits AFTER HEAD —
+        # none exist at pre-commit time — silently skipping staged secrets.)
+        entry: trufflehog filesystem --no-update --fail --only-verified
+        language: system
+        stages: ["pre-commit", "pre-push"]

@@ -1,0 +1,7 @@
+dist/
+release/
+node_modules/
+daemon-resources/
+# Compiled from main.ts by `tsc` (package.json main = dist/main.js). The stale
+# tracked root main.js was removed (#187) — never re-commit a build artifact here.
+main.js

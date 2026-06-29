@@ -1,0 +1,96 @@
+npmRebuild: false
+nodeGypRebuild: false
+buildDependenciesFromSource: false
+appId: dev.cyborg7.desktop
+productName: Cyborg
+executableName: Cyborg
+afterPack: ./after-pack.cjs
+directories:
+  output: release
+files:
+  - dist/**/*
+asarUnpack:
+  - dist/daemon-entrypoint-runner.js
+  # Native N-API module for the embedded Set-up-Cybo terminal (main-process pty)
+  # — .node binaries can't load from inside the asar.
+  - "**/node_modules/node-pty/**"
+extraResources:
+  - from: ../ui/build
+    to: ui
+# Auto-update source. The code repo is private, so releases (latest-mac.yml +
+# .zip + blockmap) are published to a SEPARATE PUBLIC repo that electron-updater
+# can read without an embedded token. CI publishes here with a PAT (PUBLIC_RELEASE_TOKEN).
+publish:
+  provider: github
+  owner: Cyborg7-com
+  repo: cyborg7-releases
+  # `release` (NOT prerelease) so the desktop build wins GitHub's /releases/latest
+  # AND electron-updater (which skips prereleases by default) actually offers it.
+  # Android releases are marked --prerelease so the APK can't hijack /latest.
+  releaseType: release
+mac:
+  # Version-LESS, STABLE filename so the landing page + in-app download gate can link
+  # to a never-404 URL (the v1 trick):
+  #   …/cyborg7-releases/releases/latest/download/Cyborg-mac-arm64.dmg
+  # electron-builder regenerates latest-mac.yml to match each build, so auto-update
+  # is unaffected; previously-published releases keep their old versioned names.
+  artifactName: "Cyborg-mac-${arch}.${ext}"
+  category: public.app-category.developer-tools
+  icon: assets/icon.icns
+  # Code signing + notarization — required for macOS to INSTALL auto-updates
+  # (Squirrel.Mac validates the signature). Driven by CI secrets: CSC_LINK,
+  # CSC_KEY_PASSWORD (Developer ID cert .p12) and APPLE_ID,
+  # APPLE_APP_SPECIFIC_PASSWORD, APPLE_TEAM_ID (notarytool).
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: entitlements.mac.plist
+  entitlementsInherit: entitlements.mac.inherit.plist
+  notarize: true
+  target:
+    - dmg
+    - zip
+linux:
+  category: Development
+  icon: assets
+  artifactName: "Cyborg-${version}-${arch}.${ext}"
+  target:
+    - AppImage
+    - tar.gz
+win:
+  # Version-LESS, STABLE filename for the always-latest URL (matches the mac side):
+  #   …/cyborg7-releases/releases/latest/download/Cyborg-Setup-Windows-x64.exe
+  # "Windows" stays in the name so users can tell installers apart at a glance.
+  # electron-builder regenerates latest.yml to match, so auto-update is unaffected.
+  # NOTE: unsigned for now (SmartScreen warns) — see signWindows step in the workflow.
+  artifactName: "Cyborg-Setup-Windows-${arch}.${ext}"
+  icon: assets/icon.ico
+  # x64 only: Windows-on-ARM is rare and the second arch doubles build time +
+  # also emits a combined multi-arch installer (~2x size). Re-add arm64 if asked for.
+  target:
+    - target: nsis
+      arch:
+        - x64
+    - target: portable
+      arch:
+        - x64
+nsis:
+  # One-click, per-user, silent — the Claude/VSCode/Discord update experience.
+  # oneClick:true removes the assisted wizard (the "Choose Installation Options"
+  # page) entirely AND makes the installer force-close running instances by exe
+  # name instead of showing the "Cyborg cannot be closed — Retry?" loop. Combined
+  # with quitAndInstall(isSilent=true) in main.ts, clicking "Restart & install"
+  # updates with NO Windows-default UI. perMachine:false keeps it in
+  # %LOCALAPPDATA%\Programs\Cyborg with no UAC prompt.
+  oneClick: true
+  perMachine: false
+  # allowToChangeInstallationDirectory is incompatible with oneClick:true and is
+  # removed — a silent updater must never pause to ask for an install path.
+  # customInit/customUnInit macros kill any lingering daemon `Cyborg.exe` tree
+  # before the old uninstaller runs — fixes "Failed to uninstall old application
+  # files .: 2" during auto-update. See build/installer.nsh.
+  include: build/installer.nsh
+portable:
+  # Standalone "no install, no admin, just run" .exe. Stable always-latest name
+  # mirroring the installer: …/releases/latest/download/Cyborg-Portable-Windows-x64.exe.
+  # The win-level artifactName above names the INSTALLER; portable overrides it here.
+  artifactName: "Cyborg-Portable-Windows-${arch}.${ext}"

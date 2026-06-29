@@ -1,0 +1,12 @@
+-- tasks_pages.icon: an optional page icon (a single emoji glyph the author
+-- picks — Plane's page logo). Null = no custom icon (the default page glyph
+-- renders). Mirrored in the pages list + the page editor header.
+--
+-- Additive + backward-compatible + IDEMPOTENT (ADD COLUMN IF NOT EXISTS),
+-- matching the repo's hand-applied-prod convention — see 0033_terminal_aliases.sql
+-- / 0037_tasks_pages.sql and drizzle/RUNBOOK.md. The runtime migrator applies
+-- plain .sql + _journal.json. Safe no-op on a DB that already has the column.
+--
+-- BACK-COMPAT: a brand-new nullable column read by nothing pre-existing; old rows
+-- get NULL (no icon), which the UI renders as the default page glyph.
+ALTER TABLE "tasks_pages" ADD COLUMN IF NOT EXISTS "icon" text;

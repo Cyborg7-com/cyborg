@@ -1,0 +1,1812 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is([data-theme="dark"] *));
+
+/* ─── Tailwind v4 Theme Tokens ─────────────────────────────────────────────── */
+@theme inline {
+  /* ─── shadcn-svelte color bridge ─── */
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--sn-primary);
+  --color-primary-foreground: var(--sn-primary-foreground);
+  --color-secondary: var(--sn-secondary);
+  --color-secondary-foreground: var(--sn-secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--c7-accent);
+  --color-accent-foreground: #ffffff;
+  --color-sn-accent: var(--sn-accent);
+  --color-sn-accent-foreground: var(--sn-accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--sn-border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  /* shadcn sidebar tokens */
+  --color-sidebar-background: var(--bg-sidebar);
+  --color-sidebar-foreground: var(--sidebar-item);
+  --color-sidebar-primary: var(--sn-primary);
+  --color-sidebar-primary-foreground: var(--sn-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-active);
+  --color-sidebar-accent-foreground: var(--channel-gray);
+  --color-sidebar-border: var(--border);
+  --color-sidebar-ring: var(--ring);
+
+  /* shadcn radius tokens */
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+
+  /* ─── Cyborg7 custom tokens ─── */
+  --color-white: var(--primary);
+  --color-sidebar-gray: var(--sidebar-item);
+  --color-channel-gray: var(--channel-gray);
+  --color-icon-gray: var(--icon-gray);
+  --color-hover-gray: var(--hover-gray);
+
+  --color-surface: var(--bg-base);
+  --color-surface-alt: var(--bg-surface);
+  --color-raised: var(--bg-elevated);
+  --color-sidebar-bg: var(--bg-sidebar);
+  --color-deeper: var(--bg-deeper);
+  --color-deepest: var(--bg-deepest);
+
+  --color-edge: var(--border);
+  --color-edge-light: var(--border-light);
+  --color-edge-dim: var(--border-dim);
+  --color-avatar-ring: var(--avatar-ring);
+
+  --color-content: var(--text-primary);
+  --color-content-dim: var(--text-secondary);
+  --color-content-muted: var(--text-muted);
+
+  --color-accent-hover: var(--c7-accent-hover);
+
+  --color-teal: var(--brand-primary);
+  --color-teal-dark: var(--brand-primary-dark);
+  --color-teal-light: var(--brand-primary-light);
+  --color-teal-contrast: var(--brand-contrast);
+
+  --color-online: #3daa7c;
+  --color-error: #e01e5a;
+  --color-error-hover: #c4194e;
+  --color-warning: #e8ab5a;
+  --color-warning-hover: #f0b96a;
+  --color-pin: #f59e0b;
+  --color-link: #3b82f6;
+  --color-info: #67e8f9;
+  --color-review: #a78bfa;
+
+  /* Pinned-message tint (#509). The same gold as --color-warning — named
+     separately so the pin affordance reads semantically at the call site and
+     can diverge later without disturbing every warning surface. Derived, not a
+     second literal: same byte value as --color-warning above. */
+  --color-pinned: var(--color-warning);
+
+  /* ─── Consolidated success / error scale (#538) ────────────────────────────
+     ONE semantic green/red replacing the scattered #16a34a / rgba(22,163,74,…)
+     and #dc2626 / rgba(220,38,38,…) literals across components/**. These are
+     THEME-INDEPENDENT, fixed values (white-on-color pills over a dark image
+     scrim, status dots over arbitrary content) — they intentionally do NOT use
+     --color-error (#e01e5a, the Slack-red destructive accent) which is a
+     different red. *-rgb hold the raw channels so alpha variants stay
+     byte-identical via rgba(var(--…-rgb), α) instead of color-mix rounding.
+     Values equal the originals exactly: success #16a34a (22,163,74),
+     error #dc2626 (220,38,38). */
+  --color-success-rgb: 22, 163, 74;
+  --color-success: rgb(var(--color-success-rgb));
+  --color-error-strong-rgb: 220, 38, 38;
+  --color-error-strong: rgb(var(--color-error-strong-rgb));
+
+  --color-mention-text: var(--mention-text);
+  --color-mention-bg: var(--mention-bg);
+
+  --color-score-healthy: var(--score-healthy);
+  --color-score-warning: var(--score-warning);
+  --color-score-critical: var(--score-critical);
+
+  --color-focus-ring: var(--focus-ring);
+  --color-overlay-bg: var(--overlay-bg);
+  --color-border-subtle: var(--border-subtle);
+
+  /* Control scrim (#509): the fixed dark pill behind the floating round buttons
+     on the image preview/viewer. THEME-INDEPENDENT on purpose — these sit over a
+     dark image backdrop in both themes, so they must NOT follow --overlay-bg
+     (0.6 dark / 0.4 light), which would lighten them in the light theme. Same
+     byte value as the original inline rgba(0,0,0,0.6). The companion drop-shadow
+     matches the original rgba(0,0,0,0.4). */
+  --scrim-control: rgba(0, 0, 0, 0.6);
+  --scrim-control-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+
+  /* Shared 1px card/divider drop-shadow (#509/#538). Single source for the
+     repeated `box-shadow: 0 1px 2px rgba(0,0,0,0.04)` used on raised surfaces.
+     Same byte value as the inline literals it replaces. */
+  --shadow-divider: 0 1px 2px rgba(0, 0, 0, 0.04);
+
+  /* Tasks kanban-card elevation (Plane port). Bridges the per-theme
+     --task-card-shadow / -hover pairs (defined in the dark + light blocks
+     below) so Tailwind emits shadow-task-card / shadow-task-card-hover, consumed
+     ONLY by the Tasks surfaces as shadow-[var(--shadow-task-card)] /
+     hover:shadow-[var(--shadow-task-card-hover)]. Additive: --shadow-divider is
+     a flat 1px hairline (light-only), not a raised two-step card elevation that
+     reads in dark. The raw rgba lives in the source token (a SHADOW color, like
+     every other --*-shadow in this file) and is theme-paired so both modes are
+     tuned. No existing token is edited; no non-tasks surface consumes these. */
+  --shadow-task-card: var(--task-card-shadow);
+  --shadow-task-card-hover: var(--task-card-shadow-hover);
+
+  /* Tasks detail-panel ("peek") elevation (Plane port). Bridges the per-theme
+     --peek-shadow (dark + light blocks below) so Tailwind emits shadow-peek,
+     consumed ONLY by the Tasks peek surfaces as shadow-peek. A deeper, wider
+     drop than --shadow-task-card — the peek floats ABOVE the board, not on it. */
+  --shadow-peek: var(--peek-shadow);
+
+  /* ─── Tasks BOARD surfaces (Plane port) ────────────────────────────────────
+     BOARD-SCOPED surface tokens so ONLY the Tasks board adopts Plane's dark
+     board colorimetry — the global Slack shell tokens (--bg-base / --bg-surface
+     / --bg-elevated / --border*) stay untouched, so chat and the rest of the app
+     keep the existing surface look. Bridges the per-theme --tasks-board-*
+     sources (dark + light blocks below) to Tailwind so the board / column / card
+     classes in lib/tasks/ui.ts read them as bg-tasks-board / bg-tasks-column /
+     bg-tasks-card / border-tasks-card instead of the app-wide bg-surface /
+     bg-raised / border-edge. Plane's surface ladder: canvas (board) → surface-1
+     (column / list / toolbar) → layer-2 (card), with border-subtle on the card. */
+  --color-tasks-board-bg: var(--tasks-board-bg);
+  --color-tasks-column-bg: var(--tasks-column-bg);
+  --color-tasks-column-border: var(--tasks-column-border);
+  --color-tasks-card-bg: var(--tasks-card-bg);
+  --color-tasks-card-border: var(--tasks-card-border);
+  /* Selected layout button in the work-items view switcher. Plane gives the
+     active segment a translucent raised fill (bg-layer-transparent-active) over
+     the tray so it reads clearly SELECTED — a low-opacity white (dark) / black
+     (light) overlay. Consumed in lib/tasks/ui.ts segmentBtnActive as
+     bg-tasks-segment-active. */
+  --color-tasks-segment-active: var(--tasks-segment-active-bg);
+  /* Status group-header band (Plane list-group.tsx status <Row> = bg-layer-1, one
+     step off the body rows over the list surface). Consumed as
+     bg-tasks-group-header-bg by the LIST status group header in
+     lib/components/tasks/TasksList.svelte only. */
+  --color-tasks-group-header-bg: var(--tasks-group-header-bg);
+
+  /* ─── Tasks priority scale (Plane port) ────────────────────────────────────
+     Bridges the per-theme --priority-* source tokens (dark + light blocks
+     below) to Tailwind so the Tasks surfaces read them as text-priority-* /
+     bg-priority-* instead of any raw red/orange/amber/blue. Five functional
+     levels: urgent → high → medium → low → none (the quiet grey). */
+  --color-priority-urgent: var(--priority-urgent);
+  --color-priority-high: var(--priority-high);
+  --color-priority-medium: var(--priority-medium);
+  --color-priority-low: var(--priority-low);
+  --color-priority-none: var(--priority-none);
+
+  /* ─── Tasks state-group scale (Plane port) ─────────────────────────────────
+     Bridges the per-theme --state-* source tokens (dark + light blocks below)
+     to Tailwind so the Tasks surfaces can read them as text-state-* /
+     bg-state-*. Distinct from the priority scale above: Plane gives each issue
+     STATE GROUP its own dedicated color (backlog grey → unstarted blue →
+     started amber → completed green → cancelled red). constants.ts STATE_GROUPS
+     names these via seedColor and the column-header / state-dot surfaces resolve
+     them as var(--state-<group>). */
+  --color-state-backlog: var(--state-backlog);
+  --color-state-unstarted: var(--state-unstarted);
+  --color-state-started: var(--state-started);
+  --color-state-completed: var(--state-completed);
+  --color-state-cancelled: var(--state-cancelled);
+
+  /* ─── Label palette (Plane port) ───────────────────────────────────────────
+     Bridges the per-theme 8-name label triads (dark + light blocks below) to
+     Tailwind. Each name exposes a bg / text / border utility — a label chip
+     reads bg-label-<n>-bg text-label-<n>-text border-label-<n>-border, all
+     theme-aware. Additive functional scale; brand colors untouched. */
+  --color-label-indigo-bg: var(--label-indigo-bg);
+  --color-label-indigo-text: var(--label-indigo-text);
+  --color-label-indigo-border: var(--label-indigo-border);
+  --color-label-emerald-bg: var(--label-emerald-bg);
+  --color-label-emerald-text: var(--label-emerald-text);
+  --color-label-emerald-border: var(--label-emerald-border);
+  --color-label-grey-bg: var(--label-grey-bg);
+  --color-label-grey-text: var(--label-grey-text);
+  --color-label-grey-border: var(--label-grey-border);
+  --color-label-crimson-bg: var(--label-crimson-bg);
+  --color-label-crimson-text: var(--label-crimson-text);
+  --color-label-crimson-border: var(--label-crimson-border);
+  --color-label-yellow-bg: var(--label-yellow-bg);
+  --color-label-yellow-text: var(--label-yellow-text);
+  --color-label-yellow-border: var(--label-yellow-border);
+  --color-label-orange-bg: var(--label-orange-bg);
+  --color-label-orange-text: var(--label-orange-text);
+  --color-label-orange-border: var(--label-orange-border);
+  --color-label-pink-bg: var(--label-pink-bg);
+  --color-label-pink-text: var(--label-pink-text);
+  --color-label-pink-border: var(--label-pink-border);
+  --color-label-purple-bg: var(--label-purple-bg);
+  --color-label-purple-text: var(--label-purple-text);
+  --color-label-purple-border: var(--label-purple-border);
+
+  --color-btn-primary-bg: var(--btn-primary-bg);
+  --color-btn-primary-text: var(--btn-primary-text);
+  --color-btn-primary-hover: var(--btn-primary-hover);
+  --color-btn-secondary-bg: var(--btn-secondary-bg);
+  --color-btn-secondary-text: var(--btn-secondary-text);
+  --color-btn-secondary-border: var(--btn-secondary-border);
+  --color-btn-secondary-hover: var(--btn-secondary-hover);
+
+  --color-rail-hover: var(--rail-hover);
+  --color-rail-label: var(--rail-label);
+  --color-fill-icon: var(--fill-icon);
+  --color-highlight-bg: var(--highlight-bg);
+
+  --color-dropdown-bg: var(--dropdown-bg);
+  --color-dropdown-border: var(--dropdown-border);
+  --color-dropdown-hover: var(--dropdown-hover);
+  --color-dropdown-selected: var(--dropdown-selected);
+
+  --font-size-sm: 0.9375rem;
+  --font-size-sm--line-height: 1.375rem;
+
+  --font-lato: "Lato", "Arial", sans-serif;
+  --font-outfit: "Outfit", "Roboto", "Arial", sans-serif;
+  --font-inter: "Inter", sans-serif;
+
+  /* ─── Z-index layer scale (#532) ───────────────────────────────────────────
+     One ordered stack replacing the scattered ad-hoc z-[..] magic numbers
+     (z-[600]/z-[9999] arms race). Used as z-[var(--z-…)] on the inline classes.
+     Values intentionally EQUAL the previous numbers so the relative stacking is
+     byte-for-byte preserved (no layering regression — svelte-check can't catch
+     z-order, and the app also uses Tailwind's stock z-20/40/50 utilities, so a
+     renumber could reorder against those). This is now the single place to tune. */
+  --z-sticky: 1; /* in-flow sticky section headers */
+  --z-dropdown: 60; /* mobile mention / format / jump-to menus */
+  --z-popover: 70; /* composer link popover */
+  --z-overlay-backdrop: 80; /* drawer scrim + search-results float */
+  --z-drawer: 81; /* slide-in workspace drawer panel */
+  --z-sheet: 95; /* full-screen mobile sheets / panels (thread, pinned, action) */
+  --z-elevated: 100; /* drag overlay + sidebar context menus */
+  --z-elevated-raised: 101; /* feedback widget popover */
+  --z-dialog: 120; /* confirm dialog */
+  --z-menu: 200; /* profile menu / mobile bottom sheet / toast */
+  --z-context-menu: 600; /* channel / attachment context menus */
+  --z-command: 700; /* quick switcher */
+  --z-modal: 9999; /* top-level modals / image viewer / splash */
+  --z-modal-popover: 10001; /* popover nested inside a modal */
+
+  /* ─── Panel / content widths (#532) ────────────────────────────────────────
+     Used as max-w-[var(--content-max)] / w-[var(--panel-…)]. Collapses the two
+     content-column widths (860 + a stray 760) to one, and names the recurring
+     floating-panel / menu / sidebar widths. Pixel values otherwise unchanged. */
+  --content-max: 860px; /* pane content column (760 outliers collapse here) */
+  --panel-slim: 220px; /* context menus / narrow dropdowns */
+  --panel-default: 240px; /* daemon sidebar + matching dropdowns */
+  --panel-wide: 320px; /* drawer / slash + link command menus */
+  --panel-wider: 360px; /* pinned panel / avatar cropper / link modal */
+}
+
+/* Safe-area insets (notch / status bar / gesture nav) for the mobile shell.
+   Theme-independent — read with var(--sat)/var(--sab) in the mobile layout. */
+:root {
+  --sat: env(safe-area-inset-top, 0px);
+  --sab: env(safe-area-inset-bottom, 0px);
+  --sal: env(safe-area-inset-left, 0px);
+  --sar: env(safe-area-inset-right, 0px);
+}
+
+/* ─── CSS Custom Properties (Design Tokens) ────────────────────────────────── */
+@layer base {
+  :root,
+  [data-theme="dark"] {
+    --brand-primary: #ffffff;
+    --brand-primary-dark: #d4d4d4;
+    --brand-primary-light: #e5e5e5;
+    --brand-contrast: #09090b;
+
+    --c7-accent: #6366f1;
+    --c7-accent-hover: #818cf8;
+
+    --background: #09090b;
+    --foreground: #fafafa;
+    --card: #171717;
+    --card-foreground: #fafafa;
+    --popover: #1c1c1c;
+    --popover-foreground: #fafafa;
+    --sn-primary: #e5e5e5;
+    --sn-primary-foreground: #171717;
+    --sn-secondary: #1c1c1c;
+    --sn-secondary-foreground: #fafafa;
+    --muted: #1c1c1c;
+    --muted-foreground: #a3a3a3;
+    --sn-accent: #292929;
+    --sn-accent-foreground: #fafafa;
+    --destructive: #dc2626;
+    --destructive-foreground: #fafafa;
+    --sn-border: rgba(255, 255, 255, 0.1);
+    --input: #383a3e;
+    --ring: #737373;
+    --radius: 0.625rem;
+
+    --primary: #f8f8f8;
+    --secondary: #e0e0e0cc;
+    --icon-gray: #b1b1b2;
+    --channel-gray: #d1d2d3;
+    --sidebar-item: #d1d2d3;
+    --gray-0: 16, 18, 20;
+    --gray-10: 33, 36, 40;
+    --bg-base: #1a1d21;
+    --bg-surface: #222529;
+    --bg-elevated: #2a2d31;
+    --bg-sidebar: #10121499;
+    --bg-deeper: #161719;
+    --bg-deepest: #0d1117;
+    --sidebar-hover: rgba(248, 248, 248, 0.08);
+    --sidebar-active: rgba(248, 248, 248, 0.18);
+    --rail-hover: rgba(248, 248, 248, 0.25);
+    --rail-label: #b1b1b2;
+    --border: #383a3e;
+    --border-light: #565759;
+    --border-dim: #797c814d;
+    --text-primary: #d1d2d3;
+    --text-secondary: #9b9c9e;
+    --text-muted: #616061;
+    --accent: #18181b;
+    --accent-hover: #27272a;
+    --mention-text: #5bb5f0;
+    --mention-bg: rgba(91, 181, 240, 0.13);
+    --caret-color: #ffffff;
+    --avatar-ring: #1a1d21;
+    --hover-gray: #f8f8f814;
+    --fill-icon: #e8e8e8b3;
+    --color-scheme: dark;
+
+    --code-bg: #1e1e1e;
+    --code-text: #d4d4d4;
+    --code-border: #383a3e;
+    --code-inline-bg: rgba(110, 118, 129, 0.4);
+    --code-inline-text: #e06c75;
+
+    /* Syntax-highlight token colors (highlight.js classes → these vars). Dark
+       palette tuned to the VS Code "Dark+" feel that matches --code-bg above. */
+    --hljs-keyword: #c586c0;
+    --hljs-string: #ce9178;
+    --hljs-number: #b5cea8;
+    --hljs-title: #dcdcaa;
+    --hljs-type: #4ec9b0;
+    --hljs-comment: #6a9955;
+    --hljs-literal: #569cd6;
+    --hljs-attr: #9cdcfe;
+    --hljs-symbol: #d7ba7d;
+    --hljs-meta: #808080;
+    --hljs-deletion: #f48771;
+    --hljs-addition: #6a9955;
+
+    /* ANSI terminal palette for shell/command tool output (#615). The 16
+       standard ANSI colors mapped to theme-aware vars; AnsiOutput.svelte reads
+       these as --ansi-<name>. Tuned to Paseo's dark terminal theme. */
+    --ansi-foreground: var(--text-primary);
+    --ansi-background: transparent;
+    --ansi-black: #3f3f46;
+    --ansi-red: #ef4444;
+    --ansi-green: #22c55e;
+    --ansi-yellow: #f59e0b;
+    --ansi-blue: #3b82f6;
+    --ansi-magenta: #a855f7;
+    --ansi-cyan: #06b6d4;
+    --ansi-white: #fafafa;
+    --ansi-bright-black: #71717a;
+    --ansi-bright-red: #f87171;
+    --ansi-bright-green: #4ade80;
+    --ansi-bright-yellow: #fbbf24;
+    --ansi-bright-blue: #60a5fa;
+    --ansi-bright-magenta: #c084fc;
+    --ansi-bright-cyan: #22d3ee;
+    --ansi-bright-white: #ffffff;
+
+    --score-healthy: #6ee7b7;
+    --score-warning: #fcd34d;
+    --score-critical: #fca5a5;
+
+    --health-ok-text: #86efac;
+    --health-watching-text: #fcd34d;
+    --health-attention-text: #fca5a5;
+
+    --focus-ring: rgb(18, 100, 163);
+    --overlay-bg: rgba(0, 0, 0, 0.6);
+    --highlight-bg: #e8912d40;
+    --border-subtle: #797c8126;
+
+    --btn-primary-bg: #fafafa;
+    --btn-primary-text: #18181b;
+    --btn-primary-hover: #e4e4e7;
+    --btn-secondary-bg: #27272a;
+    --btn-secondary-text: #fafafa;
+    --btn-secondary-border: #3f3f46;
+    --btn-secondary-hover: #3f3f46;
+
+    --toggle-on-bg: #ffffff;
+    --toggle-on-dot: #111827;
+    --toggle-off-bg: #4b5563;
+    --toggle-off-dot: #ffffff;
+
+    --divider-text: #ababad;
+    --divider-border: rgba(255, 255, 255, 0.08);
+
+    --dropdown-bg: #1a1d21;
+    --dropdown-border: #383a3e;
+    --dropdown-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    --dropdown-selected: rgba(79, 179, 237, 0.12);
+    --dropdown-hover: rgba(255, 255, 255, 0.06);
+    --dropdown-name: #d1d2d3;
+    --dropdown-secondary: #9b9c9e;
+    --dropdown-hint: #616061;
+
+    --duration-instant: 50ms;
+    --duration-fast: 100ms;
+    --duration-quick: 150ms;
+    --duration-normal: 200ms;
+    --duration-moderate: 300ms;
+    --duration-slow: 400ms;
+    --ease-enter: cubic-bezier(0, 0, 0.2, 1);
+    --ease-exit: cubic-bezier(0.4, 0, 1, 1);
+    --ease-move: cubic-bezier(0.4, 0, 0.2, 1);
+
+    --modal-overlay: rgba(0, 0, 0, 0.6);
+    --modal-shadow: 0 0 0 1px rgba(29, 28, 29, 0.13), 0 18px 48px 0 rgba(0, 0, 0, 0.35);
+    --msg-hover-bg: rgba(248, 248, 248, 0.04);
+
+    /* iOS material surfaces: translucent bar/sheet fills for blurred chrome
+       (.material-bar/.material-sheet) + the 0.5px separator color
+       (.hairline-t/.hairline-b). Bar/sheet derived from --bg-base #1a1d21
+       (rgb 26,29,33); sheet is more opaque so stacked content stays legible. */
+    --material-bar-bg: rgba(26, 29, 33, 0.75);
+    --material-sheet-bg: rgba(26, 29, 33, 0.85);
+    --hairline: rgba(255, 255, 255, 0.12);
+
+    --color-syntax-keyword: #a3e635;
+    --color-syntax-bg: #0f172a;
+    --color-syntax-text: #e2e8f0;
+
+    --activity-mention-bg: rgba(59, 130, 246, 0.14);
+    --activity-mention-text: #93c5fd;
+    --activity-mention-accent: #60a5fa;
+    --activity-task-bg: rgba(232, 171, 90, 0.16);
+    --activity-task-text: #fcd34d;
+    --activity-task-accent: #f59e0b;
+    --activity-review-bg: rgba(167, 139, 250, 0.16);
+    --activity-review-text: #c4b5fd;
+    --activity-review-accent: #a78bfa;
+    /* bg derives from the consolidated error red (#dc2626) — same byte value
+       as rgba(220, 38, 38, 0.14), routed through --color-error-strong-rgb. */
+    --activity-error-bg: rgba(var(--color-error-strong-rgb), 0.14);
+    --activity-error-text: #fca5a5;
+    --activity-error-accent: #f87171;
+    --activity-success-bg: rgba(61, 170, 124, 0.16);
+    --activity-success-text: #86efac;
+    --activity-success-accent: #4ade80;
+    --activity-unread-bg: rgba(96, 165, 250, 0.06);
+    --sidebar-active-text: #fff;
+
+    /* bg + border derive from the consolidated error red (#dc2626) — same byte
+       values as rgba(220, 38, 38, 0.12 / 0.2), via --color-error-strong-rgb. */
+    --log-error-bg: rgba(var(--color-error-strong-rgb), 0.12);
+    --log-error-text: #fca5a5;
+    --log-error-border: rgba(var(--color-error-strong-rgb), 0.2);
+    --log-warn-bg: rgba(217, 119, 6, 0.12);
+    --log-warn-text: #fcd34d;
+    --log-warn-border: rgba(217, 119, 6, 0.2);
+    --log-info-bg: rgba(37, 99, 235, 0.12);
+    --log-info-text: #93c5fd;
+    --log-info-border: rgba(37, 99, 235, 0.2);
+    --log-debug-bg: rgba(255, 255, 255, 0.06);
+    --log-debug-text: #9ca3af;
+    --log-debug-border: rgba(255, 255, 255, 0.08);
+
+    --audit-page-bg: #1a1d21;
+    --audit-card-bg: transparent;
+    --audit-card-border: #383a3e;
+    --audit-card-shadow: none;
+    --audit-row-border: #383a3e;
+    --audit-row-hover: #222529;
+
+    /* Tasks kanban-card elevation (dark). Deeper opaque-black shadow so a card
+       on --bg-elevated (#2a2d31) lifts visibly; hover steps to a larger spread.
+       Consumed via --shadow-task-card[-hover]. */
+    --task-card-shadow: 0 1px 2px rgba(0, 0, 0, 0.32);
+    --task-card-shadow-hover: 0 4px 12px rgba(0, 0, 0, 0.45);
+
+    /* ─── Tasks BOARD surfaces (Plane port, dark) ──────────────────────────────
+       Plane's dark board surface ladder, lifted from its neutral palette
+       (packages/tailwind-config/variables.css): board canvas = --bg-canvas
+       (neutral-black), column band = --bg-surface-2 (neutral-200, ONE step
+       lighter than the canvas — subtle, not a hard panel), card = --bg-layer-2
+       (neutral-300), card border = --border-subtle (neutral-400). The column
+       carries a hairline border = --border-subtle (neutral-400) so it reads as a
+       distinct-but-subtle box over the canvas (our fork keeps the column box even
+       though Plane's own kanban leaves the column body borderless — the user
+       wants the visible hairline). BOARD-SCOPED — consumed only by lib/tasks/ui.ts
+       via the bg-tasks-* / border-tasks-* bridge above; the app-wide --bg-* tokens
+       are unchanged, so the rest of the Slack shell keeps its own surfaces. Values
+       are Plane's exact dark neutral oklch stops. */
+    --tasks-board-bg: oklch(0.1689 0.0021 230.81); /* neutral-black (bg-canvas) */
+    --tasks-column-bg: oklch(0.2158 0.0025 230.82); /* neutral-200 (bg-surface-2) */
+    --tasks-column-border: oklch(0.2593 0.0033 230.84); /* neutral-400 (border-subtle) */
+    --tasks-card-bg: oklch(0.2378 0.0029 230.83); /* neutral-300 (bg-layer-2) */
+    --tasks-card-border: oklch(0.2593 0.0033 230.84); /* neutral-400 (border-subtle) */
+    --tasks-segment-active-bg: rgba(255, 255, 255, 0.1); /* layer-transparent-active (alpha-white) */
+    --tasks-group-header-bg: oklch(0.2158 0.0025 230.82); /* neutral-200 (bg-layer-1) */
+
+    /* ─── Tasks priority scale (Plane port, dark) ──────────────────────────────
+       Five functional priority tints consumed via the Tailwind bridge below as
+       text-priority-* / bg-priority-* — the priority dot, the inline priority
+       control, and the urgent/high/… menu rows read these instead of any raw
+       red/orange/amber/blue. Tuned brighter than the light variant so each reads
+       on the dark board surfaces (--bg-base/-elevated). "none" is the quiet grey
+       (no priority) — matches --text-muted's role, named separately so the
+       priority affordance stays self-documenting. Values are Plane's exact dark
+       priority oklch stops (adopting Plane's colorimetry, per the override):
+       urgent red / high orange / medium yellow / low blue / none grey. */
+    --priority-urgent: oklch(0.5798 0.1766 26.99);
+    --priority-high: oklch(0.6802 0.1633 50.67);
+    --priority-medium: oklch(0.79 0.1466 82.04);
+    --priority-low: oklch(0.579 0.1807 262.31);
+    --priority-none: oklch(0.6376 0.0129 231.77);
+
+    /* ─── Tasks state-group scale (Plane port, dark) ────────────────────────────
+       Plane gives each issue STATE GROUP its own dedicated color, distinct from
+       the priority scale: backlog grey, unstarted/Todo blue, started/In Progress
+       amber, completed/Done green, cancelled/Canceled red. These are the icon
+       tints in the board column header + on the state dot in cards / dropdowns.
+       constants.ts STATE_GROUPS.seedColor names these tokens; the surface reads
+       them as var(--state-<group>). Plane's state-group hexes are theme-neutral
+       (they read on both surfaces), so the same values carry into the light
+       block below. */
+    --state-backlog: #d9d9d9;
+    --state-unstarted: #3f76ff;
+    --state-started: #f59e0b;
+    --state-completed: #16a34a;
+    --state-cancelled: #dc2626;
+
+    /* ─── Label palette (Plane port, dark) ─────────────────────────────────────
+       An 8-name functional palette for task LABEL chips. Each name carries a
+       bg/text/border triad tuned to read on the dark board (low-alpha fill,
+       bright text, dim border). Consumed via the bridge as bg-label-*-bg /
+       text-label-*-text / border-label-*-border. Additive functional scale —
+       independent of the brand colors above. */
+    --label-indigo-bg: rgba(129, 140, 248, 0.16);
+    --label-indigo-text: #a5b4fc;
+    --label-indigo-border: rgba(129, 140, 248, 0.32);
+    --label-emerald-bg: rgba(52, 211, 153, 0.16);
+    --label-emerald-text: #6ee7b7;
+    --label-emerald-border: rgba(52, 211, 153, 0.32);
+    --label-grey-bg: rgba(148, 163, 184, 0.16);
+    --label-grey-text: #cbd5e1;
+    --label-grey-border: rgba(148, 163, 184, 0.32);
+    --label-crimson-bg: rgba(248, 113, 113, 0.16);
+    --label-crimson-text: #fca5a5;
+    --label-crimson-border: rgba(248, 113, 113, 0.32);
+    --label-yellow-bg: rgba(250, 204, 21, 0.16);
+    --label-yellow-text: #fde047;
+    --label-yellow-border: rgba(250, 204, 21, 0.32);
+    --label-orange-bg: rgba(251, 146, 60, 0.16);
+    --label-orange-text: #fdba74;
+    --label-orange-border: rgba(251, 146, 60, 0.32);
+    --label-pink-bg: rgba(244, 114, 182, 0.16);
+    --label-pink-text: #f9a8d4;
+    --label-pink-border: rgba(244, 114, 182, 0.32);
+    --label-purple-bg: rgba(192, 132, 252, 0.16);
+    --label-purple-text: #d8b4fe;
+    --label-purple-border: rgba(192, 132, 252, 0.32);
+
+    /* Tasks detail-panel ("peek") elevation (dark). A larger, softer drop than
+       the kanban-card shadow — the side/modal/full peek floats ABOVE the board,
+       so it needs a deeper, wider spread to separate from the page. Consumed via
+       the Tailwind bridge as shadow-peek. Deep opaque black reads on dark. */
+    --peek-shadow: -8px 0 24px rgba(0, 0, 0, 0.4), 0 8px 32px rgba(0, 0, 0, 0.5);
+  }
+
+  [data-theme="light"] {
+    --brand-primary: #18181b;
+    --brand-primary-dark: #09090b;
+    --brand-primary-light: #27272a;
+    --brand-contrast: #ffffff;
+
+    --c7-accent: #6366f1;
+    --c7-accent-hover: #4f46e5;
+
+    --background: #ffffff;
+    --foreground: #0a0a0a;
+    --card: #ffffff;
+    --card-foreground: #0a0a0a;
+    --popover: #ffffff;
+    --popover-foreground: #0a0a0a;
+    --sn-primary: #171717;
+    --sn-primary-foreground: #fafafa;
+    --sn-secondary: #f5f5f5;
+    --sn-secondary-foreground: #171717;
+    --muted: #f5f5f5;
+    --muted-foreground: #737373;
+    --sn-accent: #f5f5f5;
+    --sn-accent-foreground: #171717;
+    --destructive: #ef4444;
+    --destructive-foreground: #fafafa;
+    --sn-border: #e5e5e5;
+    --input: #e5e5e5;
+    --ring: #a3a3a3;
+
+    --primary: #111827;
+    --secondary: #6b7280;
+    --icon-gray: #6b7280;
+    --channel-gray: #111827;
+    --sidebar-item: #4a494a;
+    --gray-0: 255, 255, 255;
+    --gray-10: 249, 250, 251;
+    --bg-base: #ffffff;
+    --bg-surface: #fbfbfb;
+    --bg-elevated: #eaeaea;
+    --bg-sidebar: #fbfbfb;
+    --bg-deeper: #f9fafb;
+    --bg-deepest: #f3f4f6;
+    --sidebar-hover: rgba(0, 0, 0, 0.05);
+    --sidebar-active: #1f2937;
+    --rail-hover: rgba(0, 0, 0, 0.08);
+    --rail-label: #6b7280;
+    --border: #eeeff1;
+    --border-light: #e0e0e0;
+    --border-dim: #e5e7eb;
+    --text-primary: #111827;
+    --text-secondary: #6b7280;
+    --text-muted: #9ca3af;
+    --accent: #18181b;
+    --accent-hover: #27272a;
+    --mention-text: #1264a3;
+    --mention-bg: rgba(29, 155, 209, 0.07);
+    --caret-color: #1d1c1d;
+    --avatar-ring: #ffffff;
+    --hover-gray: #e5e7eb;
+    --fill-icon: #6b7280;
+    --color-scheme: light;
+
+    --code-bg: #f6f8fa;
+    --code-text: #24292e;
+    --code-border: #e1e4e8;
+    --code-inline-bg: rgba(175, 184, 193, 0.2);
+    --code-inline-text: #c7254e;
+
+    /* Syntax-highlight token colors (highlight.js classes → these vars). Light
+       palette tuned to GitHub-light to match --code-bg above. */
+    --hljs-keyword: #d73a49;
+    --hljs-string: #032f62;
+    --hljs-number: #005cc5;
+    --hljs-title: #6f42c1;
+    --hljs-type: #22863a;
+    --hljs-comment: #6a737d;
+    --hljs-literal: #005cc5;
+    --hljs-attr: #005cc5;
+    --hljs-symbol: #e36209;
+    --hljs-meta: #6a737d;
+    --hljs-deletion: #b31d28;
+    --hljs-addition: #22863a;
+
+    /* ANSI terminal palette — light variant (#615). Tuned to Paseo's light
+       terminal theme so colorized output stays legible on a light surface. */
+    --ansi-foreground: var(--text-primary);
+    --ansi-background: transparent;
+    --ansi-black: #1a1a1e;
+    --ansi-red: #dc2626;
+    --ansi-green: #16a34a;
+    --ansi-yellow: #ca8a04;
+    --ansi-blue: #2563eb;
+    --ansi-magenta: #9333ea;
+    --ansi-cyan: #0891b2;
+    --ansi-white: #525252;
+    --ansi-bright-black: #3f3f46;
+    --ansi-bright-red: #ef4444;
+    --ansi-bright-green: #16a34a;
+    --ansi-bright-yellow: #d97706;
+    --ansi-bright-blue: #3b82f6;
+    --ansi-bright-magenta: #a855f7;
+    --ansi-bright-cyan: #0891b2;
+    --ansi-bright-white: #1a1a1e;
+
+    --score-healthy: #059669;
+    --score-warning: #b45309;
+    --score-critical: #b91c1c;
+
+    --health-ok-text: #166534;
+    --health-watching-text: #b45309;
+    --health-attention-text: #b91c1c;
+
+    --focus-ring: rgb(18, 100, 163);
+    --overlay-bg: rgba(0, 0, 0, 0.4);
+    --highlight-bg: #e8912d30;
+    --border-subtle: #d1d5db40;
+
+    --btn-primary-bg: #18181b;
+    --btn-primary-text: #ffffff;
+    --btn-primary-hover: #27272a;
+    --btn-secondary-bg: #ffffff;
+    --btn-secondary-text: #18181b;
+    --btn-secondary-border: #e4e4e7;
+    --btn-secondary-hover: #f4f4f5;
+
+    --toggle-on-bg: #111827;
+    --toggle-on-dot: #ffffff;
+    --toggle-off-bg: #d1d5db;
+    --toggle-off-dot: #ffffff;
+
+    --divider-text: #1d1c1d;
+    --divider-border: #d0d0d0;
+
+    --dropdown-bg: #ffffff;
+    --dropdown-border: rgba(0, 0, 0, 0.08);
+    --dropdown-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+    --dropdown-selected: #f0f4f8;
+    --dropdown-hover: #f5f7fa;
+    --dropdown-name: #1d1c1d;
+    --dropdown-secondary: #656565;
+    --dropdown-hint: #a0a0a5;
+
+    --activity-mention-bg: #eff6ff;
+    --activity-mention-text: #1d4ed8;
+    --activity-mention-accent: #2563eb;
+    --activity-task-bg: #fef3c7;
+    --activity-task-text: #92400e;
+    --activity-task-accent: #d97706;
+    --activity-review-bg: #f5f3ff;
+    --activity-review-text: #6d28d9;
+    --activity-review-accent: #7c3aed;
+    --activity-error-bg: #fee2e2;
+    --activity-error-text: #b91c1c;
+    /* accent === consolidated error red #dc2626 (#538) */
+    --activity-error-accent: var(--color-error-strong);
+    --activity-success-bg: #dcfce7;
+    --activity-success-text: #15803d;
+    /* accent === consolidated success green #16a34a (#538) */
+    --activity-success-accent: var(--color-success);
+    --activity-unread-bg: rgba(37, 99, 235, 0.04);
+    --sidebar-active-text: #fff;
+
+    --log-error-bg: #fee2e2;
+    /* text === consolidated error red #dc2626 (#538) */
+    --log-error-text: var(--color-error-strong);
+    --log-error-border: #fecaca;
+    --log-warn-bg: #fef3c7;
+    --log-warn-text: #d97706;
+    --log-warn-border: #fde68a;
+    --log-info-bg: #dbeafe;
+    --log-info-text: #2563eb;
+    --log-info-border: #bfdbfe;
+    --log-debug-bg: #f3f4f6;
+    --log-debug-text: #4b5563;
+    --log-debug-border: #e5e7eb;
+
+    --audit-page-bg: #ffffff;
+    --audit-card-bg: #ffffff;
+    --audit-card-border: rgba(0, 0, 0, 0.06);
+    --audit-card-shadow: 0 1px 3px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
+    --audit-row-border: rgba(0, 0, 0, 0.04);
+    --audit-row-hover: #f9fafb;
+
+    --modal-overlay: rgba(0, 0, 0, 0.4);
+    --modal-shadow: 0 0 0 1px rgba(29, 28, 29, 0.13), 0 18px 48px 0 rgba(0, 0, 0, 0.12);
+    --msg-hover-bg: rgba(0, 0, 0, 0.04);
+
+    /* iOS material surfaces (light). --bg-base is pure #ffffff here, which
+       gives a translucent fill with no visible tint over light content —
+       derive from --bg-deeper #f9fafb (rgb 249,250,251) instead so the bar
+       reads as a distinct surface, like iOS systemThinMaterial on a light
+       page. */
+    --material-bar-bg: rgba(249, 250, 251, 0.78);
+    --material-sheet-bg: rgba(249, 250, 251, 0.88);
+    --hairline: rgba(0, 0, 0, 0.12);
+
+    --color-syntax-keyword: #16a34a;
+    --color-syntax-bg: #f8fafc;
+    --color-syntax-text: #1e293b;
+
+    /* Tasks kanban-card elevation (light). Soft, low-opacity two-layer shadow
+       mirroring Plane's raised-100 / raised-200. Consumed via
+       --shadow-task-card[-hover]. */
+    --task-card-shadow: 0 1px 2px rgba(16, 24, 40, 0.06), 0 1px 3px rgba(16, 24, 40, 0.1);
+    --task-card-shadow-hover: 0 4px 8px rgba(16, 24, 40, 0.1), 0 6px 12px rgba(16, 24, 40, 0.08);
+
+    /* ─── Tasks BOARD surfaces (Plane port, light) ─────────────────────────────
+       Plane's light board surface ladder (same neutral palette source as dark):
+       board canvas = --bg-canvas (neutral-300, a faint grey), column band =
+       --bg-surface-2 (neutral-100, a hair lighter than the canvas), card =
+       --bg-layer-2 (white), card border = --border-subtle (neutral-400). The
+       column carries a hairline border = --border-subtle (neutral-400) so it
+       reads as a distinct-but-subtle box over the faint-grey canvas; the card
+       sits white inside it, lifted by its own card shadow — Plane's light board
+       feel. Same BOARD-SCOPED bridge as the dark block; the app-wide --bg-* tokens
+       stay untouched. Values are Plane's exact light neutral oklch stops. */
+    --tasks-board-bg: oklch(0.9543 0.001 230.67); /* neutral-300 (bg-canvas) */
+    --tasks-column-bg: oklch(0.9848 0.0003 230.66); /* neutral-100 (bg-surface-2) */
+    --tasks-column-border: oklch(0.9389 0.0014 230.68); /* neutral-400 (border-subtle) */
+    --tasks-card-bg: oklch(1 0 0); /* neutral-white (bg-layer-2) */
+    --tasks-card-border: oklch(0.9389 0.0014 230.68); /* neutral-400 (border-subtle) */
+    --tasks-segment-active-bg: rgba(0, 0, 0, 0.08); /* layer-transparent-active (alpha-black) */
+    --tasks-group-header-bg: oklch(0.9696 0.0007 230.67); /* neutral-200 (bg-layer-1) */
+
+    /* ─── Tasks priority scale (Plane port, light) ─────────────────────────────
+       Same five priority roles as the dark block, retuned to the standard 600
+       saturated stops so each reads on a white board surface. Consumed via the
+       same text-priority-* / bg-priority-* bridge — only the source values
+       differ per theme. "none" is the grey "no priority" stop. Values are Plane's
+       exact priority oklch stops (adopting Plane's colorimetry); they read on a
+       white board surface as well as the dark one, so the same hues carry across
+       both themes — the saturated red/orange/yellow/blue/grey is the Plane look. */
+    --priority-urgent: oklch(0.5798 0.1766 26.99);
+    --priority-high: oklch(0.6802 0.1633 50.67);
+    --priority-medium: oklch(0.79 0.1466 82.04);
+    --priority-low: oklch(0.579 0.1807 262.31);
+    --priority-none: oklch(0.6376 0.0129 231.77);
+
+    /* ─── Tasks state-group scale (Plane port, light) ──────────────────────────
+       The same five dedicated state-group colors as the dark block. Plane's
+       state-group hexes are theme-neutral (a backlog grey / blue / amber / green
+       / red tuned to read on both surfaces), so the light values match the dark
+       ones byte-for-byte. Consumed via var(--state-<group>) off
+       constants.ts STATE_GROUPS.seedColor. */
+    --state-backlog: #d9d9d9;
+    --state-unstarted: #3f76ff;
+    --state-started: #f59e0b;
+    --state-completed: #16a34a;
+    --state-cancelled: #dc2626;
+
+    /* ─── Label palette (Plane port, light) ────────────────────────────────────
+       The same 8 label names as the dark block, retuned for a white board: a
+       pale solid fill, a saturated 700 text, and a soft border, so each chip
+       reads with enough contrast in light mode. Consumed via the same
+       bg-label-*-bg / text-label-*-text / border-label-*-border bridge. */
+    --label-indigo-bg: #eef2ff;
+    --label-indigo-text: #4338ca;
+    --label-indigo-border: #c7d2fe;
+    --label-emerald-bg: #ecfdf5;
+    --label-emerald-text: #047857;
+    --label-emerald-border: #a7f3d0;
+    --label-grey-bg: #f1f5f9;
+    --label-grey-text: #475569;
+    --label-grey-border: #cbd5e1;
+    --label-crimson-bg: #fef2f2;
+    --label-crimson-text: #b91c1c;
+    --label-crimson-border: #fecaca;
+    --label-yellow-bg: #fefce8;
+    --label-yellow-text: #a16207;
+    --label-yellow-border: #fde68a;
+    --label-orange-bg: #fff7ed;
+    --label-orange-text: #c2410c;
+    --label-orange-border: #fed7aa;
+    --label-pink-bg: #fdf2f8;
+    --label-pink-text: #be185d;
+    --label-pink-border: #fbcfe8;
+    --label-purple-bg: #faf5ff;
+    --label-purple-text: #7e22ce;
+    --label-purple-border: #e9d5ff;
+
+    /* Tasks detail-panel ("peek") elevation (light). Soft, low-opacity layered
+       drop — the peek floats above a white board, so it stays subtle (Plane's
+       overlay shadow feel) rather than the deep black used in dark mode.
+       Consumed via shadow-peek. */
+    --peek-shadow: -8px 0 24px rgba(16, 24, 40, 0.08), 0 8px 32px rgba(16, 24, 40, 0.12);
+  }
+
+  html,
+  body {
+    overscroll-behavior: none;
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    background-color: var(--bg-base);
+    color: var(--text-primary);
+    font-family: var(--font-lato);
+    font-size: 15px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    scrollbar-width: thin;
+    scrollbar-color: #565759 transparent;
+  }
+
+  [data-theme="light"] {
+    scrollbar-color: #c0c0c0 transparent;
+  }
+
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #565759;
+    border-radius: 4px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #717375;
+  }
+  [data-theme="light"] ::-webkit-scrollbar-thumb {
+    background: #c0c0c0;
+  }
+  [data-theme="light"] ::-webkit-scrollbar-thumb:hover {
+    background: #aaa;
+  }
+
+  ::selection {
+    background-color: var(--focus-ring);
+    color: white;
+  }
+
+  input:-webkit-autofill,
+  input:-webkit-autofill:hover,
+  input:-webkit-autofill:focus {
+    border: none;
+    -webkit-text-fill-color: var(--primary);
+    -webkit-box-shadow: 0 0 0px 1000px var(--bg-base) inset;
+    caret-color: var(--primary);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+/* ─── Accessibility utilities (additive, opt-in) ───────────────────────────────
+   Workstream E (a11y): shared, opt-in classes for focus rings, consistent hover
+   affordances, and touch-target minimums. These never change desktop density —
+   the touch-target rules only widen hit areas on coarse pointers / small
+   viewports (≤640px, the same `sm` breakpoint `viewportState.isMobile` tracks),
+   and the focus/hover helpers only add visible state that was previously
+   missing. Nothing here removes or overrides existing behavior. */
+@layer utilities {
+  /* Visible keyboard focus ring for elements that don't already get one from
+     the shared button variants. Uses the design-token --focus-ring (never a
+     hardcoded color) and only shows for keyboard users (:focus-visible), so
+     pointer users keep the clean look. */
+  .focus-ring {
+    outline: none;
+  }
+  .focus-ring:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
+    /* No border-radius here: the outline already follows the element's own
+       corner radius in modern browsers, and setting it would visually reshape
+       square elements on focus (a regression). Keep the element's box as-is. */
+  }
+
+  /* Consistent hover affordance for ghost/row-style interactive elements that
+     otherwise had inconsistent (or no) hover feedback. */
+  .hover-affordance {
+    transition: background-color 125ms ease;
+  }
+
+  /* Touch-target helper: guarantees a ≥44px (iOS HIG) hit area on touch /
+     small viewports WITHOUT changing the painted size on desktop. Apply to
+     icon-only buttons and compact rows that are smaller than 44px. The visual
+     box is unchanged on desktop; on mobile the element grows to meet the
+     minimum so it's reliably tappable. */
+  .touch-target {
+    /* desktop: no-op (keep existing density) */
+  }
+  /* Coarse pointer (finger) OR narrow viewport → enforce the 44px minimum.
+     Both conditions are covered so it works on touch laptops and on the
+     mobile webview shell alike. */
+  @media (pointer: coarse), (max-width: 640px) {
+    .touch-target {
+      min-height: 44px;
+      min-width: 44px;
+    }
+    /* Sidebar/list rows are full-width, so only the height needs lifting; a
+       min-width would break their flex layout. */
+    .touch-target-row {
+      min-height: 44px;
+    }
+  }
+
+  /* Row hover-reveal actions (SharedFilesPanel jump/download) — Mattermost's
+     `.post-image__download` pattern: the buttons are ALWAYS in the DOM (so
+     focus/keyboard reach them), and only their VISIBILITY is gated here. On
+     desktop they're hidden until the row (`.group`) is hovered or holds focus
+     (`:focus-within` keeps them reachable by keyboard). On coarse pointers /
+     narrow viewports there's no hover, so they're always shown. */
+  .file-actions {
+    opacity: 0;
+    /* While hidden the buttons stay in the DOM (so focus/keyboard reach them),
+       but must NOT swallow pointer events over the row's right edge. */
+    pointer-events: none;
+    transition: opacity var(--duration-fast, 100ms) ease;
+  }
+  .group:hover .file-actions,
+  .group:focus-within .file-actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
+  @media (pointer: coarse), (max-width: 640px) {
+    .file-actions {
+      opacity: 1;
+      pointer-events: auto;
+    }
+  }
+
+  /* Tap-area expander for controls that must KEEP their painted size (a tiny
+     badge/× pinned in a chip corner, where growing the box would balloon the
+     visible control). A centered, invisible ::after pseudo extends the
+     clickable region to ≥44px on touch / small viewports WITHOUT changing the
+     visual box. The element must be position:relative (these all are, via
+     `absolute`/`relative`); the pseudo is pointer-events:auto so taps in the
+     padded ring still hit the control. No-op on desktop. */
+  /* Only establish a positioning context on STATIC elements — never override an
+     element's own absolute/fixed/sticky (e.g. the chip × is `absolute`, which
+     is already its own containing block for the ::after). */
+  .tap-expand:not(.absolute):not(.fixed):not(.sticky) {
+    position: relative;
+  }
+  @media (pointer: coarse), (max-width: 640px) {
+    .tap-expand::after {
+      content: "";
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: 44px;
+      height: 44px;
+      transform: translate(-50%, -50%);
+      /* invisible, but captures the tap */
+    }
+  }
+}
+
+/* ─── iOS materials + hairlines ────────────────────────────────────────────
+   Translucent blurred chrome (iMessage-style bars/sheets, content scrolls
+   under them) + 0.5px separators. Purely additive utilities — desktop/web
+   rendering is unchanged until a component opts in. */
+/* The blur lives on a ::before overlay, NEVER on the element itself: WebKit
+   breaks the painting of absolutely-positioned DESCENDANTS that overflow a
+   backdrop-filter element (the ProfileMenu / workspace-switcher dropdowns hang
+   below the top bar and rendered with their solid panel background dropped —
+   menu text floating over the page). A pseudo-element has no descendants, so
+   the bar's children paint normally while the chrome still blurs. isolation
+   creates the stacking context the z-index:-1 pseudo needs to stay behind the
+   element's content. Bars that host dropdowns must ALSO carry a z-index above
+   the page content (the isolated stacking context would otherwise paint the
+   menus UNDER later-DOM siblings) — MobileTopBar uses z-40. */
+.material-bar,
+.material-sheet {
+  position: relative;
+  isolation: isolate;
+}
+.material-bar::before,
+.material-sheet::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  -webkit-backdrop-filter: blur(20px) saturate(1.8);
+  backdrop-filter: blur(20px) saturate(1.8);
+}
+.material-bar::before {
+  background-color: var(--material-bar-bg);
+}
+.material-sheet::before {
+  background-color: var(--material-sheet-bg);
+}
+/* No backdrop-filter → a translucent fill with no blur reads as broken
+   (content bleeds through the chrome). Fall back to the opaque base surface. */
+@supports not ((backdrop-filter: blur(20px)) or (-webkit-backdrop-filter: blur(20px))) {
+  .material-bar::before,
+  .material-sheet::before {
+    background-color: var(--bg-base);
+  }
+}
+
+/* Hairlines as INSET box-shadows, not borders or scaled pseudo-elements:
+   - inset keeps the line inside the box, so an ancestor's overflow:hidden
+     can never clip it, and it adds zero layout height (a real border shifts
+     content by 1px when toggled).
+   - WKWebView rasterizes fractional shadow offsets subpixel-crisp on 2x/3x
+     (same pipeline as 0.5px borders, supported since iOS 8) — the scaled
+     ::after technique buys nothing here and would burn the pseudo-element
+     slot + require position:relative on the host.
+   Stacked selector last so an element can carry both edges. */
+.hairline-t {
+  box-shadow: inset 0 0.5px 0 var(--hairline);
+}
+.hairline-b {
+  box-shadow: inset 0 -0.5px 0 var(--hairline);
+}
+.hairline-t.hairline-b {
+  box-shadow:
+    inset 0 0.5px 0 var(--hairline),
+    inset 0 -0.5px 0 var(--hairline);
+}
+
+/* ─── Press states ─────────────────────────────────────────────────────────
+   Native-feel :active feedback. pointer:coarse only, so desktop hover-driven
+   UI keeps its exact current look. The transition lives on the base class so
+   the release direction animates too — the pressed state can never stick.
+   Tap-highlight suppression is already app-wide on html.tauri-ios; not
+   duplicated here. .pressable-row is tint-only: a full-width list row that
+   shrinks under the finger looks detached from its neighbors. */
+@media (pointer: coarse) {
+  .pressable {
+    transition:
+      transform 120ms var(--ease-move),
+      background-color 120ms var(--ease-move);
+  }
+  .pressable:active {
+    transform: scale(0.97);
+    background-color: var(--hover-gray);
+  }
+  .pressable-row {
+    transition: background-color 120ms var(--ease-move);
+  }
+  .pressable-row:active {
+    background-color: var(--hover-gray);
+  }
+
+  /* Scale-only press (NO background tint) for filled/standalone controls — the
+     shared Button base + rail items, where `.pressable`'s hover-gray fill would
+     muddy a primary/destructive button. Uses the individual `scale:` property
+     (not `transform:`) so it composes with Tailwind's transform utilities on
+     the Button base (e.g. `active:translate-y-px`) instead of overriding them.
+     The slight opacity dip reinforces the depress; skipped while disabled. */
+  /* `transition: all` (NOT a scale/opacity-only shorthand): the Button base
+     carries Tailwind `transition-all`, and a property-limited shorthand here
+     would override it and SNAP the button's bg/border/shadow transitions on
+     coarse pointers. `all` keeps every property (incl. scale + opacity)
+     animating together at the press timing. */
+  .pressable-scale {
+    transition: all 120ms var(--ease-move);
+  }
+  .pressable-scale:active:not(:disabled):not([aria-disabled="true"]) {
+    scale: 0.97;
+    opacity: 0.92;
+  }
+}
+
+/* prefers-reduced-motion: drop the press TRANSFORM/SCALE entirely (the global
+   reset above only zeroes transition-duration, which would still SNAP the
+   scale instantly). `!important` because the `.pressable-scale:active` press
+   selector carries `:not()` guards (specificity 0-4-0) that would otherwise
+   beat this 0-2-0 override — the accessibility opt-out must always win.
+   Motion-sensitive users keep the background/opacity affordance, no size change. */
+@media (prefers-reduced-motion: reduce) {
+  .pressable:active {
+    transform: none !important;
+  }
+  .pressable-scale:active {
+    scale: none !important;
+  }
+}
+
+/* ─── Mention pills ────────────────────────────────────────────────────────── */
+.mention {
+  color: var(--mention-text) !important;
+  background-color: var(--mention-bg);
+  border-radius: 4px;
+  padding: 1px 4px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+/* ─── Code styling ─────────────────────────────────────────────────────────── */
+code {
+  color: var(--code-inline-text);
+  background: var(--code-inline-bg);
+  border: 1px solid var(--code-border);
+  font-family: ui-monospace, "SF Mono", Monaco, monospace;
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: 13px;
+}
+
+pre {
+  background: var(--code-bg);
+  border: 1px solid var(--code-border);
+  border-radius: 6px;
+  padding: 12px 16px;
+  font-family: ui-monospace, "SF Mono", Monaco, monospace;
+  font-size: 13px;
+  overflow-x: auto;
+  color: var(--code-text);
+}
+
+pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: inherit;
+  color: inherit;
+}
+
+/* ─── Dividers ─────────────────────────────────────────────────────────────── */
+.divider-text {
+  color: var(--divider-text);
+}
+.divider-border {
+  border-color: var(--divider-border);
+}
+
+/* ─── Message hover row ───────────────────────────────────────────────────── */
+.msg-row {
+  transition: background-color var(--duration-fast, 100ms) ease;
+}
+.msg-row:hover {
+  background-color: var(--msg-hover-bg);
+}
+
+/* ─── Role badges ────────────────────────────────────────────────────────── */
+.role-badge {
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  padding: 2px 8px;
+  border-radius: 9999px;
+  border: 1px solid var(--border);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+}
+[data-theme="light"] .role-badge {
+  background: #f4f4f5;
+  border-color: #e4e4e7;
+  color: #71717a;
+}
+
+/* ─── Modal overlay ───────────────────────────────────────────────────────── */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: var(--modal-overlay);
+}
+.modal-container {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 580px;
+  max-height: calc(100vh - 2.5rem);
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  background-color: var(--bg-base);
+  box-shadow: var(--modal-shadow);
+  overflow: hidden;
+}
+
+/* ─── Blockquotes ─────────────────────────────────────────────────────────── */
+blockquote {
+  border-left: 4px solid var(--border-light);
+  padding-left: 16px;
+  margin: 4px 0;
+  color: var(--text-secondary);
+  border-radius: 0 8px 8px 0;
+}
+
+/* ─── Search mark highlighting ────────────────────────────────────────────── */
+mark {
+  background-color: var(--highlight-bg);
+  color: inherit;
+  border-radius: 2px;
+  padding: 0 2px;
+}
+
+/* ─── Consecutive code blocks ─────────────────────────────────────────────── */
+pre + pre {
+  margin-top: -1px;
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+}
+pre:has(+ pre) {
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+/* ─── Motion tokens ──────────────────────────────────────────────────────── */
+:root {
+  --duration-instant: 50ms;
+  --duration-fast: 100ms;
+  --duration-quick: 150ms;
+  --duration-normal: 200ms;
+  --duration-moderate: 300ms;
+  --duration-slow: 400ms;
+  --ease-enter: cubic-bezier(0, 0, 0.2, 1);
+  --ease-exit: cubic-bezier(0.4, 0, 1, 1);
+  --ease-move: cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* iOS-native motion (additive — existing duration/ease tokens above are
+     consumed app-wide and must keep their values). --ease-spring is Apple's
+     UINavigationController push/pop curve; nav/sheet durations match UIKit. */
+  --ease-spring: cubic-bezier(0.32, 0.72, 0, 1);
+  --duration-nav: 350ms;
+  --duration-sheet: 250ms;
+}
+
+/* ─── Animations ──────────────────────────────────────────────────────────── */
+@keyframes page-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes stagger-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes card-in {
+  from {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+@keyframes slide-in-right {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+@keyframes pulse-once {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.6;
+  }
+}
+
+/* Typing-indicator dot: a subtle staggered opacity + small lift loop (premium
+   chat feel) instead of Tailwind's large `animate-bounce` hop. Each dot passes
+   its stagger via `--dot-delay`. */
+@keyframes typing-dot {
+  0%,
+  60%,
+  100% {
+    opacity: 0.3;
+    transform: translateY(0);
+  }
+  30% {
+    opacity: 1;
+    transform: translateY(-2px);
+  }
+}
+
+.animate-slide-in-right {
+  animation: slide-in-right var(--duration-slow) var(--ease-enter) both;
+}
+
+.animate-pulse-once {
+  animation: pulse-once 600ms ease-out 1;
+}
+
+.animate-typing-dot {
+  animation: typing-dot 1.2s ease-in-out infinite;
+  animation-delay: var(--dot-delay, 0ms);
+}
+
+.animate-page-in {
+  animation: page-in var(--duration-moderate) var(--ease-enter) both;
+}
+
+.animate-stagger-in {
+  animation: stagger-in var(--duration-moderate) var(--ease-enter) var(--stagger-delay, 0ms) both;
+}
+
+.animate-card-in {
+  animation: card-in var(--duration-normal) var(--ease-enter) var(--stagger-delay, 0ms) both;
+}
+
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--bg-surface) 25%,
+    var(--bg-elevated) 50%,
+    var(--bg-surface) 75%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+  animation-delay: var(--stagger-delay, 0ms);
+  border-radius: 4px;
+}
+
+.message-content {
+  user-select: text;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-page-in,
+  .animate-stagger-in,
+  .animate-card-in,
+  .animate-slide-in-right,
+  .animate-pulse-once {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
+  .skeleton {
+    animation: none;
+  }
+  /* Typing dots: stop the motion; the dots stay visible (static), so the
+     indicator still reads as "typing" without any animation. */
+  .animate-typing-dot {
+    animation: none;
+  }
+}
+
+/* ─── Button base ─────────────────────────────────────────────────────────── */
+.btn-primary {
+  background-color: var(--btn-primary-bg);
+  color: var(--btn-primary-text);
+  font-weight: 700;
+  font-size: 13.8px;
+  letter-spacing: 0.057em;
+  padding: 8px 16px;
+  border-radius: 6px;
+  border: none;
+  cursor: pointer;
+  transition: all var(--duration-moderate, 300ms) ease-out;
+}
+.btn-primary:hover {
+  background-color: var(--btn-primary-hover);
+}
+.btn-primary:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.btn-secondary {
+  background-color: var(--btn-secondary-bg);
+  color: var(--btn-secondary-text);
+  border: 1px solid var(--btn-secondary-border);
+  font-weight: 500;
+  font-size: 13px;
+  padding: 6px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background-color var(--duration-fast, 100ms) ease;
+}
+.btn-secondary:hover {
+  background-color: var(--btn-secondary-hover);
+}
+
+/* ─── Role badges ─────────────────────────────────────────────────────────── */
+.badge-role {
+  font-size: 11px;
+  font-weight: 500;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 9999px;
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+}
+
+/* ─── Lists ───────────────────────────────────────────────────────────────── */
+ul {
+  list-style-type: disc;
+  padding-left: 20px;
+}
+ol {
+  list-style-type: decimal;
+  padding-left: 20px;
+}
+
+/* ─── Links ───────────────────────────────────────────────────────────────── */
+a {
+  color: #3b82f6;
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+}
+
+/* ─── Electron window drag region ────────────────────────────────────────── */
+.drag-region {
+  -webkit-app-region: drag;
+  min-height: 2.25rem;
+}
+.drag-region button,
+.drag-region input,
+.drag-region a,
+.drag-region [data-no-drag] {
+  -webkit-app-region: no-drag;
+}
+
+/* ─── Audit cards ────────────────────────────────────────────────────────── */
+.audit-card {
+  background-color: var(--audit-card-bg);
+  border: 1px solid var(--audit-card-border);
+  border-radius: 0.75rem;
+}
+
+/* Flash-highlight a message jumped-to from the Threads view (Mattermost-style
+   permalink focus). Global so MessageList can toggle it on a ChatMessage row. */
+@keyframes msgFlash {
+  0% {
+    background-color: color-mix(in srgb, var(--warning, #e8ab5a) 24%, transparent);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+.msg-flash {
+  animation: msgFlash 2.2s ease-out forwards;
+  border-radius: 6px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .msg-flash {
+    animation: none;
+  }
+}
+
+/* ─── Tauri iOS shell: keyboard / viewport foundation ──────────────────────
+   Caveats #20 (visualViewport keyboard) + #14 (anti-flash painting).
+
+   Scoped to `html.tauri-ios` (added by the root +layout on the iOS shell
+   only) so web / desktop / Android are completely unaffected — these rules
+   never apply outside the Tauri iOS WKWebView.
+
+   The root layout's visualViewport handler mirrors `visualViewport.height`
+   onto `--app-vh` and pins `--app-top` to 0. We pin html + body to
+   `position: fixed; inset: 0` so the layout viewport can never scroll when an
+   input is focused (the "top half disappears for ~1s when the keyboard pops"
+   glitch), and size them to the live visible height instead of 100dvh (which
+   doesn't reliably shrink for the keyboard inside Tauri's WebView).
+
+   --sat / --sab are the project's existing safe-area tokens (defined above on
+   :root) — reused here, not redefined. */
+html.tauri-ios {
+  /* Fallbacks for first paint / before the JS handler writes the live values.
+     --app-vh falls back to the dynamic viewport unit; --app-top to 0. */
+  --app-vh: 100dvh;
+  --app-top: 0px;
+
+  /* Anti-flash base surface (Caveat #14): WKWebView + ancestors default to
+     white, so a SvelteKit unmount/remount flashes white between pages (worse
+     in dark mode). Painting the project's surface token here keeps the gap the
+     app's own background. `--color-surface` resolves to `--bg-base` via the
+     @theme bridge. */
+  background-color: var(--color-surface);
+
+  /* iOS-native feel inside the WKWebView. The gray box WebKit flashes on every
+     tap is the #1 "this is a web / Android app" tell — kill it. Also stop WebKit
+     from auto-inflating text. */
+  -webkit-tap-highlight-color: transparent;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+
+  /* NO web text-selection anywhere on the iOS shell. The blue selection handles
+     / magnifier that WebKit shows on a long-press of any UI text (header,
+     message, label) are a webby tell and competed with the long-press action
+     sheet ("color on pressed stuff"). Native apps don't let you select chrome
+     text; the message action sheet's "Copy text" replaces it. Re-enabled only in
+     editable fields below. */
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+
+/* Editable fields stay selectable on iOS (search box, inline message editor,
+   any contenteditable) so typing + caret + select-to-edit still work. More
+   specific than the html.tauri-ios rule above, so it wins. */
+html.tauri-ios input,
+html.tauri-ios textarea,
+html.tauri-ios [contenteditable="true"] {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+html.tauri-ios,
+html.tauri-ios body {
+  position: fixed;
+  inset: 0;
+  top: var(--app-top, 0px);
+  height: var(--app-vh, 100dvh);
+  width: 100%;
+  max-width: 100vw;
+  overflow: hidden;
+  overscroll-behavior: none;
+  /* NO safe-area padding here. The mobile shell (top bar / bottom nav / drawer)
+     and the full-screen sheets each apply --sat/--sab themselves; adding it on
+     html + body as well stacked the inset 2–3× and pushed the whole app down
+     (the big empty gap under the status bar). The fixed container fills the
+     screen edge-to-edge; inner chrome owns the insets. */
+}
+
+html.tauri-ios body {
+  /* Body inherits the same anti-flash surface so neither layer can flash. */
+  background-color: var(--color-surface);
+}
+
+/* The root layout container is `h-screen` (100vh). On the iOS shell the keyboard
+   shrinks the VISUAL viewport (visualViewport.height → --app-vh), but 100vh is
+   the FULL screen, so the container (and the message list inside it) stayed
+   full-height and the keyboard simply covered the bottom messages — they didn't
+   scroll above the composer (Slack/Mattermost shrink the list instead). Size the
+   single .h-screen container to --app-vh so the whole shell shrinks with the
+   keyboard; the message-list ResizeObserver then preserves the read position and
+   the last messages stay visible above the native composer. */
+html.tauri-ios .h-screen {
+  height: var(--app-vh, 100dvh);
+  /* GPU-promote the fixed root container to its own compositor layer (v1
+     parity). Reduces the keyboard-transition flash and gives the absolute
+     swipe-back peek layer a well-defined containing block to layer against. */
+  transform: translateZ(0);
+  will-change: transform;
+}
+
+/* ── Android keyboard-follow (issue #460) ──────────────────────────────────
+   Parity with the iOS shell-shrink, WITHOUT a native composer. The root +layout
+   adds `html.tauri-android` and drives `--app-vh` from visualViewport.height
+   (the soft keyboard shrinks the VISUAL viewport on Chromium WebView). Pin the
+   shell fixed + size it to --app-vh so it shrinks with the keyboard and the web
+   composer at its bottom rides above the keyboard instead of being covered.
+   Deliberately NOT the iOS tap-highlight / user-select / safe-area-top rules —
+   Android's wry WebView already insets below the status bar; this is keyboard
+   handling only. */
+html.tauri-android {
+  --app-vh: 100dvh;
+  --cg-keyboard-inset: 0px;
+}
+html.tauri-android,
+html.tauri-android body {
+  position: fixed;
+  inset: 0;
+  height: var(--app-vh, 100dvh);
+  width: 100%;
+  max-width: 100vw;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+html.tauri-android .h-screen {
+  height: var(--app-vh, 100dvh);
+  transform: translateZ(0);
+  will-change: transform;
+}
+
+/* MobileTopBar uses a flat 2.75rem height because Android's wry WebView already
+   insets content below the status bar. iOS (viewport-fit=cover) does NOT
+   auto-inset, so the bar needs the safe-area top padding or it sits under the
+   Dynamic Island. !important to beat the component's inline height. */
+html.tauri-ios .mobile-top-bar {
+  padding-top: var(--sat);
+  height: calc(2.75rem + var(--sat)) !important;
+}
+
+/* The .drag-region (root layout, wraps ConnectionStatus) is a DESKTOP
+   window-titlebar affordance — `-webkit-app-region: drag` needs a grabbable
+   strip, so it has min-height: 2.25rem. On the iOS shell there's no OS
+   titlebar, and ConnectionStatus is empty while connected, so that 36pt was
+   pure dead space stacked ABOVE the mobile top bar's own safe-area padding —
+   pushing the whole app ~36pt below the Dynamic Island (the "big top gap").
+   Collapse it on iOS; ConnectionStatus still grows it when disconnected. */
+html.tauri-ios .drag-region {
+  min-height: 0;
+}
+
+/* ─── Swipe-back peek layer (Caveats #21, #22, #23) ────────────────────────
+   The edge-swipe-back gesture (lib/mobile/swipeBack.ts) imperatively inserts
+   `#swipe-peek-layer` — a clone of the previous page — as a sibling immediately
+   before the live <main>, and drags <main> across it. Positioning + z-index +
+   transform are written from JS (inline) so the 60fps drag transform is never
+   clobbered by Svelte's reactive style rewrites. These rules only harden what
+   JS sets: keep the layer painted with the app surface (no white flash through
+   the dim), and guarantee it can never receive input or be selected.
+
+   The cloned snapshot is the live <main> ONLY (the page content). The shell
+   chrome — the safe-area top bar + TrialBar above <main>, MobileNav below —
+   lives OUTSIDE <main>, so the page content does NOT start at the top of the
+   screen. JS therefore sizes + positions the layer to the live <main>'s exact
+   offset box (top/left/width/height) so the clone overlays the live page 1:1
+   (top bars coincide; no status-bar-clock overlap, no doubled bar). Do NOT add
+   `top/left/right/bottom/inset/width/height` here — that would override the
+   JS-computed box and re-introduce the misalignment.
+
+   #23 trap avoidance: the layer is `position: absolute` (set in JS), NOT fixed,
+   so the root's GPU containing block (position:fixed; inset:0 above) doesn't
+   trap it the way it would a fixed descendant on WKWebView. We deliberately do
+   NOT pin it `position: fixed` here — that would re-introduce the trap. */
+html.tauri-ios #swipe-peek-layer {
+  background-color: var(--color-surface);
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+  /* Promote to its own compositor layer so the live <main> sliding above it
+     animates against a static, pre-rendered backdrop (no per-frame repaint).
+     `opacity` joins `transform` because the P2 parallax now drives the layer's
+     dim per-frame alongside its translate. */
+  will-change: transform, opacity;
+  contain: strict;
+}
+
+/* Push/pop nav-transition layers (lib/mobile/pushTransition.ts) — same pattern
+   and rules as the swipe peek layer above: absolute (never fixed) inside the
+   GPU root, positioned + transformed imperatively from JS, painted with the
+   app surface so nothing can flash through mid-transition, input-inert. The
+   dim layer only ever animates opacity. Do NOT add box geometry here — JS owns
+   it (see the #swipe-peek-layer note). */
+html.tauri-ios #push-underlay-layer,
+html.tauri-ios #push-overlay-layer {
+  background-color: var(--color-surface);
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+  will-change: transform;
+  contain: strict;
+}
+html.tauri-ios #push-dim-layer {
+  pointer-events: none;
+  will-change: opacity;
+}
+
+/* ─── Tauri iOS shell: system font ─────────────────────────────────────────
+   Web fonts (Lato/Outfit/Inter) are the loudest "this is a website" tell on
+   iOS — swap all three to the SF system stack, iOS shell only. Two layers
+   needed because the fonts live in the `@theme inline` block: Tailwind
+   INLINES the literal value into the generated .font-lato/.font-outfit/
+   .font-inter utilities (no var() reference), so the custom-property
+   override only reaches `font-family: var(--font-*)` consumers (the body
+   rule, AuditPane's inline style) and the class overrides catch the rest.
+   Mono (ui-monospace) is already the system stack — untouched. Desktop/web
+   never has the tauri-ios class, so Lato/Outfit/Inter stay pixel-identical
+   there. */
+html.tauri-ios {
+  --font-lato:
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, "Helvetica Neue", sans-serif;
+  --font-outfit:
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, "Helvetica Neue", sans-serif;
+  --font-inter:
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, "Helvetica Neue", sans-serif;
+}
+html.tauri-ios .font-lato,
+html.tauri-ios .font-outfit,
+html.tauri-ios .font-inter {
+  font-family:
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, "Helvetica Neue", sans-serif;
+}

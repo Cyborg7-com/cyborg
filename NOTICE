@@ -1,0 +1,16 @@
+Cyborg7
+Copyright (c) 2026 Cyborg7-com
+
+This product is a fork of and includes software from Paseo
+(https://github.com/getpaseo/paseo), Copyright (c) Mohamed Boudra,
+licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
+
+Cyborg7 extends Paseo with workspaces, channels, tasks, Cybos (custom AI
+personalities), a workspace-aware relay broker, and multi-user collaboration.
+Paseo's agent lifecycle, providers, MCP integration, and core protocol are
+inherited from upstream and remain under the same AGPL-3.0 license.
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU Affero General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option) any
+later version. See the LICENSE file for the full text.

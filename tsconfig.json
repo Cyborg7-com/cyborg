@@ -1,0 +1,7 @@
+{
+  "extends": "./tsconfig.base.json",
+  "// noEmit": "Root config is editor/typecheck ONLY — never emit. Without this a bare `tsc -p tsconfig.json` at the repo root compiles all ~3210 .ts/.tsx and writes .js next to each source (real builds use each package's own tsconfig with outDir: ./dist).",
+  "compilerOptions": {
+    "noEmit": true
+  }
+}

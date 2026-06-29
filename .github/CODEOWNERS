@@ -1,0 +1,15 @@
+# CODEOWNERS
+#
+# GitHub uses this file to auto-request review from the listed maintainers
+# whenever a pull request touches a matching path. The global rule below makes
+# the core maintainers default reviewers on every PR.
+#
+# More specific path-scoped rules can be added later (the LAST matching pattern
+# wins). For now, one global owner line keeps every change in front of the core
+# maintainers.
+#
+# See: https://docs.github.com/articles/about-code-owners
+
+# Global default — core maintainers review all changes.
+# (Swap these for a @Cyborg7-com/<team> once such a team is created.)
+* @rp4ri @fabriciojallaza

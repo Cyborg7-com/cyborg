@@ -1,0 +1,15 @@
+-- Daemon access scopes (#705): replace the binary daemon_access grant (a row =
+-- TOTAL access / RCE) with a per-grant capability set.
+--
+-- Additive + backward-compatible + IDEMPOTENT (ADD COLUMN IF NOT EXISTS), matching
+-- the repo's hand-applied-prod convention — see 0004_schedule_runs_and_lifecycle.sql
+-- / 0003_daemon_label_user_set.sql. Safe no-op on a DB that already has the column.
+--
+-- BACK-COMPAT: DEFAULT '{admin}' means every PRE-EXISTING grant row (which WAS
+-- total access) is backfilled to ['admin'] by Postgres when the column is added —
+-- no one loses access. NOT NULL + the default guarantee the column is always
+-- populated. A no-access state is the ROW NOT EXISTING, never an empty array. An
+-- older relay that predates this column reads NULL and the enforcement layer
+-- (normalizeScopes / getUserDaemonScopes) treats that as admin, so the fail-safe
+-- always points at today's behavior.
+ALTER TABLE "daemon_access" ADD COLUMN IF NOT EXISTS "scopes" text[] DEFAULT '{"admin"}' NOT NULL;

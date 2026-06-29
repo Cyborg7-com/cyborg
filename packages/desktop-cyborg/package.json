@@ -1,0 +1,37 @@
+{
+  "name": "@cyborg7/desktop",
+  "version": "0.0.214",
+  "private": true,
+  "description": "Cyborg desktop app — Electron shell with embedded daemon lifecycle",
+  "author": "Cyborg7",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Cyborg7-com/cyborg7-core-rewrite.git"
+  },
+  "type": "module",
+  "main": "dist/main.js",
+  "scripts": {
+    "dev": "tsc -p tsconfig.json && electron dist/main.js",
+    "build:main": "tsc -p tsconfig.json",
+    "build:ui": "pnpm --filter @cyborg7/ui build",
+    "build:daemon-bundle": "node scripts/build-daemon-bundle.mjs",
+    "build": "pnpm run build:ui && pnpm run build:main && pnpm run build:daemon-bundle && electron-builder --config electron-builder.yml",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --import tsx --test desktop-error-report.test.ts daemon-claim-decision.test.ts daemon-port-guard.test.ts login-shell-env.test.ts"
+  },
+  "dependencies": {
+    "electron-log": "^5.4.3",
+    "electron-updater": "6.8.3",
+    "node-pty": "1.2.0-beta.11",
+    "ws": "^8.14.2"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "^4.0.4",
+    "@getpaseo/server": "workspace:*",
+    "@types/node": "^22.15.29",
+    "electron": "41.2.0",
+    "electron-builder": "26.8.1",
+    "tsx": "^4.22.3",
+    "typescript": "^5.8.3"
+  }
+}

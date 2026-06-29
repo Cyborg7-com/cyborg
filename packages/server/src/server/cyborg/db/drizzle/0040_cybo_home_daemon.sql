@@ -1,0 +1,19 @@
+-- cybos.home_daemon_id: the cybo's explicit "home" daemon — the machine it
+-- lives on / runs on, chosen at creation. Carried authoritatively across
+-- daemons so the workspace knows which machine a cybo belongs to; the roster /
+-- UI surfaces it as "lives on X" and the spawn path can prefer it. NULL = no
+-- explicit home (existing cybos, and disk cybos), in which case the spawn target
+-- falls back to the sponsor/selected daemon — today's behaviour, unchanged.
+--
+-- No FK: daemons are NOT a PG table (they live in the relay's daemon registry /
+-- each daemon's SQLite), so this is a free-form id, mirroring how cybo
+-- provenance ids (daemon_id) are stored elsewhere.
+--
+-- Additive + backward-compatible + IDEMPOTENT (ADD COLUMN IF NOT EXISTS),
+-- matching the repo's hand-applied-prod convention — see
+-- 0035_schedules_task_id.sql / 0023_workspace_agent_autonomy.sql and
+-- drizzle/RUNBOOK.md. Hand-authored because drizzle-kit generate is blocked by
+-- the pre-existing 0008/0009/0010 snapshot collision; the runtime migrator
+-- applies plain .sql + _journal.json. Safe no-op on a DB that already has the
+-- column.
+ALTER TABLE "cybos" ADD COLUMN IF NOT EXISTS "home_daemon_id" text;

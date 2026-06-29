@@ -1,0 +1,54 @@
+{
+  "name": "@cyborg7/observability",
+  "version": "0.1.0",
+  "description": "Shared Logfire-on-OpenTelemetry observability for Cyborg7 (node) plus a tiny client-error beacon (web).",
+  "files": [
+    "dist",
+    "!dist/**/*.map"
+  ],
+  "type": "module",
+  "exports": {
+    "./node": {
+      "types": "./dist/node/index.d.ts",
+      "source": "./src/node/index.ts",
+      "default": "./dist/node/index.js"
+    },
+    "./web": {
+      "types": "./dist/web/index.d.ts",
+      "source": "./src/web/index.ts",
+      "default": "./dist/web/index.js"
+    }
+  },
+  "scripts": {
+    "clean": "node ../../scripts/clean-package-dist.mjs",
+    "build": "tsc -p tsconfig.json --incremental false",
+    "build:clean": "npm run clean && npm run build",
+    "prepack": "npm run build:clean",
+    "typecheck": "tsgo --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@opentelemetry/api": "1.9.0",
+    "@opentelemetry/exporter-trace-otlp-http": "0.216.0",
+    "@opentelemetry/resources": "2.7.1",
+    "@opentelemetry/sdk-trace-base": "2.7.1",
+    "@opentelemetry/sdk-trace-node": "2.7.1",
+    "@opentelemetry/semantic-conventions": "1.40.0",
+    "logfire": "0.13.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "pino": "^10.2.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.6"
+  },
+  "peerDependencies": {
+    "pino": ">=9"
+  },
+  "peerDependenciesMeta": {
+    "pino": {
+      "optional": true
+    }
+  }
+}
