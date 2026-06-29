@@ -141,6 +141,10 @@ export const CyboSchema = z.object({
   provider: z.string(),
   model: z.string().optional(),
   mcpServers: z.record(z.string(), McpServerConfigSchema).optional(),
+  // Composio third-party tool grants (the CAPABILITY template — workspace-owned,
+  // admin-set, carries NO credentials). Shape: composio-types.ts CyboToolGrants.
+  // Optional + additive: a cybo without it spawns byte-identically.
+  toolGrants: z.unknown().optional(),
   llmAuthMode: z.enum(LLM_AUTH_MODES).default("cli"),
   behaviorMode: z.enum(BEHAVIOR_MODES).default("responsive"),
   // The cybo's explicit "home" daemon — the machine it lives on / runs on,
@@ -173,6 +177,9 @@ export interface StoredCybo {
   provider: string;
   model: string | null;
   mcp_servers: string | null;
+  // JSON-encoded CyboToolGrants (Composio tool capability). Optional/additive — a
+  // row without it (every existing cybo) makes the spawn skip Composio entirely.
+  tool_grants?: string | null;
   llm_auth_mode: string;
   behavior_mode: string;
   // Explicit "home" daemon id (the machine the cybo lives on), or null.

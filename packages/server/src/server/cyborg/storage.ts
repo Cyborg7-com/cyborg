@@ -727,8 +727,8 @@ export class CyborgStorage {
     );
 
     this.insertCyboStmt = this.db.prepare(
-      `INSERT INTO cybos (id, workspace_id, slug, name, description, avatar, role, soul, provider, model, mcp_servers, llm_auth_mode, behavior_mode, home_daemon_id, autonomy_level, monthly_spend_cap, platform_permissions, is_default, created_by, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO cybos (id, workspace_id, slug, name, description, avatar, role, soul, provider, model, mcp_servers, tool_grants, llm_auth_mode, behavior_mode, home_daemon_id, autonomy_level, monthly_spend_cap, platform_permissions, is_default, created_by, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     this.getCyboStmt = this.db.prepare("SELECT * FROM cybos WHERE id = ?");
     this.getCyboBySlugStmt = this.db.prepare(
@@ -739,7 +739,7 @@ export class CyborgStorage {
     );
     this.updateCyboStmt = this.db.prepare(
       `UPDATE cybos SET name = ?, description = ?, avatar = ?, role = ?, soul = ?,
-       provider = ?, model = ?, mcp_servers = ?, llm_auth_mode = ?, behavior_mode = ?,
+       provider = ?, model = ?, mcp_servers = ?, tool_grants = ?, llm_auth_mode = ?, behavior_mode = ?,
        home_daemon_id = ?, autonomy_level = ?, monthly_spend_cap = ?, platform_permissions = ?, updated_at = ?
        WHERE id = ?`,
     );
@@ -1245,6 +1245,7 @@ export class CyborgStorage {
         provider TEXT NOT NULL,
         model TEXT,
         mcp_servers TEXT,
+        tool_grants TEXT,
         is_default INTEGER NOT NULL DEFAULT 0,
         created_by TEXT NOT NULL,
         created_at INTEGER NOT NULL,
@@ -1376,6 +1377,9 @@ export class CyborgStorage {
     if (cyboCols.length > 0 && !cyboCols.some((c) => c.name === "mcp_servers")) {
       this.db.exec("ALTER TABLE cybos ADD COLUMN mcp_servers TEXT");
     }
+    // Composio third-party tool grants (knowledge: composio-ownership-and-permissions).
+    // A JSON blob (CyboToolGrants) — same shape/treatment as mcp_servers. Additive.
+    this.addColumnIfMissing("cybos", "tool_grants", "TEXT");
     if (cyboCols.length > 0 && !cyboCols.some((c) => c.name === "llm_auth_mode")) {
       this.db.exec("ALTER TABLE cybos ADD COLUMN llm_auth_mode TEXT NOT NULL DEFAULT 'cli'");
       this.db.exec("ALTER TABLE cybos ADD COLUMN behavior_mode TEXT NOT NULL DEFAULT 'responsive'");
@@ -3849,6 +3853,7 @@ export class CyborgStorage {
     role?: string | null;
     model?: string | null;
     mcpServers?: Record<string, unknown> | null;
+    toolGrants?: Record<string, unknown> | null;
     llmAuthMode?: string;
     behaviorMode?: string;
     homeDaemonId?: string | null;
@@ -3871,6 +3876,7 @@ export class CyborgStorage {
       opts.provider,
       opts.model ?? null,
       opts.mcpServers ? JSON.stringify(opts.mcpServers) : null,
+      opts.toolGrants ? JSON.stringify(opts.toolGrants) : null,
       opts.llmAuthMode ?? "cli",
       opts.behaviorMode ?? "responsive",
       opts.homeDaemonId ?? null,
@@ -3907,6 +3913,7 @@ export class CyborgStorage {
       cybo.provider,
       cybo.model ?? null,
       cybo.mcp_servers ?? null,
+      cybo.tool_grants ?? null,
       cybo.llm_auth_mode ?? "cli",
       cybo.behavior_mode ?? "responsive",
       cybo.home_daemon_id ?? null,
@@ -3950,6 +3957,7 @@ export class CyborgStorage {
       provider?: string;
       model?: string | null;
       mcpServers?: Record<string, unknown> | null;
+      toolGrants?: Record<string, unknown> | null;
       llmAuthMode?: string;
       behaviorMode?: string;
       homeDaemonId?: string | null;
@@ -3964,6 +3972,10 @@ export class CyborgStorage {
     if (updates.mcpServers !== undefined) {
       mcpServersStr = updates.mcpServers ? JSON.stringify(updates.mcpServers) : null;
     }
+    let toolGrantsStr = existing.tool_grants ?? null;
+    if (updates.toolGrants !== undefined) {
+      toolGrantsStr = updates.toolGrants ? JSON.stringify(updates.toolGrants) : null;
+    }
     this.updateCyboStmt.run(
       updates.name ?? existing.name,
       updates.description !== undefined ? updates.description : existing.description,
@@ -3973,6 +3985,7 @@ export class CyborgStorage {
       updates.provider ?? existing.provider,
       updates.model !== undefined ? updates.model : existing.model,
       mcpServersStr,
+      toolGrantsStr,
       updates.llmAuthMode ?? existing.llm_auth_mode,
       updates.behaviorMode ?? existing.behavior_mode,
       updates.homeDaemonId !== undefined ? updates.homeDaemonId : existing.home_daemon_id,

@@ -1,6 +1,7 @@
 import type { Logger } from "pino";
 
 import type { AgentManager } from "../agent/agent-manager.js";
+import type { ComposioDeps } from "./composio-deps.js";
 import type { CyboCredentialStore } from "./cybo-credentials.js";
 import { spawnCybo } from "./cybo-manager.js";
 import type { DualStorage } from "./dual-storage.js";
@@ -182,6 +183,10 @@ export interface DispatchTaskOptions {
   serverId?: string;
   cyborg7McpBaseUrl?: string;
   credentialStore?: CyboCredentialStore;
+  // Composio third-party tools. A task dispatch is AUTONOMOUS (the watcher fired
+  // it — no human invoker), so caller-bound toolkits are dropped at spawn; only
+  // service-bound ones run. `undefined` ⇒ Composio is off (feature dark).
+  composio?: ComposioDeps;
   logger?: Logger;
   // Surface dispatch outcomes to the Logs tab (best-effort; see TaskEventEmitter).
   onEvent?: TaskEventEmitter;
@@ -248,6 +253,8 @@ export async function dispatchTaskToAgent(opts: DispatchTaskOptions): Promise<bo
       unattended: opts.unattended ?? false,
       resolvedCybo: cybo,
       credentialStore: opts.credentialStore,
+      composio: opts.composio,
+      autonomous: true,
       logger,
     });
     // Await the full turn so callers that want to know the dispatch finished can;
@@ -401,6 +408,10 @@ export interface CatchUpOwnedTasksOptions {
   serverId?: string;
   cyborg7McpBaseUrl?: string;
   credentialStore?: CyboCredentialStore;
+  // Composio third-party tools. A task dispatch is AUTONOMOUS (the watcher fired
+  // it — no human invoker), so caller-bound toolkits are dropped at spawn; only
+  // service-bound ones run. `undefined` ⇒ Composio is off (feature dark).
+  composio?: ComposioDeps;
   logger?: Logger;
   // Catch-up window: tasks undispatched (or last dispatched) longer ago than this
   // are swept. Defaults to 1h, matching the foundation getOwnedOpenTasks default.
@@ -437,6 +448,7 @@ export async function catchUpOwnedTasks(opts: CatchUpOwnedTasksOptions): Promise
       serverId: opts.serverId,
       cyborg7McpBaseUrl: opts.cyborg7McpBaseUrl,
       credentialStore: opts.credentialStore,
+      composio: opts.composio,
       logger,
     });
     if (won) dispatched++;

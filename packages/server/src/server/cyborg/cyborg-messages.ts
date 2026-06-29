@@ -1,5 +1,6 @@
 import { TerminalStateSchema } from "@getpaseo/protocol/messages";
 import { z } from "zod";
+import { CyboToolGrantsSchema } from "./composio-types.js";
 import {
   AUTONOMY_LEVELS,
   BEHAVIOR_MODES,
@@ -3408,6 +3409,9 @@ export const CyborgCreateCyboRequestSchema = z.object({
   // Specialized tools: a map of custom MCP servers ({type,url}/{command,args})
   // merged into the spawned cybo's agent config alongside the cyborg7 server.
   mcpServers: z.record(z.string(), z.unknown()).optional(),
+  // Composio third-party tool grants (capability layer — toolkits/actions/binding
+  // the cybo MAY use). NO credentials; auth binds to an identity at spawn time.
+  toolGrants: CyboToolGrantsSchema.optional(),
 });
 
 export const CyborgCreateCyboResponseSchema = z.object({
@@ -3579,6 +3583,9 @@ export const CyborgUpdateCyboRequestSchema = z.object({
   monthlySpendCap: MonthlySpendCapSchema.optional(),
   platformPermissions: PlatformPermissionsSchema.optional(),
   mcpServers: z.record(z.string(), z.unknown()).nullable().optional(),
+  // Composio tool grants — nullable so an admin can clear all grants. null/[] ⇒
+  // the cybo loses its Composio tools on the next spawn.
+  toolGrants: CyboToolGrantsSchema.nullable().optional(),
 });
 
 export const CyborgUpdateCyboResponseSchema = z.object({

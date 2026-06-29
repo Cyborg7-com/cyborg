@@ -259,6 +259,7 @@ import {
   reprobePiBeforeSpawn,
 } from "./cybo-provider-refresh.js";
 import { CyboCredentialStore } from "./cybo-credentials.js";
+import { type ComposioDeps, createComposioDeps } from "./composio-deps.js";
 import type { ProviderSnapshotManager } from "../agent/provider-snapshot-manager.js";
 import type { DaemonConfigStore } from "../daemon-config-store.js";
 import { extractActionItems, generateStandup, translateMessages } from "./channel-ai-commands.js";
@@ -873,6 +874,21 @@ export class CyborgDispatcher {
       });
     }
     return this.credentialStoreInstance;
+  }
+
+  // Composio third-party tools (knowledge: composio-ownership-and-permissions).
+  // Built once from COMPOSIO_API_KEY; `undefined` (feature off) when unset, so the
+  // spawn path's injectComposioMcpServers is a strict no-op and every spawn stays
+  // byte-identical. SHIPS DARK until an operator sets the key.
+  private composioDepsResolved = false;
+  private composioDepsInstance: ComposioDeps | undefined;
+
+  private get composio(): ComposioDeps | undefined {
+    if (!this.composioDepsResolved) {
+      this.composioDepsInstance = createComposioDeps(this.storage);
+      this.composioDepsResolved = true;
+    }
+    return this.composioDepsInstance;
   }
 
   // This daemon's human-readable label (host name) — woven into the native
@@ -2257,6 +2273,7 @@ export class CyborgDispatcher {
         ephemeral: true,
         context: { channelId, channelName },
         credentialStore: this.credentialStore,
+        composio: this.composio,
         logger: this.logger ?? undefined,
       });
       // Deliver the question to the freshly spawned, channel-bound cybo. It
@@ -3299,6 +3316,7 @@ export class CyborgDispatcher {
       serverId: this.serverId ?? undefined,
       cyborg7McpBaseUrl: this.cyborg7McpBaseUrl ?? undefined,
       credentialStore: this.credentialStore,
+      composio: this.composio,
       logger: this.logger ?? undefined,
       onEvent: (ev) => this.messageRouter.broadcastTaskEvent(ev),
     }).catch((err) =>
@@ -6384,6 +6402,7 @@ export class CyborgDispatcher {
       monthlySpendCap: parsed.monthlySpendCap,
       platformPermissions: parsed.platformPermissions,
       mcpServers: parsed.mcpServers,
+      toolGrants: parsed.toolGrants,
       createdBy: auth.user.id,
     });
 
@@ -6565,6 +6584,9 @@ export class CyborgDispatcher {
       platformPermissions: parseStringArray(local.platform_permissions),
       mcpServers: local.mcp_servers
         ? (JSON.parse(local.mcp_servers) as Record<string, unknown>)
+        : undefined,
+      toolGrants: local.tool_grants
+        ? (JSON.parse(local.tool_grants) as Record<string, unknown>)
         : undefined,
       createdBy: auth.user.id,
     });
@@ -6775,6 +6797,7 @@ export class CyborgDispatcher {
     if (parsed.platformPermissions !== undefined)
       updates.platformPermissions = parsed.platformPermissions;
     if (parsed.mcpServers !== undefined) updates.mcpServers = parsed.mcpServers;
+    if (parsed.toolGrants !== undefined) updates.toolGrants = parsed.toolGrants;
 
     const cybo = this.storage.updateCybo(parsed.cyboId, updates);
     if (!cybo) {
@@ -7108,6 +7131,7 @@ export class CyborgDispatcher {
         context: { channelId: parsed.channelId, channelName: parsed.channelName },
         resolvedCybo: parsed.resolvedCybo as unknown as StoredCybo | undefined,
         credentialStore: this.credentialStore,
+        composio: this.composio,
         logger: this.logger ?? undefined,
       });
       void this.messageRouter
@@ -7192,6 +7216,7 @@ export class CyborgDispatcher {
         context: { channelId: parsed.channelId, channelName: parsed.channelName },
         resolvedCybo: parsed.resolvedCybo as unknown as StoredCybo | undefined,
         credentialStore: this.credentialStore,
+        composio: this.composio,
         logger: this.logger ?? undefined,
       });
       void this.messageRouter
@@ -7303,6 +7328,7 @@ export class CyborgDispatcher {
         // not have it). Without this, resolveCybo throws "Cybo not found".
         resolvedCybo: parsed.resolvedCybo as StoredCybo | undefined,
         credentialStore: this.credentialStore,
+        composio: this.composio,
         logger: this.logger ?? undefined,
       });
 

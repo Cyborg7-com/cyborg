@@ -1412,6 +1412,7 @@ async function main() {
         role: (inner.role as string | undefined) ?? null,
         model: (inner.model as string | undefined) ?? null,
         mcpServers: (inner.mcpServers as Record<string, unknown> | null | undefined) ?? null,
+        toolGrants: (inner.toolGrants as Record<string, unknown> | null | undefined) ?? null,
         llmAuthMode: inner.llmAuthMode as string | undefined,
         behaviorMode: inner.behaviorMode as string | undefined,
         homeDaemonId: (inner.homeDaemonId as string | null | undefined) ?? null,
@@ -6128,6 +6129,10 @@ async function main() {
             role: typeof inner.role === "string" ? inner.role : null,
             model: ccModel,
             mcpServers: isRecord(inner.mcpServers) ? inner.mcpServers : null,
+            // Composio grants — stored as-is (pg-sync omits the column when null,
+            // so a create stays safe pre-migration). Strict shape is re-validated
+            // at spawn (parseCyboToolGrants), so a malformed blob is a no-op, never fatal.
+            toolGrants: isRecord(inner.toolGrants) ? inner.toolGrants : null,
             llmAuthMode: typeof inner.llmAuthMode === "string" ? inner.llmAuthMode : undefined,
             behaviorMode: typeof inner.behaviorMode === "string" ? inner.behaviorMode : undefined,
             homeDaemonId:
@@ -6250,6 +6255,8 @@ async function main() {
             );
           if (inner.mcpServers === null) ucUpdates.mcpServers = null;
           else if (isRecord(inner.mcpServers)) ucUpdates.mcpServers = inner.mcpServers;
+          if (inner.toolGrants === null) ucUpdates.toolGrants = null;
+          else if (isRecord(inner.toolGrants)) ucUpdates.toolGrants = inner.toolGrants;
           await pg.updateCybo(ucExisting.id, ucUpdates);
           // #636: recompute readiness against the POST-edit provider/model —
           // changing a cybo's provider can flip it ready ⇄ needs-daemon.

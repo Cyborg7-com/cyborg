@@ -27,6 +27,7 @@ import type {
 import { spawnCybo } from "./cybo-manager.js";
 import { runFallbackChain } from "./chain-router.js";
 import { CyboCredentialStore } from "./cybo-credentials.js";
+import { type ComposioDeps, createComposioDeps } from "./composio-deps.js";
 import { nativeHarnessGapMessage } from "./cybo-runtime-profile.js";
 import { isNativeHarnessProvider } from "./native-harness-login.js";
 import { enqueueWebhookEvent } from "./webhook-enqueue.js";
@@ -247,6 +248,20 @@ export class MessageRouter {
       });
     }
     return this.credentialStoreInstance;
+  }
+
+  // Composio third-party tools — built once from COMPOSIO_API_KEY (knowledge:
+  // composio-ownership-and-permissions). `undefined` when unset, so an @-mention
+  // spawn's injectComposioMcpServers is a strict no-op. SHIPS DARK by default.
+  private composioDepsResolved = false;
+  private composioDepsInstance: ComposioDeps | undefined;
+
+  private get composio(): ComposioDeps | undefined {
+    if (!this.composioDepsResolved) {
+      this.composioDepsInstance = createComposioDeps(this.storage);
+      this.composioDepsResolved = true;
+    }
+    return this.composioDepsInstance;
   }
 
   // For a private agent (DM, no channel) return the initiator's email so the
@@ -936,6 +951,7 @@ export class MessageRouter {
         ephemeral: true,
         context: { channelId: channel.id, channelName: channel.name },
         credentialStore: this.credentialStore,
+        composio: this.composio,
         logger: this.logger ?? undefined,
         auditSink: this.auditSink,
       });
@@ -1202,6 +1218,7 @@ export class MessageRouter {
           ephemeral: true,
           context: { channelId: channel.id, channelName: channel.name },
           credentialStore: this.credentialStore,
+          composio: this.composio,
           logger: this.logger ?? undefined,
         });
         this.broadcastTaskEvent({

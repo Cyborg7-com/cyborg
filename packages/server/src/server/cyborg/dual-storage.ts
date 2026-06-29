@@ -1356,6 +1356,7 @@ export class DualStorage {
     role?: string | null;
     model?: string | null;
     mcpServers?: Record<string, unknown> | null;
+    toolGrants?: Record<string, unknown> | null;
     llmAuthMode?: string;
     behaviorMode?: string;
     homeDaemonId?: string | null;
@@ -1401,6 +1402,7 @@ export class DualStorage {
       provider?: string;
       model?: string | null;
       mcpServers?: Record<string, unknown> | null;
+      toolGrants?: Record<string, unknown> | null;
       llmAuthMode?: string;
       behaviorMode?: string;
       homeDaemonId?: string | null;

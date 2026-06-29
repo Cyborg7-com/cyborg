@@ -5330,6 +5330,7 @@ export class PgSync {
     role?: string | null;
     model?: string | null;
     mcpServers?: Record<string, unknown> | null;
+    toolGrants?: Record<string, unknown> | null;
     llmAuthMode?: string;
     behaviorMode?: string;
     homeDaemonId?: string | null;
@@ -5350,6 +5351,10 @@ export class PgSync {
       provider: opts.provider,
       model: opts.model ?? null,
       mcpServers: opts.mcpServers ?? null,
+      // Composio grants — only written when present so a cybo create never
+      // references the (additive) tool_grants column if migration 0043 hasn't
+      // been applied yet. Normal creates stay byte-identical.
+      ...(opts.toolGrants != null ? { toolGrants: opts.toolGrants } : {}),
       llmAuthMode: opts.llmAuthMode ?? "cli",
       behaviorMode: opts.behaviorMode ?? "responsive",
       homeDaemonId: opts.homeDaemonId ?? null,
@@ -5417,6 +5422,7 @@ export class PgSync {
       provider: string;
       model: string | null;
       mcpServers: Record<string, unknown> | null;
+      toolGrants: Record<string, unknown> | null;
       llmAuthMode: string;
       behaviorMode: string;
       homeDaemonId: string | null;
@@ -5434,6 +5440,7 @@ export class PgSync {
     if (updates.provider !== undefined) set.provider = updates.provider;
     if (updates.model !== undefined) set.model = updates.model;
     if (updates.mcpServers !== undefined) set.mcpServers = updates.mcpServers;
+    if (updates.toolGrants !== undefined) set.toolGrants = updates.toolGrants;
     if (updates.llmAuthMode !== undefined) set.llmAuthMode = updates.llmAuthMode;
     if (updates.behaviorMode !== undefined) set.behaviorMode = updates.behaviorMode;
     if (updates.homeDaemonId !== undefined) set.homeDaemonId = updates.homeDaemonId;
@@ -6669,6 +6676,7 @@ export class PgSync {
       provider: r.provider,
       model: r.model,
       mcp_servers: r.mcpServers ? JSON.stringify(r.mcpServers) : null,
+      tool_grants: r.toolGrants ? JSON.stringify(r.toolGrants) : null,
       llm_auth_mode: r.llmAuthMode,
       behavior_mode: r.behaviorMode,
       home_daemon_id: r.homeDaemonId,

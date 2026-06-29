@@ -1019,6 +1019,10 @@ export const cybos = pgTable(
     provider: text("provider").notNull(),
     model: text("model"),
     mcpServers: jsonb("mcp_servers"),
+    // Composio (and future provider) tool capability grants — the `CyboToolGrants`
+    // blob from composio-types.ts. Nullable like mcp_servers; carries NO credentials
+    // (auth binds to an identity at run time via composio_connections).
+    toolGrants: jsonb("tool_grants"),
     isDefault: boolean("is_default").notNull().default(false),
     llmAuthMode: text("llm_auth_mode").notNull().default("cli"),
     // DEPRECATED — superseded by autonomyLevel (S2). Kept until S3 drops it.
@@ -1044,6 +1048,35 @@ export const cybos = pgTable(
   (t) => [
     uniqueIndex("idx_cybos_workspace_slug").on(t.workspaceId, t.slug),
     index("idx_cybos_workspace").on(t.workspaceId),
+  ],
+);
+
+// ─── Composio connected accounts (per-identity toolkit auth refs) ───
+// One OAuth'd identity for one toolkit. We store only the Composio
+// `connected_account_id` REFERENCE (tokens live in Composio's vault — never here)
+// plus who owns it: ownerKind 'user' (personal, ownerId = userId) or 'service'
+// (shared, ownerId = workspaceId). One connection per (workspace, owner, toolkit).
+export const composioConnections = pgTable(
+  "composio_connections",
+  {
+    id: text("id").primaryKey(),
+    workspaceId: text("workspace_id").notNull(),
+    ownerKind: text("owner_kind").notNull(), // 'user' | 'service'
+    ownerId: text("owner_id").notNull(),
+    toolkit: text("toolkit").notNull(),
+    connectedAccountId: text("connected_account_id").notNull(),
+    status: text("status").notNull(), // 'active' | 'pending' | 'expired'
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    uniqueIndex("idx_composio_connections_owner_toolkit").on(
+      t.workspaceId,
+      t.ownerKind,
+      t.ownerId,
+      t.toolkit,
+    ),
+    index("idx_composio_connections_workspace").on(t.workspaceId),
   ],
 );
 

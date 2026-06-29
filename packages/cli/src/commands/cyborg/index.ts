@@ -149,6 +149,10 @@ export function createCyborgCommand(): Command {
       .option("--description <text>", "Short description")
       .option("--avatar <emoji>", "Avatar emoji or URL")
       .option("--role <role>", "Role title (e.g. Research Assistant)")
+      .option(
+        "--tool-grants <json>",
+        "Composio tool grants as JSON, or @<path> to read from a file",
+      )
       .option("--daemon <daemon-id>", "Target a specific daemon by id")
       .option("--email <email>", "Auth email (dev mode)")
       .option("--token <token>", "Auth token"),

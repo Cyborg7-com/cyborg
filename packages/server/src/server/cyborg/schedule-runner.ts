@@ -2,6 +2,7 @@ import type { Logger } from "pino";
 
 import type { AgentManager } from "../agent/agent-manager.js";
 import { computeNextRunAt } from "../schedule/cron.js";
+import { type ComposioDeps, createComposioDeps } from "./composio-deps.js";
 import { spawnCybo } from "./cybo-manager.js";
 import { CyboCredentialStore } from "./cybo-credentials.js";
 import type { DualStorage } from "./dual-storage.js";
@@ -67,6 +68,20 @@ export class ScheduleRunner {
       this.credentialStoreInstance = new CyboCredentialStore({ logger: this.logger });
     }
     return this.credentialStoreInstance;
+  }
+
+  // Composio third-party tools — built once from COMPOSIO_API_KEY (knowledge:
+  // composio-ownership-and-permissions). A scheduled run is autonomous, so caller
+  // toolkits are dropped at spawn; only service-bound ones run. SHIPS DARK.
+  private composioDepsResolved = false;
+  private composioDepsInstance: ComposioDeps | undefined;
+
+  private get composio(): ComposioDeps | undefined {
+    if (!this.composioDepsResolved) {
+      this.composioDepsInstance = createComposioDeps(this.storage);
+      this.composioDepsResolved = true;
+    }
+    return this.composioDepsInstance;
   }
 
   constructor(options: ScheduleRunnerOptions) {
@@ -273,6 +288,7 @@ export class ScheduleRunner {
         serverId: this.serverId,
         cyborg7McpBaseUrl: this.cyborg7McpBaseUrl,
         credentialStore: this.credentialStore,
+        composio: this.composio,
         logger: this.logger,
         onEvent: this.onTaskEvent,
       })
@@ -475,6 +491,8 @@ export class ScheduleRunner {
           channelName: channel?.name,
         },
         credentialStore: this.credentialStore,
+        composio: this.composio,
+        autonomous: true,
         logger: this.logger,
       });
       // Deliver the schedule's prompt as the cybo's first turn. AWAIT the full turn

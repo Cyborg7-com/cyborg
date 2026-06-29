@@ -38,6 +38,26 @@ interface CyboCreateOptions extends CyborgCommandOptions {
   role?: string;
   soul?: string;
   soulFile?: string;
+  toolGrants?: string;
+}
+
+// Parse the --tool-grants value: an inline JSON string, or `@<path>` to read
+// the JSON from a file. Returns undefined when the flag is absent so the
+// create request stays byte-identical (the server treats an absent grant set as
+// "no Composio tools"). Throws a typed CLI error on unreadable/invalid JSON so a
+// typo never silently drops a cybo's tool grants.
+async function parseToolGrants(raw: string | undefined): Promise<unknown | undefined> {
+  if (raw === undefined) return undefined;
+  let text = raw;
+  if (raw.startsWith("@")) {
+    const { readFileSync } = await import("node:fs");
+    text = readFileSync(raw.slice(1), "utf-8");
+  }
+  try {
+    return JSON.parse(text);
+  } catch (err) {
+    throw toCyborgError("CYBO_CREATE_FAILED", "parse --tool-grants", err);
+  }
 }
 
 export async function runCyboCreateCommand(
@@ -60,6 +80,8 @@ export async function runCyboCreateCommand(
     );
   }
 
+  const toolGrants = await parseToolGrants(options.toolGrants);
+
   const client = await connectCyborgClient(options);
   try {
     const resp = await client.request<{ cybo: CyboRow }>("cyborg:create_cybo", {
@@ -73,6 +95,7 @@ export async function runCyboCreateCommand(
       description: options.description,
       avatar: options.avatar,
       role: options.role,
+      ...(toolGrants !== undefined ? { toolGrants } : {}),
     });
     return {
       type: "single",

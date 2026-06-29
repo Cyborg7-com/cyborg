@@ -249,6 +249,9 @@ export { NATIVE_CYBO_HARNESSES, resolveCyboHarness, type CyboHarness } from "./c
 import { resolveCyboHarness, type CyboHarness } from "./cybo-harness.js";
 import type { CyboCredentialStore } from "./cybo-credentials.js";
 import { resolveCyboCredentialPlan } from "./cybo-openai-compatible.js";
+import { composioMcpForSpawn, parseCyboToolGrants } from "./composio-spawn.js";
+import { buildComposioRouterMcpServer } from "./composio-mcp.js";
+import type { ComposioDeps } from "./composio-deps.js";
 import type { Logger } from "pino";
 
 // Re-exported so the spawn-failure paths (dispatcher / message-router) can
@@ -269,6 +272,52 @@ async function resolveSpawnCredentialEnv(args: {
 }): Promise<Record<string, string> | undefined> {
   const plan = await resolveCyboCredentialPlan(args);
   return Object.keys(plan.env).length > 0 ? plan.env : undefined;
+}
+
+// Resolve + merge a cybo's Composio MCP servers into `mcpServers` at spawn. Pulled
+// out of spawnCybo to keep its complexity bounded. Strict no-op when the cybo has no
+// tool_grants or no composio dep is wired — the binding resolves which toolkits this
+// run may use and AS WHOM (the invoker's own account for `caller`, the workspace's for
+// `service`); approval-gated (Tier-2) actions are deliberately NOT mounted here. A
+// per-toolkit mint failure is logged, never fatal.
+async function injectComposioMcpServers(opts: {
+  cybo: StoredCybo;
+  composio?: ComposioDeps;
+  autonomous?: boolean;
+  workspaceId: string;
+  userId: string;
+  mcpServers: Record<string, McpServerConfig>;
+  logger?: Pick<Logger, "info" | "warn">;
+}): Promise<void> {
+  if (!opts.composio || !opts.cybo.tool_grants) return;
+  // A cybo opts into Composio by carrying composio tool_grants; an empty/garbled
+  // grant set is a strict no-op regardless of transport.
+  if (parseCyboToolGrants(opts.cybo.tool_grants).composio.length === 0) return;
+
+  // Transport B (consumer router / ck_, the decided v1 path): inject the router as a
+  // single MCP server. Composio restricts to connected toolkits (toolkit-level) — no
+  // per-action minting, no connection store, no daemon-side gateway. Preferred when a
+  // router key is wired.
+  if (opts.composio.router) {
+    Object.assign(opts.mcpServers, buildComposioRouterMcpServer(opts.composio.router));
+    return;
+  }
+
+  // Transport A (Platform API): mint per-action-scoped MCP URLs per toolkit. Requires
+  // a client + connection store; absent ⇒ skip (Composio simply doesn't mount).
+  if (!opts.composio.client || !opts.composio.connections) return;
+  const { servers, failures } = await composioMcpForSpawn({
+    toolGrantsRaw: opts.cybo.tool_grants,
+    connections: opts.composio.connections,
+    client: opts.composio.client,
+    workspaceId: opts.workspaceId,
+    cyboId: opts.cybo.id,
+    invokerUserId: opts.autonomous ? null : opts.userId,
+  });
+  Object.assign(opts.mcpServers, servers);
+  if (failures.length > 0) {
+    opts.logger?.warn({ failures }, "composio: some tools failed to mount; spawning without them");
+  }
 }
 
 // oxlint-disable-next-line eslint/complexity -- pre-existing over-budget spawn assembler; #994 only adds a single branch-free capture call (extracted to captureEphemeralSpawnContext)
@@ -301,6 +350,13 @@ export async function spawnCybo(opts: {
   // byte-identical with or without this param. When absent, an openai-compatible
   // api cybo refuses pre-spawn (CyboCredentialMissingError).
   credentialStore?: CyboCredentialStore;
+  // Composio third-party tools (knowledge: composio-ownership-and-permissions).
+  // Consulted ONLY for a cybo carrying `tool_grants` — every other spawn ignores it
+  // entirely (byte-identical). Absent ⇒ Composio tools are skipped.
+  composio?: ComposioDeps;
+  // An autonomous run (scheduled / webhook) has no human invoker, so caller-bound
+  // Composio toolkits are dropped (only `service` bindings run unattended).
+  autonomous?: boolean;
   logger?: Pick<Logger, "info" | "warn">;
   // #995: the audit re-route seam. When provided, spawnCybo emits a redacted
   // context_injection + tool_injection event after createAgent. `undefined` ⇒
@@ -320,6 +376,8 @@ export async function spawnCybo(opts: {
     unattended,
     resolvedCybo,
     credentialStore,
+    composio,
+    autonomous,
     logger,
     auditSink,
   } = opts;
@@ -351,6 +409,18 @@ export async function spawnCybo(opts: {
   const agentId = randomUUID();
 
   const mcpServers = buildCyboMcpServers(cybo, cyborg7McpBaseUrl, workspaceId, agentId);
+
+  // Composio third-party tools — strict no-op unless the cybo has tool_grants AND the
+  // composio dep is wired. Extracted (below) so spawnCybo's branch count is unchanged.
+  await injectComposioMcpServers({
+    cybo,
+    composio,
+    autonomous,
+    workspaceId,
+    userId,
+    mcpServers,
+    logger,
+  });
 
   // Provider IS the harness (internal docs): native claude/codex spawn on the
   // daemon's own provider (host login, zero extra auth); everything else routes
