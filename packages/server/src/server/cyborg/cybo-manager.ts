@@ -152,7 +152,17 @@ export function buildCyboPrompt(cybo: StoredCybo, context?: SpawnCyboContext): s
     parts.push(`\nYou are in workspace "${context.workspaceName}".`);
   }
   if (context?.channelName) {
+    // Medium context (Bug T1): state WHERE the cybo is speaking so its reply lands
+    // in the same place it was invoked. A channel is public to all members — reply
+    // here, never silently redirect to a different channel or a DM. (A private 1:1
+    // DM turn reuses a channel-bound session, so its medium is injected per-turn in
+    // MessageRouter.handleDm instead of baked into this spawn-time system prompt.)
     parts.push(`Current channel: ${context.channelName}.`);
+    parts.push(
+      `You are speaking in the group channel "${context.channelName}" — your reply is ` +
+        `posted to that channel, visible to everyone in it. Reply in this channel; do ` +
+        `not post to another channel or DM unless explicitly asked.`,
+    );
   }
 
   return parts.join("\n");

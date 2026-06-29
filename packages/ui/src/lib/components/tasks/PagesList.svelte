@@ -179,8 +179,7 @@
   async function addSubpage(parent: Page): Promise<void> {
     try {
       error = null;
-      const created = await client.createPage(projectId);
-      await client.updatePage(created.id, { parentId: parent.id });
+      const created = await client.createPage(projectId, { parentId: parent.id });
       collapsed.delete(parent.id); // reveal the new child
       await load();
       openPage(created.id);
@@ -472,6 +471,19 @@
         {ownerName(p).charAt(0)}
       </span>
     {/if}
+
+    <!-- Add subpage (hover affordance) -->
+    <button
+      type="button"
+      onclick={() => void addSubpage(p)}
+      class="grid size-6 shrink-0 place-items-center rounded text-content-muted opacity-0 transition-opacity hover:bg-hover-gray hover:text-content group-hover:opacity-100"
+      aria-label={`Add subpage under ${p.title || "Untitled"}`}
+      title="Add subpage"
+    >
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
+      </svg>
+    </button>
 
     <!-- Row menu -->
     <DropdownMenu>

@@ -58,6 +58,19 @@ describe("buildPageTree", () => {
     expect(ids(tree)).toEqual(["a", "b", "m", "z"]);
   });
 
+  it("nests a freshly-created child (null sortOrder) under its parent, after ordered siblings", () => {
+    // A new subpage is created with parentId set and NO sortOrder (null) — the
+    // same convention a new root page uses. Under the default comparator it
+    // nests beneath its parent and sorts AFTER any explicitly-ordered sibling.
+    const tree = buildPageTree([
+      page({ id: "parent" }),
+      page({ id: "ordered", parentId: "parent", sortOrder: 1, title: "Ordered" }),
+      page({ id: "fresh", parentId: "parent", sortOrder: null, title: "Untitled" }),
+    ]);
+    expect(ids(tree)).toEqual(["parent"]);
+    expect(ids(tree[0].children)).toEqual(["ordered", "fresh"]);
+  });
+
   it("promotes a child to root when its parent is absent (filtered out)", () => {
     const tree = buildPageTree([page({ id: "orphan", parentId: "missing" })]);
     expect(ids(tree)).toEqual(["orphan"]);

@@ -2098,9 +2098,18 @@ export class SlackClient<EventMap extends SlackEventMap = SlackEventMap> {
   }
 
   // Create a blank page in a project. ownedBy + visibility are set server-side
-  // (creator / "private"). Optional starting `title`.
-  async createPage(projectId: string, title?: string): Promise<Page> {
-    const resp = await this.request<{ page: Page }>("cyborg:create_page", { projectId, title });
+  // (creator / "private"). `opts.title` seeds the title; `opts.parentId` nests
+  // the new page directly under that parent (same project) — null/absent = a
+  // root page. The server persists parent_id atomically (no follow-up reparent).
+  async createPage(
+    projectId: string,
+    opts: { title?: string; parentId?: string | null } = {},
+  ): Promise<Page> {
+    const resp = await this.request<{ page: Page }>("cyborg:create_page", {
+      projectId,
+      title: opts.title,
+      parentId: opts.parentId,
+    });
     return resp.page;
   }
 

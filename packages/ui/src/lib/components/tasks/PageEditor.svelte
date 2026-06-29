@@ -37,6 +37,7 @@
   import GlobeIcon from "@lucide/svelte/icons/globe";
   import LockIcon from "@lucide/svelte/icons/lock";
   import XIcon from "@lucide/svelte/icons/x";
+  import FilePlusIcon from "@lucide/svelte/icons/file-plus";
   import AlignLeftIcon from "@lucide/svelte/icons/align-left";
   import AlignCenterIcon from "@lucide/svelte/icons/align-center";
   import AlignRightIcon from "@lucide/svelte/icons/align-right";
@@ -178,6 +179,19 @@
   async function backToPages(): Promise<void> {
     await flushSaves();
     goto(`/workspace/${wsId}/tasks/${projectId}/pages`);
+  }
+
+  // Create a new page nested under THIS page and open it. The server persists
+  // parent_id directly; the {#key pageId} route wrapper remounts the editor on
+  // the new id, loading the fresh child.
+  async function addSubpage(): Promise<void> {
+    try {
+      const created = await client.createPage(projectId, { parentId: pageId });
+      goto(`/workspace/${wsId}/tasks/${projectId}/pages/${created.id}`);
+    } catch (err) {
+      console.error("[page] addSubpage failed", err);
+      toast.error(err instanceof Error ? err.message : "Couldn't add subpage.");
+    }
   }
 
   // Persist the page icon (an emoji glyph) or clear it (null). Optimistic: the UI
@@ -666,6 +680,16 @@
             <LockIcon size={14} />
             Private
           {/if}
+        </button>
+
+        <button
+          type="button"
+          onclick={() => void addSubpage()}
+          class="inline-flex items-center gap-1.5 rounded-md border border-edge px-2 py-1 text-[13px] font-medium text-content-dim transition-colors hover:bg-hover-gray hover:text-content"
+          title="Add a subpage under this page"
+        >
+          <FilePlusIcon size={14} />
+          Add subpage
         </button>
 
         {#if showIconPicker}

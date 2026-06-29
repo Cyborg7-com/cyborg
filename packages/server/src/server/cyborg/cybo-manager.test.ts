@@ -126,6 +126,18 @@ describe("buildCyboPrompt", () => {
     expect(prompt).toContain("Current channel: general.");
   });
 
+  it("states the channel medium so the cybo replies where it was invoked (Bug T1)", () => {
+    // The system prompt must tell the cybo WHERE it is speaking — a group channel,
+    // and which one — so its reply lands in the same channel it was invoked from
+    // instead of a hardcoded/default channel. (Reply-routing itself is enforced by
+    // MessageRouter; this is the prompt-layer reinforcement the owner asked for.)
+    const cybo = makeCybo();
+    const prompt = buildCyboPrompt(cybo, { channelName: "random" });
+    expect(prompt).toContain('group channel "random"');
+    expect(prompt).toMatch(/Reply in this channel/i);
+    expect(prompt).toMatch(/not post to another channel or DM/i);
+  });
+
   it("combines all elements in order", () => {
     const cybo = makeCybo({ role: "Helper", description: "Friendly bot" });
     const prompt = buildCyboPrompt(cybo, {

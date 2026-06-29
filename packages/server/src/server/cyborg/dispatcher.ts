@@ -7363,15 +7363,22 @@ export class CyborgDispatcher {
       });
       return undefined;
     }
-    const cybo = this.storage.getCybo(parsed.cyboId);
-    if (!cybo || cybo.workspace_id !== parsed.workspaceId) {
-      emit({
-        type: "cyborg:error",
-        payload: { requestId: parsed.requestId, code: "not_found", message: "Cybo not found" },
-      });
-      return undefined;
+    // Tolerant resolution (mirrors the relay's resolveWorkspaceCybo, Bug T3): the
+    // relay's delete fan-out (#1020) targets the canonical PG id, but this daemon may
+    // hold the cybo's local SQLite row under a slug-derived id. Resolve by exact id
+    // first, then by slug within the workspace, so the prune can't miss — otherwise
+    // the surviving SQLite row re-surfaces on the next fetch_cybos ("delete resurrects").
+    const cybo =
+      this.storage.getCybo(parsed.cyboId) ??
+      this.storage.getCyboBySlug(parsed.workspaceId, parsed.cyboId);
+    if (cybo && cybo.workspace_id === parsed.workspaceId) {
+      this.storage.deleteCybo(cybo.id);
     }
-    this.storage.deleteCybo(parsed.cyboId);
+    // Idempotent no-op when this daemon doesn't hold the cybo. The relay fans the
+    // delete out to EVERY online workspace daemon, so most receive a delete for a
+    // cybo they never had; a hard "Cybo not found" error here was forwarded back and
+    // broadcast to all guests as spurious error toasts. Delete is idempotent — a
+    // missing row is success, not an error.
     emit({
       type: "cyborg:delete_cybo_response",
       payload: { requestId: parsed.requestId, deleted: true },
