@@ -14,13 +14,15 @@
   import { goto, replaceState } from "$app/navigation";
   import { Button } from "$lib/components/ui/button/index.js";
   import GitHubIcon from "$lib/components/GitHubIcon.svelte";
+  import SlackIcon from "$lib/components/SlackIcon.svelte";
   import RecipeIcon from "$lib/components/integrations/RecipeIcon.svelte";
   import { client, recipesState } from "$lib/state/app.svelte.js";
   import { RECIPE_CATALOG } from "$lib/integrations/recipes-catalog.js";
-  import type { GithubInstallation } from "$lib/ws-client.js";
+  import type { GithubInstallation, SlackInstallation } from "$lib/ws-client.js";
 
   const workspaceId = $derived(page.params.id ?? "");
   const detailHref = $derived(`/workspace/${workspaceId}/settings/integrations/github`);
+  const slackDetailHref = $derived(`/workspace/${workspaceId}/settings/integrations/slack`);
   const recipeHref = $derived(
     (recipeId: string) => `/workspace/${workspaceId}/settings/integrations/recipes/${recipeId}`,
   );
@@ -41,6 +43,16 @@
   // Post-install confirmation note (?github=installed). Personal-account notes are
   // forwarded to the detail page (where that UI lives) on mount.
   let justInstalled = $state(false);
+
+  // Slack: same card shape as GitHub. The Slack OAuth callback redirects straight to
+  // the Slack DETAIL page (?slack=connected), so this card only reflects the connected
+  // state — it has no post-install note of its own to strip.
+  let slackConfig = $state<{ configured: boolean; installUrl: string | null } | null>(null);
+  const slackLoadingConfig = $derived(slackConfig === null);
+  const slackInstallUrl = $derived(slackConfig?.installUrl ?? null);
+  let slackInstallations = $state<SlackInstallation[]>([]);
+  let slackLoadingInstalls = $state(true);
+  const slackConnected = $derived(slackInstallations.length > 0);
 
   onMount(() => {
     const note = page.url.searchParams.get("github");
@@ -93,6 +105,27 @@
         installations = [];
       } finally {
         loadingInstalls = false;
+      }
+    })();
+
+    // Slack: independent of GitHub — load the config (gate + install URL) + this
+    // workspace's installations so the card reflects the connected state.
+    void client
+      .fetchSlackConfig(workspaceId)
+      .then((cfg) => {
+        slackConfig = cfg;
+        return undefined;
+      })
+      .catch(() => {
+        slackConfig = { configured: false, installUrl: null };
+      });
+    void (async () => {
+      try {
+        slackInstallations = await client.fetchSlackInstallations(workspaceId);
+      } catch {
+        slackInstallations = [];
+      } finally {
+        slackLoadingInstalls = false;
       }
     })();
   });
@@ -161,6 +194,51 @@
         >
           Connect GitHub
         </Button>
+      {/if}
+    </div>
+
+    <!-- Slack integration card (same shape as GitHub). -->
+    <div class="flex items-center justify-between gap-4 border-t border-edge bg-surface-alt px-4 py-5">
+      <div class="flex min-w-0 items-start gap-4">
+        <div
+          class="flex h-10 w-10 shrink-0 items-center justify-center rounded-md border border-edge bg-surface"
+        >
+          <SlackIcon size={22} />
+        </div>
+        <div class="min-w-0">
+          <h3 class="flex items-center gap-1.5 text-[14px] font-medium text-content">
+            Slack
+            {#if slackConnected}
+              <svg
+                class="h-4 w-4 text-success"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                role="img"
+                aria-label="Slack connected"
+              >
+                <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
+                <polyline points="22 4 12 14.01 9 11.01" />
+              </svg>
+            {/if}
+          </h3>
+          <p class="mt-0.5 text-[13px] text-content-muted">
+            Connect and sync your Slack customer channels
+          </p>
+        </div>
+      </div>
+
+      {#if slackLoadingConfig || slackLoadingInstalls}
+        <Button size="sm" disabled title="Checking Slack connection…">Loading…</Button>
+      {:else if slackConnected}
+        <Button href={slackDetailHref} size="sm" variant="outline">Configure</Button>
+      {:else if slackInstallUrl}
+        <Button href={slackInstallUrl} size="sm">Connect Slack</Button>
+      {:else}
+        <Button size="sm" disabled title="Slack is not configured yet">Connect Slack</Button>
       {/if}
     </div>
   </div>

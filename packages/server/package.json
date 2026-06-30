@@ -75,6 +75,7 @@
     "@opencode-ai/sdk": "1.14.46",
     "@sctg/sentencepiece-js": "^1.1.0",
     "@simplewebauthn/server": "^13.3.1",
+    "@slack/web-api": "^7.17.0",
     "@types/web-push": "^3.6.4",
     "@xterm/headless": "^6.0.0",
     "ai": "5.0.78",

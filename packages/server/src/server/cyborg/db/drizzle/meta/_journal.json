@@ -330,6 +330,13 @@
       "when": 1783000024000,
       "tag": "0046_schedule_dispatch_claims",
       "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1783000025000,
+      "tag": "0047_slack_bridge",
+      "breakpoints": true
     }
   ]
 }

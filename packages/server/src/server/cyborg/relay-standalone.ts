@@ -120,6 +120,9 @@ import { createIapRoutes } from "./routes/iap.js";
 import { createWebhookRoutes } from "./routes/webhooks.js";
 import { createGithubRoutes } from "./routes/github.js";
 import { emitTaskOutbound, isClosedTaskStatus } from "./github-outbound.js";
+import { createSlackRoutes } from "./routes/slack.js";
+import { createSlackOAuthRoutes } from "./routes/slack-oauth.js";
+import { mirrorChannelMessageToSlack } from "./slack-outbound.js";
 import { synthesizeReleaseCard } from "./webhook-card.js";
 import { createAuthRoutes } from "./routes/auth.js";
 import { createPasskeyRoutes } from "./routes/passkey.js";
@@ -10222,6 +10225,36 @@ async function main() {
         }
       }
       broadcastToGuests(workspaceId, message, fromDaemonId, seq);
+
+      // ─── Slack outbound mirror (WAVE 2a) ───
+      // This onBroadcast callback is the UNIFIED channel-message seam: it fires once
+      // per message on the ORIGIN relay instance (cross-instance Redis fan-out goes
+      // straight to broadcastToGuestsLocal, never here, so no double-post), for BOTH a
+      // human web-UI post (injectMessage → onBroadcast) AND a cybo reply (the daemon's
+      // relay_message → onBroadcast, and the agent-reply re-broadcast). So a cybo reply
+      // "rides this automatically" — it's a normal author, mirrored like any human's.
+      // The inbound mirror's own injected message ALSO reaches here, but its `slack:`
+      // synthetic author short-circuits mirrorChannelMessageToSlack, so it never loops
+      // back. Best-effort + fully gated inside the helper (isSlackConfigured + a live
+      // link + token); `void … .catch()` so it NEVER blocks or poisons the broadcast.
+      if (pg && m.type === "cyborg:channel_message_broadcast") {
+        const cp = m.payload as Record<string, unknown> | undefined;
+        const channelId = typeof cp?.channelId === "string" ? cp.channelId : null;
+        const messageId = typeof cp?.id === "string" ? cp.id : null;
+        const fromId = typeof cp?.fromId === "string" ? cp.fromId : null;
+        if (channelId && messageId && fromId) {
+          void mirrorChannelMessageToSlack(pg, {
+            workspaceId,
+            cyborgChannelId: channelId,
+            messageId,
+            fromId,
+            fromType: typeof cp?.fromType === "string" ? cp.fromType : "human",
+            text: typeof cp?.text === "string" ? cp.text : "",
+            parentId: typeof cp?.parentId === "string" ? cp.parentId : null,
+          }).catch((err) => relayLog.error({ err, channelId }, "slack outbound mirror failed"));
+        }
+      }
+
       if (pg && fromDaemonId && fromDaemonId !== "guest") {
         const msg = message as Record<string, unknown>;
         if (msg.type === "cyborg:agent_status") {
@@ -10568,6 +10601,18 @@ async function main() {
   // bind callbacks the Tasks settings panel calls. GitHub issues → Cyborg7 tasks;
   // GitHub is the source of truth. See ./routes/github.ts.
   app.route("/", createGithubRoutes({ pg, requireAuth }));
+
+  // ─── Slack customer-comms bridge: INBOUND events (extracted) ──
+  // PUBLIC POST /api/slack/events (signing-secret HMAC, no requireAuth). A linked
+  // Slack channel's messages → injected messages in the bound Cyborg channel.
+  // OAuth + settings is a SEPARATE module (routes/slack-oauth.ts); this is the
+  // events endpoint only. s3 deps re-host inbound file attachments. See ./routes/slack.ts.
+  app.route("/", createSlackRoutes({ pg, relay, s3Client, s3Bucket, s3Region }));
+
+  // ─── Slack customer-comms bridge: OAuth install + settings (separate module) ──
+  // requireAuth + isMember-guarded; credential-gated to {configured:false} when the
+  // SLACK_* env is unset. See ./routes/slack-oauth.ts.
+  app.route("/", createSlackOAuthRoutes({ pg, requireAuth }));
 
   // ─── Frontend telemetry proxy (extracted) ─────────────────────
   // POST /api/cyborg/client-log — frontends beacon client-side errors here so the

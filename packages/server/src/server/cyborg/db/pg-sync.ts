@@ -10745,6 +10745,344 @@ export class PgSync {
         },
       });
   }
+
+  // ─── Integrations: provider-agnostic installs + Slack bridge (0045) ──────
+  // WAVE 1 DAL. PG-side only (the bridge is relay/PG-side; the daemon's SQLite
+  // cache never serves these). Callers generate ids (prefix + randomUUID), pass
+  // them in, and own logging/error handling — these methods let errors throw,
+  // matching the rest of PgSync.
+
+  // Upsert an integration install. Idempotent on UNIQUE(workspace_id, provider,
+  // external_id) — re-installing refreshes config/token/bot/scopes/installer.
+  // Returns the row id (the existing row's id on conflict). config defaults to {}.
+  async upsertIntegrationInstallation(opts: {
+    id: string;
+    workspaceId: string;
+    provider: string;
+    externalId: string;
+    config?: Record<string, unknown>;
+    accessToken?: string | null;
+    botUserId?: string | null;
+    scopes?: string | null;
+    installedBy: string;
+  }): Promise<string> {
+    const [row] = await this.db
+      .insert(schema.integrationInstallations)
+      .values({
+        id: opts.id,
+        workspaceId: opts.workspaceId,
+        provider: opts.provider,
+        externalId: opts.externalId,
+        config: opts.config ?? {},
+        accessToken: opts.accessToken ?? null,
+        botUserId: opts.botUserId ?? null,
+        scopes: opts.scopes ?? null,
+        installedBy: opts.installedBy,
+      })
+      .onConflictDoUpdate({
+        target: [
+          schema.integrationInstallations.workspaceId,
+          schema.integrationInstallations.provider,
+          schema.integrationInstallations.externalId,
+        ],
+        set: {
+          config: opts.config ?? {},
+          accessToken: opts.accessToken ?? null,
+          botUserId: opts.botUserId ?? null,
+          scopes: opts.scopes ?? null,
+          installedBy: opts.installedBy,
+        },
+      })
+      .returning({ id: schema.integrationInstallations.id });
+    return row.id;
+  }
+
+  // Fetch an install by its primary id (the outbound path resolves a channel link's
+  // installationId → token/botUserId through this). null when absent.
+  async getIntegrationInstallationById(id: string): Promise<StoredIntegrationInstallation | null> {
+    const [row] = await this.db
+      .select()
+      .from(schema.integrationInstallations)
+      .where(eq(schema.integrationInstallations.id, id))
+      .limit(1);
+    return row ? mapIntegrationInstallation(row) : null;
+  }
+
+  // Fetch an install by (workspace, provider, external tenant id) — the unique key.
+  async getIntegrationInstallation(
+    workspaceId: string,
+    provider: string,
+    externalId: string,
+  ): Promise<StoredIntegrationInstallation | null> {
+    const [row] = await this.db
+      .select()
+      .from(schema.integrationInstallations)
+      .where(
+        and(
+          eq(schema.integrationInstallations.workspaceId, workspaceId),
+          eq(schema.integrationInstallations.provider, provider),
+          eq(schema.integrationInstallations.externalId, externalId),
+        ),
+      )
+      .limit(1);
+    return row ? mapIntegrationInstallation(row) : null;
+  }
+
+  // List a workspace's installs, optionally filtered to one provider (settings UI).
+  async listIntegrationInstallations(
+    workspaceId: string,
+    provider?: string,
+  ): Promise<StoredIntegrationInstallation[]> {
+    const rows = await this.db
+      .select()
+      .from(schema.integrationInstallations)
+      .where(
+        provider === undefined
+          ? eq(schema.integrationInstallations.workspaceId, workspaceId)
+          : and(
+              eq(schema.integrationInstallations.workspaceId, workspaceId),
+              eq(schema.integrationInstallations.provider, provider),
+            ),
+      )
+      .orderBy(desc(schema.integrationInstallations.createdAt));
+    return rows.map(mapIntegrationInstallation);
+  }
+
+  // Delete an install by id (disconnect). Its slack_channel_links cascade away.
+  async deleteIntegrationInstallation(id: string): Promise<void> {
+    await this.db
+      .delete(schema.integrationInstallations)
+      .where(eq(schema.integrationInstallations.id, id));
+  }
+
+  // Create (or re-link) a Slack↔Cyborg channel binding. Idempotent on
+  // UNIQUE(slack_channel_id) — re-linking the same Slack channel re-points the
+  // cyborg channel / installation / direction. Returns the row id.
+  async createSlackChannelLink(opts: {
+    id: string;
+    workspaceId: string;
+    installationId: string;
+    cyborgChannelId: string;
+    slackChannelId: string;
+    slackTeamId: string;
+    syncDirection?: string;
+    createdBy: string;
+  }): Promise<string> {
+    const [row] = await this.db
+      .insert(schema.slackChannelLinks)
+      .values({
+        id: opts.id,
+        workspaceId: opts.workspaceId,
+        installationId: opts.installationId,
+        cyborgChannelId: opts.cyborgChannelId,
+        slackChannelId: opts.slackChannelId,
+        slackTeamId: opts.slackTeamId,
+        syncDirection: opts.syncDirection ?? "bidirectional",
+        createdBy: opts.createdBy,
+      })
+      .onConflictDoUpdate({
+        target: schema.slackChannelLinks.slackChannelId,
+        set: {
+          installationId: opts.installationId,
+          cyborgChannelId: opts.cyborgChannelId,
+          slackTeamId: opts.slackTeamId,
+          syncDirection: opts.syncDirection ?? "bidirectional",
+        },
+      })
+      .returning({ id: schema.slackChannelLinks.id });
+    return row.id;
+  }
+
+  // The OUTBOUND lookup: the Cyborg channel a posted message lands in → its Slack
+  // link (most recent if more than one). null when the channel isn't Slack-linked.
+  async getSlackChannelLinkByCyborgChannel(
+    cyborgChannelId: string,
+  ): Promise<StoredSlackChannelLink | null> {
+    const [row] = await this.db
+      .select()
+      .from(schema.slackChannelLinks)
+      .where(eq(schema.slackChannelLinks.cyborgChannelId, cyborgChannelId))
+      .orderBy(desc(schema.slackChannelLinks.createdAt))
+      .limit(1);
+    return row ? mapSlackChannelLink(row) : null;
+  }
+
+  // The INBOUND lookup: a Slack event's channel id → its binding. UNIQUE, so one row.
+  async getSlackChannelLinkBySlackChannel(
+    slackChannelId: string,
+  ): Promise<StoredSlackChannelLink | null> {
+    const [row] = await this.db
+      .select()
+      .from(schema.slackChannelLinks)
+      .where(eq(schema.slackChannelLinks.slackChannelId, slackChannelId))
+      .limit(1);
+    return row ? mapSlackChannelLink(row) : null;
+  }
+
+  // List a workspace's channel links (settings UI).
+  async listSlackChannelLinksForWorkspace(workspaceId: string): Promise<StoredSlackChannelLink[]> {
+    const rows = await this.db
+      .select()
+      .from(schema.slackChannelLinks)
+      .where(eq(schema.slackChannelLinks.workspaceId, workspaceId))
+      .orderBy(desc(schema.slackChannelLinks.createdAt));
+    return rows.map(mapSlackChannelLink);
+  }
+
+  // Delete a channel link by id (unlink).
+  async deleteSlackChannelLink(id: string): Promise<void> {
+    await this.db.delete(schema.slackChannelLinks).where(eq(schema.slackChannelLinks.id, id));
+  }
+
+  // Upsert the (Slack team,user) → synthetic Cyborg guest mapping. Idempotent on
+  // UNIQUE(slack_team_id, slack_user_id) — refreshes the synthetic id + display name.
+  async upsertSlackUserMap(opts: {
+    id: string;
+    workspaceId: string;
+    slackTeamId: string;
+    slackUserId: string;
+    syntheticUserId: string;
+    displayName?: string | null;
+  }): Promise<void> {
+    await this.db
+      .insert(schema.slackUserMap)
+      .values({
+        id: opts.id,
+        workspaceId: opts.workspaceId,
+        slackTeamId: opts.slackTeamId,
+        slackUserId: opts.slackUserId,
+        syntheticUserId: opts.syntheticUserId,
+        displayName: opts.displayName ?? null,
+      })
+      .onConflictDoUpdate({
+        target: [schema.slackUserMap.slackTeamId, schema.slackUserMap.slackUserId],
+        set: {
+          workspaceId: opts.workspaceId,
+          syntheticUserId: opts.syntheticUserId,
+          displayName: opts.displayName ?? null,
+        },
+      });
+  }
+
+  // Fetch the synthetic-user mapping for a (Slack team,user). null when unseen.
+  async getSlackUserMap(
+    slackTeamId: string,
+    slackUserId: string,
+  ): Promise<StoredSlackUserMap | null> {
+    const [row] = await this.db
+      .select()
+      .from(schema.slackUserMap)
+      .where(
+        and(
+          eq(schema.slackUserMap.slackTeamId, slackTeamId),
+          eq(schema.slackUserMap.slackUserId, slackUserId),
+        ),
+      )
+      .limit(1);
+    return row ? mapSlackUserMap(row) : null;
+  }
+
+  // Upsert the Cyborg-message ↔ provider-external (Slack ts) back-link. Idempotent
+  // on the message_id PK — re-recording a message refreshes its external mapping.
+  async upsertMessageIntegration(opts: {
+    messageId: string;
+    workspaceId: string;
+    provider: string;
+    externalId: string;
+    externalThreadId?: string | null;
+  }): Promise<void> {
+    await this.db
+      .insert(schema.messageIntegrations)
+      .values({
+        messageId: opts.messageId,
+        workspaceId: opts.workspaceId,
+        provider: opts.provider,
+        externalId: opts.externalId,
+        externalThreadId: opts.externalThreadId ?? null,
+      })
+      .onConflictDoUpdate({
+        target: schema.messageIntegrations.messageId,
+        set: {
+          provider: opts.provider,
+          externalId: opts.externalId,
+          externalThreadId: opts.externalThreadId ?? null,
+        },
+      });
+  }
+
+  // ATOMIC outbound claim: reserve a Cyborg message's mirror slot BEFORE the network
+  // post so two CONCURRENT re-broadcasts of the same message can't BOTH post to Slack
+  // (a bare read-then-post is a TOCTOU double-post). INSERT … ON CONFLICT (message_id)
+  // DO NOTHING is atomic on the PK, so exactly the call that inserted gets true; an
+  // already-mapped message (mirrored, or an inbound row) gets false.
+  //
+  // external_id is a PER-MESSAGE pending sentinel (`pending:<messageId>`), NOT "": the
+  // UNIQUE(provider, external_id, workspace_id) index would make a shared placeholder
+  // collide across concurrent claims in the same workspace. Deriving it from the (unique)
+  // messageId keeps every pending row distinct, so the only conflict that can fire is the
+  // intended message_id PK one. It's filled with the real Slack ts post-send; a failed
+  // post releases the claim via deleteMessageIntegration so a later re-broadcast can retry.
+  // Outbound thread resolution skips a `pending:` parent (see slack-outbound.ts).
+  async claimMessageIntegration(opts: {
+    messageId: string;
+    workspaceId: string;
+    provider: string;
+  }): Promise<boolean> {
+    const inserted = await this.db
+      .insert(schema.messageIntegrations)
+      .values({
+        messageId: opts.messageId,
+        workspaceId: opts.workspaceId,
+        provider: opts.provider,
+        externalId: `pending:${opts.messageId}`,
+      })
+      .onConflictDoNothing({ target: schema.messageIntegrations.messageId })
+      .returning({ messageId: schema.messageIntegrations.messageId });
+    return inserted.length > 0;
+  }
+
+  // Release a claimed mapping — rolls back an outbound claim whose network post failed,
+  // so a later re-broadcast can retry the mirror instead of seeing a stale "claimed" row.
+  async deleteMessageIntegration(messageId: string): Promise<void> {
+    await this.db
+      .delete(schema.messageIntegrations)
+      .where(eq(schema.messageIntegrations.messageId, messageId));
+  }
+
+  // Forward lookup: the external mapping for a Cyborg message id (outbound: did we
+  // already post this? thread resolution). null when absent.
+  async getMessageIntegrationByMessageId(
+    messageId: string,
+  ): Promise<StoredMessageIntegration | null> {
+    const [row] = await this.db
+      .select()
+      .from(schema.messageIntegrations)
+      .where(eq(schema.messageIntegrations.messageId, messageId))
+      .limit(1);
+    return row ? mapMessageIntegration(row) : null;
+  }
+
+  // Reverse lookup: the Cyborg message a (provider, external id / Slack ts) maps to
+  // (inbound dedupe, echo guard, thread-parent resolution). index(provider,
+  // external_id) backs it; returns the most recent on the rare collision. null when
+  // unseen.
+  async getMessageIntegrationByExternal(
+    provider: string,
+    externalId: string,
+  ): Promise<StoredMessageIntegration | null> {
+    const [row] = await this.db
+      .select()
+      .from(schema.messageIntegrations)
+      .where(
+        and(
+          eq(schema.messageIntegrations.provider, provider),
+          eq(schema.messageIntegrations.externalId, externalId),
+        ),
+      )
+      .orderBy(desc(schema.messageIntegrations.createdAt))
+      .limit(1);
+    return row ? mapMessageIntegration(row) : null;
+  }
 }
 
 // Map a github_repo_syncs row to the receiver/UI shape (epoch-ms createdAt).
@@ -10808,6 +11146,66 @@ function mapUserConnection(
     githubLogin: r.githubLogin,
     accessToken: r.accessToken,
     scopes: r.scopes,
+    createdAt: r.createdAt.getTime(),
+  };
+}
+
+// ─── Integrations / Slack bridge mappers (0045; epoch-ms createdAt) ──────
+
+function mapIntegrationInstallation(
+  r: typeof schema.integrationInstallations.$inferSelect,
+): StoredIntegrationInstallation {
+  return {
+    id: r.id,
+    workspaceId: r.workspaceId,
+    provider: r.provider,
+    externalId: r.externalId,
+    config: r.config ?? {},
+    accessToken: r.accessToken,
+    botUserId: r.botUserId,
+    scopes: r.scopes,
+    installedBy: r.installedBy,
+    createdAt: r.createdAt.getTime(),
+  };
+}
+
+function mapSlackChannelLink(
+  r: typeof schema.slackChannelLinks.$inferSelect,
+): StoredSlackChannelLink {
+  return {
+    id: r.id,
+    workspaceId: r.workspaceId,
+    installationId: r.installationId,
+    cyborgChannelId: r.cyborgChannelId,
+    slackChannelId: r.slackChannelId,
+    slackTeamId: r.slackTeamId,
+    syncDirection: r.syncDirection,
+    createdBy: r.createdBy,
+    createdAt: r.createdAt.getTime(),
+  };
+}
+
+function mapSlackUserMap(r: typeof schema.slackUserMap.$inferSelect): StoredSlackUserMap {
+  return {
+    id: r.id,
+    workspaceId: r.workspaceId,
+    slackTeamId: r.slackTeamId,
+    slackUserId: r.slackUserId,
+    syntheticUserId: r.syntheticUserId,
+    displayName: r.displayName,
+    createdAt: r.createdAt.getTime(),
+  };
+}
+
+function mapMessageIntegration(
+  r: typeof schema.messageIntegrations.$inferSelect,
+): StoredMessageIntegration {
+  return {
+    messageId: r.messageId,
+    workspaceId: r.workspaceId,
+    provider: r.provider,
+    externalId: r.externalId,
+    externalThreadId: r.externalThreadId,
     createdAt: r.createdAt.getTime(),
   };
 }
@@ -11077,6 +11475,62 @@ export interface GithubIssueSyncWithRepo {
   name: string;
   installationId: string;
   syncDirection: string;
+}
+
+// ─── Integrations / Slack bridge read shapes (0045; epoch-ms createdAt) ──────
+
+// An integration_installations row. SERVER-INTERNAL: carries accessToken (the bot
+// token used for outbound posting) — never auto-serialized to a client (routes
+// surface only { connected, provider, externalId, … }). config is never null ({}).
+export interface StoredIntegrationInstallation {
+  id: string;
+  workspaceId: string;
+  provider: string;
+  externalId: string;
+  config: Record<string, unknown>;
+  accessToken: string | null;
+  botUserId: string | null;
+  scopes: string | null;
+  installedBy: string;
+  createdAt: number;
+}
+
+// A slack_channel_links row — one (Slack channel ↔ Cyborg channel) binding. The
+// inbound path resolves a Slack event's channel through getBySlackChannel; the
+// outbound path resolves a posted message's channel through getByCyborgChannel.
+export interface StoredSlackChannelLink {
+  id: string;
+  workspaceId: string;
+  installationId: string;
+  cyborgChannelId: string;
+  slackChannelId: string;
+  slackTeamId: string;
+  syncDirection: string;
+  createdBy: string;
+  createdAt: number;
+}
+
+// A slack_user_map row — maps a Slack (team,user) to the synthetic Cyborg guest
+// user that authors its mirrored messages.
+export interface StoredSlackUserMap {
+  id: string;
+  workspaceId: string;
+  slackTeamId: string;
+  slackUserId: string;
+  syntheticUserId: string;
+  displayName: string | null;
+  createdAt: number;
+}
+
+// A message_integrations row — the Cyborg-message ↔ provider-external (Slack ts)
+// back-link. externalThreadId carries the Slack thread_ts for reply threading.
+export interface StoredMessageIntegration {
+  messageId: string;
+  workspaceId: string;
+  provider: string;
+  externalId: string;
+  externalThreadId: string | null;
+  createdAt: number;
 }
 
 export interface StoredWebhookDelivery {

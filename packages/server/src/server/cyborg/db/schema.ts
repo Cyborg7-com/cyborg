@@ -2496,3 +2496,140 @@ export const installedRecipes = pgTable(
 );
 
 export type InstalledRecipe = typeof installedRecipes.$inferSelect;
+
+// ─── Integrations: provider-agnostic installs + Slack customer-comms bridge ──
+//
+// The Slack bridge mirrors a Slack (Connect) channel into a bound Cyborg channel
+// and posts Cyborg replies back (bidirectional, echo-guarded). WAVE 1 locks the
+// storage contract ONLY; the Slack Events endpoint, OAuth, and UI ship in WAVE 2.
+// Migration: 0047_slack_bridge.sql.
+
+// One row per external integration install on a workspace. Provider-agnostic so
+// Slack today and Jira/ClickUp later share the table; `provider` discriminates.
+// `accessToken` is the bot/app token as returned by the provider —
+// TODO(security): encrypt at rest in a follow-up (do not block on it). Nullable
+// because not every provider stores a long-lived token (e.g. a GitHub App mints
+// per-call). UNIQUE(workspaceId, provider, externalId): one install per
+// (workspace, provider, external team/enterprise id). ON DELETE CASCADE on the
+// workspace.
+export const integrationInstallations = pgTable(
+  "integration_installations",
+  {
+    id: text("id").primaryKey(),
+    workspaceId: text("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    // Provider discriminator: 'slack' today; 'jira'/'clickup' later.
+    provider: text("provider").notNull(),
+    // The provider's tenant id (Slack team_id / enterprise_id).
+    externalId: text("external_id").notNull(),
+    // Free-form provider config (team name, enterprise id, etc.). Never null —
+    // defaults to {} so readers don't branch on null.
+    config: jsonb("config").$type<Record<string, unknown>>().notNull().default({}),
+    // The provider bot/app access token as returned by the provider.
+    // TODO(security): encrypt at rest in a follow-up — note, don't block.
+    accessToken: text("access_token"),
+    // Slack bot user id (the bot's own user id; drives the echo guard). Nullable —
+    // not every provider has one.
+    botUserId: text("bot_user_id"),
+    // Granted OAuth scopes, as the provider returns them (space/comma-separated).
+    scopes: text("scopes"),
+    // The workspace user who connected the install (the OAuth callback's authed user).
+    installedBy: text("installed_by").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("idx_integration_installations_workspace").on(t.workspaceId),
+    // One install per (workspace, provider, external tenant id).
+    uniqueIndex("idx_integration_installations_ws_provider_external").on(
+      t.workspaceId,
+      t.provider,
+      t.externalId,
+    ),
+  ],
+);
+
+// One row per (Slack channel ↔ Cyborg channel) binding. UNIQUE(slackChannelId): a
+// given Slack channel mirrors into exactly one Cyborg channel. index on
+// cyborgChannelId is the outbound hot path ("is this channel Slack-linked?"). FKs
+// CASCADE so dropping the install, workspace, or channel drops the link.
+export const slackChannelLinks = pgTable(
+  "slack_channel_links",
+  {
+    id: text("id").primaryKey(),
+    workspaceId: text("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    installationId: text("installation_id")
+      .notNull()
+      .references(() => integrationInstallations.id, { onDelete: "cascade" }),
+    cyborgChannelId: text("cyborg_channel_id")
+      .notNull()
+      .references(() => channels.id, { onDelete: "cascade" }),
+    slackChannelId: text("slack_channel_id").notNull(),
+    slackTeamId: text("slack_team_id").notNull(),
+    // 'bidirectional' (default), 'inbound' (Slack→Cyborg only), 'outbound'.
+    syncDirection: text("sync_direction").notNull().default("bidirectional"),
+    createdBy: text("created_by").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("idx_slack_channel_links_workspace").on(t.workspaceId),
+    index("idx_slack_channel_links_cyborg_channel").on(t.cyborgChannelId),
+    // A given Slack channel binds to exactly one Cyborg channel.
+    uniqueIndex("idx_slack_channel_links_slack_channel").on(t.slackChannelId),
+  ],
+);
+
+// Maps a Slack (team, user) to the synthetic Cyborg guest user that authors its
+// mirrored messages (the ensureUser id, e.g. `slack:<team>:<user>`). One row per
+// (team, user). workspaceId is denormalized for scoping; no DB FK (the map is a
+// bridge-owned lookup cache).
+export const slackUserMap = pgTable(
+  "slack_user_map",
+  {
+    id: text("id").primaryKey(),
+    workspaceId: text("workspace_id").notNull(),
+    slackTeamId: text("slack_team_id").notNull(),
+    slackUserId: text("slack_user_id").notNull(),
+    // The synthetic Cyborg user id (the ensureUser id) authoring mirrored messages.
+    syntheticUserId: text("synthetic_user_id").notNull(),
+    displayName: text("display_name"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("idx_slack_user_map_team_user").on(t.slackTeamId, t.slackUserId)],
+);
+
+// Back-links a Cyborg message to its provider counterpart (Slack ts) and vice
+// versa. Provider-agnostic so GitHub/Jira can reuse it. messageId is the PK (one
+// external mapping per Cyborg message); UNIQUE(provider, externalId, workspaceId) is
+// the inbound reverse lookup ("which Cyborg message is this Slack ts?") + the echo
+// guard + the atomic inbound-dedupe constraint. It's workspace-scoped because a Slack
+// ts is unique per channel, NOT globally — a global unique would let one tenant's ts
+// block another's mirror; (provider, externalId) is the leading prefix so the reverse
+// lookup stays index-served. externalThreadId carries the Slack thread_ts so a reply
+// threads. Plain text keys (no FK): the message row may live in a different store
+// (SQLite cache) and the mapping is bridge-owned.
+export const messageIntegrations = pgTable(
+  "message_integrations",
+  {
+    messageId: text("message_id").primaryKey(),
+    workspaceId: text("workspace_id").notNull(),
+    provider: text("provider").notNull(),
+    externalId: text("external_id").notNull(),
+    externalThreadId: text("external_thread_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("idx_message_integrations_provider_external").on(
+      t.provider,
+      t.externalId,
+      t.workspaceId,
+    ),
+  ],
+);
+
+export type IntegrationInstallation = typeof integrationInstallations.$inferSelect;
+export type SlackChannelLink = typeof slackChannelLinks.$inferSelect;
+export type SlackUserMap = typeof slackUserMap.$inferSelect;
+export type MessageIntegration = typeof messageIntegrations.$inferSelect;

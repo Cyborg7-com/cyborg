@@ -30,7 +30,9 @@ const THUMB_WIDTHS = [360, 720, 1080] as const;
 // enforce a byte range, so a malicious client could still PUT more to a URL it
 // obtained — fully server-enforced size needs a presigned POST with a
 // content-length-range condition (deferred follow-up).
-const MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024; // 50 MB
+// Exported so server-initiated downloads (e.g. inbound Slack file re-hosting) cap their
+// stream at the SAME ceiling uploadBufferToS3 enforces, instead of duplicating the value.
+export const MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024; // 50 MB
 // Decompression-bomb guard for the thumbnailer: refuse to let sharp decode an
 // image with more pixels than this (a 100k×100k "image" is a few KB on disk but
 // would OOM the relay). Real photos are well under 50 MP.

@@ -501,6 +501,36 @@ export interface GithubUserConnection {
   createdAt: number;
 }
 
+// A Slack installation a workspace authorized (the integration detail page's connected
+// workspace row[s]). The relay surfaces only safe fields — NEVER the bot access token.
+// Server: PgSync.StoredIntegrationInstallation (provider 'slack', trimmed). `externalId`
+// is the Slack team id; `config` carries display metadata (e.g. { teamName }).
+export interface SlackInstallation {
+  id: string;
+  workspaceId: string;
+  provider: string;
+  externalId: string;
+  config: Record<string, unknown>;
+  botUserId: string | null;
+  scopes: string | null;
+  installedBy: string;
+  createdAt: number;
+}
+
+// A Slack↔Cyborg channel link — one (Slack channel ↔ Cyborg channel) binding the
+// settings UI lists/creates/removes. Server: PgSync.StoredSlackChannelLink.
+export interface SlackChannelLink {
+  id: string;
+  workspaceId: string;
+  installationId: string;
+  cyborgChannelId: string;
+  slackChannelId: string;
+  slackTeamId: string;
+  syncDirection: string;
+  createdBy: string;
+  createdAt: number;
+}
+
 // Straight-through wire→event map for handleExtensionMessage (#995): a
 // `cyborg:<wire>` frame whose handling is just `emit(<event>, payload)` lives here,
 // so the dispatch stays table-driven instead of one branch per type.
@@ -2204,6 +2234,101 @@ export class CyborgClient extends SlackClient<CyborgEventMap> {
   // Shared fetch for the /api/github/* callbacks: bearer auth + JSON content type +
   // a thrown {error} on a non-2xx (same convention as postBilling above).
   private async githubFetch(path: string, init: RequestInit = {}): Promise<Response> {
+    const resp = await fetch(`${this.relayHttpBase}${path}`, {
+      ...init,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${this.authToken}`,
+        ...init.headers,
+      },
+    });
+    if (!resp.ok) {
+      const err = (await resp.json().catch(() => ({ error: `HTTP ${resp.status}` }))) as {
+        error?: string;
+      };
+      throw new Error(err.error ?? `HTTP ${resp.status}`);
+    }
+    return resp;
+  }
+
+  // ─── Slack customer-comms bridge (OAuth install + channel links) ──────
+  // HTTP (not WS) — these hit the authed /api/slack/* callbacks in routes/slack-oauth.ts
+  // (requireAuth + isMember). Mirror the github* helpers exactly.
+
+  /** The Slack app's public config: the credential gate + the ready-to-use install URL
+   *  (the Slack v2 OAuth authorize URL, carrying a signed `state` for `workspaceId`).
+   *  `configured:false` / `installUrl:null` means the relay's Slack secrets aren't set
+   *  yet, so the UI shows a clear "not configured" state. Pass the current `workspaceId`
+   *  so the server embeds it (signed) and the post-install redirect lands here. */
+  async fetchSlackConfig(
+    workspaceId?: string,
+  ): Promise<{ configured: boolean; installUrl: string | null }> {
+    const path = workspaceId
+      ? `/api/slack/config?workspaceId=${encodeURIComponent(workspaceId)}`
+      : "/api/slack/config";
+    const resp = await this.slackFetch(path);
+    return (await resp.json()) as { configured: boolean; installUrl: string | null };
+  }
+
+  /** Every Slack installation this workspace authorized (the detail page's connected
+   *  workspace row[s]). The relay returns only safe fields, never the bot access token. */
+  async fetchSlackInstallations(workspaceId: string): Promise<SlackInstallation[]> {
+    const resp = await this.slackFetch(
+      `/api/slack/installations?workspaceId=${encodeURIComponent(workspaceId)}`,
+    );
+    const { installations } = (await resp.json()) as { installations: SlackInstallation[] };
+    return installations;
+  }
+
+  /** Disconnect a Slack installation from this workspace (drops its channel links too,
+   *  via the 0045 cascade). Workspace-scoped + BOLA-guarded server-side. */
+  async disconnectSlack(workspaceId: string, installationId: string): Promise<void> {
+    await this.slackFetch(
+      `/api/slack/installation/${encodeURIComponent(installationId)}` +
+        `?workspaceId=${encodeURIComponent(workspaceId)}`,
+      { method: "DELETE" },
+    );
+  }
+
+  /** This workspace's Slack↔Cyborg channel links (the detail page's links list). */
+  async fetchSlackChannelLinks(workspaceId: string): Promise<SlackChannelLink[]> {
+    const resp = await this.slackFetch(
+      `/api/slack/channel-links?workspaceId=${encodeURIComponent(workspaceId)}`,
+    );
+    const { links } = (await resp.json()) as { links: SlackChannelLink[] };
+    return links;
+  }
+
+  /** Link a Slack channel to a Cyborg channel. Returns the new link id. The server
+   *  BOLA-guards that both the installation and the cyborg channel belong to the
+   *  workspace. */
+  async linkSlackChannel(opts: {
+    workspaceId: string;
+    installationId: string;
+    cyborgChannelId: string;
+    slackChannelId: string;
+    slackTeamId: string;
+  }): Promise<string> {
+    const resp = await this.slackFetch("/api/slack/channel-links", {
+      method: "POST",
+      body: JSON.stringify(opts),
+    });
+    const { id } = (await resp.json()) as { id: string };
+    return id;
+  }
+
+  /** Unlink a Slack↔Cyborg channel link (workspace-scoped + BOLA-guarded server-side). */
+  async unlinkSlackChannel(workspaceId: string, id: string): Promise<void> {
+    await this.slackFetch(
+      `/api/slack/channel-link/${encodeURIComponent(id)}` +
+        `?workspaceId=${encodeURIComponent(workspaceId)}`,
+      { method: "DELETE" },
+    );
+  }
+
+  // Shared fetch for the /api/slack/* callbacks: bearer auth + JSON content type + a
+  // thrown {error} on a non-2xx (identical convention to githubFetch above).
+  private async slackFetch(path: string, init: RequestInit = {}): Promise<Response> {
     const resp = await fetch(`${this.relayHttpBase}${path}`, {
       ...init,
       headers: {
