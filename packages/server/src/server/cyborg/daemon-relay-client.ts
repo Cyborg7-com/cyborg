@@ -12,6 +12,8 @@ import type {
   CyboReadResponse,
   CyboWriteRequest,
   CyboWriteResponse,
+  CyboPageWriteRequest,
+  CyboPageWriteResponse,
   UploadImageRequest,
   UploadImageResponse,
 } from "./relay-protocol.js";
@@ -24,6 +26,7 @@ type RelayInbound =
   | RelayError
   | CyboReadResponse
   | CyboWriteResponse
+  | CyboPageWriteResponse
   | UploadImageResponse;
 
 // Static machine/capability metadata reported to the relay at connect and on
@@ -340,6 +343,16 @@ export class DaemonRelayClient {
         break;
       }
 
+      case "cybo_page_write_response": {
+        const pending = this.pendingCyboPageWrites.get(msg.requestId);
+        if (pending) {
+          this.pendingCyboPageWrites.delete(msg.requestId);
+          clearTimeout(pending.timer);
+          pending.resolve(msg);
+        }
+        break;
+      }
+
       case "upload_image_response": {
         const pending = this.pendingImageUploads.get(msg.requestId);
         if (pending) {
@@ -425,6 +438,35 @@ export class DaemonRelayClient {
       }, 8000);
       this.pendingCyboWrites.set(requestId, { resolve, timer });
       this.send({ type: "cybo_write_request", requestId, ...req } satisfies CyboWriteRequest);
+    });
+  }
+
+  // ── Cybo documented-Page writes over the relay ──────────────────
+  // Same shape as cyboWrite, for PAGE mutations (create/update/nest): the relay
+  // validates the OWNER's project visibility and writes the SHARED tasks_pages
+  // table (the rows the UI sees). null on timeout/disconnect/old-relay → the caller
+  // falls back to its local write.
+  private pendingCyboPageWrites = new Map<
+    string,
+    { resolve: (r: CyboPageWriteResponse | null) => void; timer: ReturnType<typeof setTimeout> }
+  >();
+
+  async cyboPageWrite(
+    req: Omit<CyboPageWriteRequest, "type" | "requestId">,
+  ): Promise<CyboPageWriteResponse | null> {
+    if (!this.connected || this.ws?.readyState !== WebSocket.OPEN) return null;
+    const requestId = `cpw_${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
+    return await new Promise<CyboPageWriteResponse | null>((resolve) => {
+      const timer = setTimeout(() => {
+        this.pendingCyboPageWrites.delete(requestId);
+        resolve(null);
+      }, 8000);
+      this.pendingCyboPageWrites.set(requestId, { resolve, timer });
+      this.send({
+        type: "cybo_page_write_request",
+        requestId,
+        ...req,
+      } satisfies CyboPageWriteRequest);
     });
   }
 

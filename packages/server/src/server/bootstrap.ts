@@ -1883,6 +1883,12 @@ export async function createPaseoDaemon(
           // Task writes take the same relay round-trip, so cybo-created tasks
           // land in the SHARED tasks table the UI reads (not just local SQLite).
           cyboWrite: cyborgRelayClient ? (req) => cyborgRelayClient!.cyboWrite(req) : undefined,
+          // Page writes (create/update/nest) take the same relay round-trip, so a
+          // cybo's documented-Page mutations land in the SHARED tasks_pages table the
+          // UI reads (not just local SQLite).
+          cyboPageWrite: cyborgRelayClient
+            ? (req) => cyborgRelayClient!.cyboPageWrite(req)
+            : undefined,
           // Cross-session recall (OWNER-SCOPED): sessions + their timelines live in
           // THIS daemon's local SQLite (agent_bindings + agent_timeline_rows; not the
           // relay's PG), so the recall tools resolve daemon-locally. Owner scoping is

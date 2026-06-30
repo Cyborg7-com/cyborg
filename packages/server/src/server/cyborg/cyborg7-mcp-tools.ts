@@ -202,6 +202,34 @@ export interface Cyborg7McpDeps {
     // update_self — the persisted cybo (id + slug + saved soul).
     cybo?: { id: string; slug: string; soul: string };
   } | null>;
+  // Relay round-trip for cloud-workspace documented-Page WRITES (create/update/nest)
+  // — same rationale as cyboWrite for tasks: a cloud daemon has no PG handle, so a
+  // local page write never reaches the shared store the UI reads. The relay validates
+  // (the cybo's owner may see the target project; cycle-guards a nest) and mutates PG.
+  // null = relay unreachable OR an old relay without the handler (timeout) → the
+  // caller falls back to the local write.
+  cyboPageWrite?: (req: {
+    workspaceId: string;
+    // The acting cybo (relay resolves its OWNER for the page-visibility ACL).
+    cyboId?: string;
+    // The spawning user for a NON-cybo agent (acts with that user's authority).
+    createdBy?: string;
+    agentId?: string;
+    kind: "create_page" | "update_page" | "nest_page";
+    // create_page
+    projectId?: string;
+    title?: string;
+    content?: string;
+    icon?: string | null;
+    // create_page (nest at birth) + nest_page; null clears (move to root).
+    parentId?: string | null;
+    // update_page / nest_page
+    pageId?: string;
+  }) => Promise<{
+    ok: boolean;
+    error?: string;
+    page?: { id: string; title: string; parentId: string | null; icon: string | null } | null;
+  } | null>;
   // Cross-session context (cybo recall) — OWNER-SCOPED. Lets a cybo review the
   // OWNER's OTHER sessions with the SAME cybo (list by recency, read one session's
   // timeline, text-search for recall). Sessions + timelines live in THIS daemon's
@@ -234,6 +262,84 @@ function resolveScheduleCreatedBy(
   if (ctx.initiatedByUserId) return ctx.initiatedByUserId;
   const cyboInvoker = storage.getAgentBinding?.(ctx.agentId)?.initiated_by ?? undefined;
   return cyboInvoker ?? cyboOwner ?? ctx.agentId;
+}
+
+// ── Task status taxonomy (the REAL `tasks.status` values) ──────────
+//
+// The free-text `tasks.status` column is the back-compat mirror of a task's
+// workflow-state group (db/pg-sync.ts mapStateGroupToStatus): backlog/unstarted →
+// "pending", started → "in_progress", completed → "done", cancelled → "cancelled".
+// Legacy/imported rows also carry a literal "backlog" (and historically "todo")
+// status, which the board's Backlog/Todo columns surface. So the authoritative
+// status set a cybo can actually FILTER ON and SEE is the union below — NOT the
+// invented `todo | in_progress | pending_review | done` the tool used to advertise.
+// A cybo reasoning in the non-existent `pending_review`/`todo`-only buckets declared
+// the backlog/pending tasks "empty" and only ever saw the in_progress sliver. The
+// Plane workflow COLUMNS themselves live in task_states.group; filter by a column via
+// the `state` arg (a state id OR name).
+export const TASK_STATUSES = [
+  "backlog",
+  "todo",
+  "pending",
+  "in_progress",
+  "done",
+  "cancelled",
+] as const;
+
+// Stable display order for the grouped list output, so a cybo's summary mirrors the
+// real board top-to-bottom.
+const TASK_STATUS_ORDER: readonly string[] = TASK_STATUSES;
+
+const TASK_STATUS_HELP = `Filter by status — the real values are: ${TASK_STATUSES.join(
+  " | ",
+)}. Omit to return EVERY status (the full board).`;
+
+// Shape of a task row the formatter needs (a structural subset of TaskRow).
+interface FormattableTask {
+  id: string;
+  title: string;
+  status: string;
+  assignee_id?: string | null;
+  sequence_id?: number | null;
+  priority?: string | null;
+  label_ids?: string[];
+  module_ids?: string[];
+}
+
+// One task → a single compact line (handle + title + metadata). Shared by both the
+// flat and grouped renderers so they stay consistent.
+function formatTaskLine(t: FormattableTask): string {
+  const handle = t.sequence_id != null ? `#${t.sequence_id}` : t.id;
+  const meta: string[] = [];
+  if (t.priority && t.priority !== "none") meta.push(`prio:${t.priority}`);
+  if (t.assignee_id) meta.push(`-> ${t.assignee_id}`);
+  if (t.label_ids && t.label_ids.length > 0) meta.push(`labels:${t.label_ids.join(",")}`);
+  if (t.module_ids && t.module_ids.length > 0) meta.push(`modules:${t.module_ids.join(",")}`);
+  const suffix = meta.length > 0 ? ` (${meta.join("; ")})` : "";
+  return `${handle}: ${t.title}${suffix}`;
+}
+
+// Group a flat task list by status and render a board-shaped summary so the cybo
+// sees the TRUE distribution across every status (incl. backlog/pending), not just
+// the in_progress sliver. A row is NEVER dropped — an unknown status is rendered
+// under its own section after the canonical ones. Pure (no IO) for unit-testing.
+export function formatTasksByStatus(tasks: FormattableTask[]): string {
+  if (tasks.length === 0) return "(no tasks)";
+  const byStatus = new Map<string, FormattableTask[]>();
+  for (const t of tasks) {
+    const arr = byStatus.get(t.status) ?? [];
+    arr.push(t);
+    byStatus.set(t.status, arr);
+  }
+  const known = TASK_STATUS_ORDER.filter((s) => byStatus.has(s));
+  const unknown = [...byStatus.keys()].filter((s) => !TASK_STATUS_ORDER.includes(s)).sort();
+  const sections: string[] = [];
+  for (const status of [...known, ...unknown]) {
+    const rows = byStatus.get(status)!;
+    const lines = rows.map((t) => `  ${formatTaskLine(t)}`);
+    sections.push(`${status} (${rows.length}):\n${lines.join("\n")}`);
+  }
+  return sections.join("\n\n");
 }
 
 // The compact, agent-facing projection of a Tasks-project returned by
@@ -340,7 +446,15 @@ export function composeCyboSoul(
 }
 
 export function createCyborg7McpServer(deps: Cyborg7McpDeps, ctx: Cyborg7McpContext): McpServer {
-  const { storage, messageRouter, workspaceManager, cyboRead, cyboWrite, sessionContext } = deps;
+  const {
+    storage,
+    messageRouter,
+    workspaceManager,
+    cyboRead,
+    cyboWrite,
+    cyboPageWrite,
+    sessionContext,
+  } = deps;
   const server = new McpServer({ name: "cyborg7", version: "1.0.0" });
 
   // Platform-permission gate. A NON-EMPTY permission list restricts the cybo to
@@ -980,10 +1094,7 @@ export function createCyborg7McpServer(deps: Cyborg7McpDeps, ctx: Cyborg7McpCont
         "state, priority, or label. Each line shows the per-project sequence id, state/" +
         "priority, and any label/module ids.",
       {
-        status: z
-          .string()
-          .optional()
-          .describe("Filter by status: todo | in_progress | pending_review | done"),
+        status: z.string().optional().describe(TASK_STATUS_HELP),
         assignee: z
           .string()
           .optional()
@@ -1017,23 +1128,11 @@ export function createCyborg7McpServer(deps: Cyborg7McpDeps, ctx: Cyborg7McpCont
           return mcpText(`Error: ${err instanceof Error ? err.message : "could not list tasks"}`);
         }
 
-        const formatted = tasks
-          .map((t) => {
-            // Prefer the per-project sequence id (the human-facing handle); fall back
-            // to the raw task id on an old relay that doesn't carry one.
-            const handle = t.sequence_id != null ? `#${t.sequence_id}` : t.id;
-            const meta: string[] = [];
-            if (t.priority && t.priority !== "none") meta.push(`prio:${t.priority}`);
-            if (t.assignee_id) meta.push(`-> ${t.assignee_id}`);
-            if (t.label_ids && t.label_ids.length > 0) meta.push(`labels:${t.label_ids.join(",")}`);
-            if (t.module_ids && t.module_ids.length > 0)
-              meta.push(`modules:${t.module_ids.join(",")}`);
-            const suffix = meta.length > 0 ? ` (${meta.join("; ")})` : "";
-            return `[${t.status}] ${handle}: ${t.title}${suffix}`;
-          })
-          .join("\n");
-
-        return { content: [{ type: "text" as const, text: formatted || "(no tasks)" }] };
+        // Group by the REAL status so a cybo's summary reflects the TRUE board
+        // (every status incl. backlog/pending), not a flat sliver. With NO status
+        // filter readTasks returns ALL statuses (no implicit drop) — the bug was the
+        // misadvertised enum, not the read.
+        return mcpText(formatTasksByStatus(tasks));
       },
     );
 
@@ -1219,6 +1318,198 @@ export function createCyborg7McpServer(deps: Cyborg7McpDeps, ctx: Cyborg7McpCont
         }
       },
     );
+
+    // ─── Documented Page WRITES (create / update / nest) ──────────────
+    //
+    // Mirror the cybo TASK write surface: gated on the same create_task grant (pages
+    // are part of Tasks), workspace-scoped, and resolved cloud → local. Cloud writes
+    // go through cyboPageWrite (the relay validates the OWNER's project visibility and
+    // applies the backend's cycle guard); the local fallback writes SQLite directly.
+    // A page is created blank then its content/icon set, mirroring the UI create flow
+    // (storage.createPage takes no body). parentId nests at birth (#1042); the backend
+    // ON DELETE SET NULL parent_id + the cycle guard keep the hierarchy safe.
+    if (allows("create_task")) {
+      // Shared cloud-write helper. Returns the relay result, or null on a relay miss
+      // (unreachable / old relay) so the caller falls back to the local write.
+      const writePageViaRelay = async (req: {
+        kind: "create_page" | "update_page" | "nest_page";
+        projectId?: string;
+        title?: string;
+        content?: string;
+        icon?: string | null;
+        parentId?: string | null;
+        pageId?: string;
+      }) => {
+        if (!cyboPageWrite || !(ctx.cyboId || ctx.initiatedByUserId)) return null;
+        return cyboPageWrite({
+          workspaceId: ctx.workspaceId,
+          cyboId: ctx.cyboId,
+          createdBy: ctx.initiatedByUserId,
+          agentId: ctx.agentId,
+          ...req,
+        });
+      };
+
+      server.tool(
+        "cyborg7_create_page",
+        "Create a documented Page (doc) in a Tasks-project. Only title+projectId are " +
+          "required. Pass `parentId` to NEST the new page under an existing page (a " +
+          "subpage). `content` is the page body (markdown/plain text); `icon` is a single " +
+          "emoji glyph. Use cyborg7_list_projects to find the projectId, and " +
+          "cyborg7_list_pages to find a parent page id. Returns the created page JSON.",
+        {
+          title: z.string().describe("Page title"),
+          projectId: z.string().describe("The Tasks-project id to create the page in"),
+          content: z
+            .string()
+            .optional()
+            .describe("Page body (markdown/plain text). Defaults blank."),
+          icon: z.string().optional().describe("A single emoji glyph for the page icon"),
+          parentId: z
+            .string()
+            .optional()
+            .describe(
+              "Parent page id to nest this new page under (a subpage). Omit for a root page.",
+            ),
+        },
+        async ({ title, projectId, content, icon, parentId }) => {
+          try {
+            const cloud = await writePageViaRelay({
+              kind: "create_page",
+              projectId,
+              title,
+              content,
+              icon,
+              parentId: parentId ?? null,
+            });
+            if (cloud) {
+              if (!cloud.ok || !cloud.page)
+                return mcpText(`Error: ${cloud.error ?? "page create failed"}`);
+              return mcpText(JSON.stringify(cloud.page));
+            }
+            // Solo / PG-less fallback — create blank, then set body/icon if given.
+            const created = storage.createPage({
+              projectId,
+              title,
+              ownedBy: ctx.initiatedByUserId ?? ctx.cyboId ?? ctx.agentId,
+              parentId: parentId ?? null,
+            });
+            const page =
+              content !== undefined || icon !== undefined
+                ? (storage.updatePage(created.id, { content, icon }) ?? created)
+                : created;
+            return mcpText(
+              JSON.stringify({
+                id: page.id,
+                title: page.title,
+                parentId: page.parentId,
+                icon: page.icon,
+              }),
+            );
+          } catch (err) {
+            return mcpText(
+              `Error: ${err instanceof Error ? err.message : "could not create page"}`,
+            );
+          }
+        },
+      );
+
+      server.tool(
+        "cyborg7_update_page",
+        "Update a documented Page's metadata/content: retitle it, replace its body " +
+          "(`content`), or set/clear its `icon`. Every field except pageId is optional; " +
+          "omitted fields are left unchanged. Use cyborg7_nest_page to (re)parent a page.",
+        {
+          pageId: z.string().describe("The page id to update (from cyborg7_list_pages)"),
+          title: z.string().optional().describe("New page title"),
+          content: z.string().optional().describe("Replace the page body (markdown/plain text)"),
+          icon: z
+            .string()
+            .nullable()
+            .optional()
+            .describe("Set the emoji icon, or null to clear it. Omit to leave unchanged."),
+        },
+        async ({ pageId, title, content, icon }) => {
+          try {
+            const cloud = await writePageViaRelay({
+              kind: "update_page",
+              pageId,
+              title,
+              content,
+              icon,
+            });
+            if (cloud) {
+              if (!cloud.ok || !cloud.page)
+                return mcpText(`Error: ${cloud.error ?? `page '${pageId}' not found`}`);
+              return mcpText(JSON.stringify(cloud.page));
+            }
+            // Solo / PG-less fallback — anchor to this workspace before mutating.
+            const existing = storage.getPage(pageId);
+            if (!existing || existing.workspaceId !== ctx.workspaceId) {
+              return mcpText(`Error: page '${pageId}' not found in this workspace`);
+            }
+            const page = storage.updatePage(pageId, { title, content, icon });
+            if (!page) return mcpText(`Error: page '${pageId}' not found`);
+            return mcpText(
+              JSON.stringify({
+                id: page.id,
+                title: page.title,
+                parentId: page.parentId,
+                icon: page.icon,
+              }),
+            );
+          } catch (err) {
+            return mcpText(
+              `Error: ${err instanceof Error ? err.message : "could not update page"}`,
+            );
+          }
+        },
+      );
+
+      server.tool(
+        "cyborg7_nest_page",
+        "Nest (or un-nest) a documented Page: set its parent to another page in the SAME " +
+          "project, or pass parentId=null to move it back to the root. Rejected if it " +
+          "would create a cycle (a page can't become its own ancestor) or if the parent " +
+          "is in another project.",
+        {
+          pageId: z.string().describe("The page id to (re)parent"),
+          parentId: z
+            .string()
+            .nullable()
+            .describe("Parent page id to nest under, or null to move the page to the root"),
+        },
+        async ({ pageId, parentId }) => {
+          try {
+            const cloud = await writePageViaRelay({ kind: "nest_page", pageId, parentId });
+            if (cloud) {
+              if (!cloud.ok || !cloud.page)
+                return mcpText(`Error: ${cloud.error ?? `page '${pageId}' not found`}`);
+              return mcpText(JSON.stringify(cloud.page));
+            }
+            // Solo / PG-less fallback — anchor to this workspace; storage.updatePage
+            // applies the same cycle/cross-project guard as the backend.
+            const existing = storage.getPage(pageId);
+            if (!existing || existing.workspaceId !== ctx.workspaceId) {
+              return mcpText(`Error: page '${pageId}' not found in this workspace`);
+            }
+            const page = storage.updatePage(pageId, { parentId });
+            if (!page) return mcpText(`Error: page '${pageId}' not found`);
+            return mcpText(
+              JSON.stringify({
+                id: page.id,
+                title: page.title,
+                parentId: page.parentId,
+                icon: page.icon,
+              }),
+            );
+          } catch (err) {
+            // PageCycleError + "parent page not found in this project" are user input.
+            return mcpText(`Error: ${err instanceof Error ? err.message : "could not nest page"}`);
+          }
+        },
+      );
+    }
   }
 
   // ─── Cross-session context (cybo recall) — OWNER-SCOPED reads ───────
@@ -1354,7 +1645,11 @@ export function createCyborg7McpServer(deps: Cyborg7McpDeps, ctx: Cyborg7McpCont
         status: z
           .string()
           .optional()
-          .describe("New status: todo | in_progress | pending_review | done"),
+          .describe(
+            "New status — one of: " +
+              TASK_STATUSES.join(" | ") +
+              ". Prefer `stateId` to move between board columns; status is the back-compat mirror.",
+          ),
         assignee: z
           .string()
           .optional()
@@ -1652,7 +1947,11 @@ export function createCyborg7McpServer(deps: Cyborg7McpDeps, ctx: Cyborg7McpCont
         status: z
           .string()
           .optional()
-          .describe("New status: todo | in_progress | pending_review | done"),
+          .describe(
+            "New status — one of: " +
+              TASK_STATUSES.join(" | ") +
+              ". Prefer `stateId` to move between board columns; status is the back-compat mirror.",
+          ),
         assignee: z
           .string()
           .optional()

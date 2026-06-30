@@ -29,6 +29,8 @@ import type {
   CyboReadResponse,
   CyboWriteRequest,
   CyboWriteResponse,
+  CyboPageWriteRequest,
+  CyboPageWriteResponse,
 } from "./relay-protocol.js";
 import type { StoredSchedule } from "./storage.js";
 import { MessageRouter } from "./message-router.js";
@@ -1052,6 +1054,109 @@ describe.skipIf(!hasPg)(
       // One tasks_changed per op, in order, each carrying this task's id.
       const ops = events.filter((e) => e.taskId === taskId).map((e) => e.op);
       expect(ops).toEqual(["created", "updated", "deleted"]);
+    });
+
+    // ── D2: documented-Page WRITES over the relay (handleCyboPageWrite) on REAL PG ──
+    //
+    // The cybo's create/update/nest page tools round-trip through the relay's
+    // handleCyboPageWrite, which writes the SHARED tasks_pages table the UI reads. This
+    // drives that handler directly against real Postgres: create (owned by the cybo's
+    // owner, in the workspace Inbox), update the title, nest a child under a parent, and
+    // prove the cycle guard rejects making a page its own descendant's child.
+    it("P1 (cloud): cybo create/update/nest pages persist to PG; a cycle is rejected", async () => {
+      const db = (relay as unknown as { pg: PgSync }).pg;
+      const inboxId = await db.getOrCreateInboxProject(wsId);
+
+      const pageWrite = async (
+        partial: Partial<CyboPageWriteRequest> & Pick<CyboPageWriteRequest, "kind">,
+      ): Promise<CyboPageWriteResponse> => {
+        const replies: CyboPageWriteResponse[] = [];
+        const fakeWs = {
+          readyState: 1,
+          send: (raw: string) => replies.push(JSON.parse(raw) as CyboPageWriteResponse),
+        };
+        await (
+          relay as unknown as {
+            handleCyboPageWrite(ws: unknown, m: CyboPageWriteRequest): Promise<void>;
+          }
+        ).handleCyboPageWrite(fakeWs, {
+          type: "cybo_page_write_request",
+          requestId: randomUUID(),
+          workspaceId: wsId,
+          cyboId, // the cybo is owned by memberId, a member → Inbox is visible
+          agentId: agentUuid,
+          ...partial,
+        } as CyboPageWriteRequest);
+        expect(replies).toHaveLength(1);
+        return replies[0];
+      };
+
+      // create — title + body + icon, in the Inbox.
+      const created = await pageWrite({
+        kind: "create_page",
+        projectId: inboxId,
+        title: `P1 runbook ${runId}`,
+        content: "step 1",
+        icon: "📘",
+      });
+      expect(created.ok).toBe(true);
+      const pageId = created.page!.id;
+      expect(created.page!.title).toBe(`P1 runbook ${runId}`);
+      expect(created.page!.icon).toBe("📘");
+      // The body was persisted (create-blank-then-update flow).
+      const onPg = await db.getPageById(pageId);
+      expect(onPg?.content).toBe("step 1");
+      expect(onPg?.ownedBy).toBe(memberId); // owned by the cybo's owner
+
+      // update — retitle, leave the icon.
+      const updated = await pageWrite({
+        kind: "update_page",
+        pageId,
+        title: `P1 renamed ${runId}`,
+      });
+      expect(updated.ok).toBe(true);
+      expect(updated.page!.title).toBe(`P1 renamed ${runId}`);
+      expect((await db.getPageById(pageId))?.icon).toBe("📘");
+
+      // nest — create a parent, then nest the page under it.
+      const parent = await pageWrite({
+        kind: "create_page",
+        projectId: inboxId,
+        title: `P1 parent ${runId}`,
+      });
+      expect(parent.ok).toBe(true);
+      const nested = await pageWrite({ kind: "nest_page", pageId, parentId: parent.page!.id });
+      expect(nested.ok).toBe(true);
+      expect(nested.page!.parentId).toBe(parent.page!.id);
+
+      // cycle guard — try to nest the parent UNDER its own (now) descendant → reject.
+      const cycle = await pageWrite({
+        kind: "nest_page",
+        pageId: parent.page!.id,
+        parentId: pageId,
+      });
+      expect(cycle.ok).toBe(false);
+      expect(cycle.error ?? "").toMatch(/cycle|descendant/i);
+      // The parent stays at the root (the rejected move did not persist).
+      expect((await db.getPageById(parent.page!.id))?.parentId).toBeNull();
+
+      // un-nest — parentId:null moves the page back to root.
+      const unnested = await pageWrite({ kind: "nest_page", pageId, parentId: null });
+      expect(unnested.ok).toBe(true);
+      expect(unnested.page!.parentId).toBeNull();
+    });
+
+    it("P2 (cloud): the page write tools are gated on create_task; page reads stay always-on", async () => {
+      const sendOnly = await listToolNames(["send_message"]);
+      expect(sendOnly).not.toContain("cyborg7_create_page");
+      expect(sendOnly).not.toContain("cyborg7_update_page");
+      expect(sendOnly).not.toContain("cyborg7_nest_page");
+      expect(sendOnly).toContain("cyborg7_list_pages"); // read tool — always on
+      expect(sendOnly).toContain("cyborg7_read_page");
+      const granted = await listToolNames(["create_task"]);
+      expect(granted).toContain("cyborg7_create_page");
+      expect(granted).toContain("cyborg7_update_page");
+      expect(granted).toContain("cyborg7_nest_page");
     });
 
     it("G9: the task ops are gated on create_task; the members read tool is always exposed", async () => {

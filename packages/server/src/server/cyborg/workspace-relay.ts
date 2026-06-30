@@ -10,10 +10,13 @@ import {
   RelayHeartbeatSchema,
   CyboReadRequestSchema,
   CyboWriteRequestSchema,
+  CyboPageWriteRequestSchema,
   UploadImageRequestSchema,
   type CyboReadResponse,
   type CyboWriteRequest,
   type CyboWriteResponse,
+  type CyboPageWriteRequest,
+  type CyboPageWriteResponse,
   type UploadImageRequest,
   type UploadImageResponse,
   type DaemonMeta,
@@ -26,6 +29,7 @@ import { PgSync } from "./db/pg-sync.js";
 import type { RelayRedis } from "./relay-redis.js";
 import { DaemonTelemetryFrameSchema, type DaemonTelemetryEvent } from "./daemon-telemetry.js";
 import { mentionActivityId } from "./activity-id.js";
+import { PageCycleError, isPageRestrictedFromUser, pageBroadcastPayload } from "./page-access.js";
 import type { Logger } from "pino";
 
 interface DaemonConnection {
@@ -459,6 +463,12 @@ export class WorkspaceRelay {
     const cyboWriteParsed = CyboWriteRequestSchema.safeParse(msg);
     if (cyboWriteParsed.success) {
       void this.handleCyboWrite(ws, cyboWriteParsed.data);
+      return;
+    }
+
+    const cyboPageWriteParsed = CyboPageWriteRequestSchema.safeParse(msg);
+    if (cyboPageWriteParsed.success) {
+      void this.handleCyboPageWrite(ws, cyboPageWriteParsed.data);
       return;
     }
 
@@ -1856,6 +1866,187 @@ export class WorkspaceRelay {
     };
   }
 
+  // Fan a cyborg:pages_changed broadcast out to workspace guests through the SAME
+  // onBroadcast → relay-standalone broadcastToGuests seam the human page path uses,
+  // so a cybo-created/edited page live-updates open Pages views. A PRIVATE page is
+  // stripped to id+visibility by pageBroadcastPayload so its title/body never fans
+  // out to non-owners.
+  private emitPagesChanged(
+    workspaceId: string,
+    projectId: string,
+    op: "created" | "updated",
+    page: Awaited<ReturnType<PgSync["insertPage"]>>,
+  ): void {
+    this.onBroadcast?.(
+      workspaceId,
+      {
+        type: "cyborg:pages_changed",
+        payload: { workspaceId, projectId, op, page: pageBroadcastPayload(page) },
+      },
+      "guest",
+      0,
+    );
+  }
+
+  // Cybo documented-Page WRITES (daemon → relay → PG). Mirrors handleCyboWrite for
+  // tasks: resolve + validate the acting OWNER (the cybo's creator, or the spawning
+  // user for a non-cybo agent), gate the target project against the OWNER's
+  // visibility (fail-closed), then mutate the SHARED tasks_pages table via
+  // insertPage/updatePage. The backend updatePage applies the cycle + cross-project
+  // parent guard (PageCycleError / "parent page not found in this project").
+  private async handleCyboPageWrite(ws: WebSocket, msg: CyboPageWriteRequest): Promise<void> {
+    const fail = (error: string): void =>
+      this.send(ws, {
+        type: "cybo_page_write_response",
+        requestId: msg.requestId,
+        ok: false,
+        error,
+      });
+    if (!this.pg) {
+      fail("cybo page writes need the shared workspace store (relay has no PG)");
+      return;
+    }
+    const pg = this.pg;
+    try {
+      // Resolve the acting actor + the project-visibility check, reusing the SAME
+      // actor resolution as the task write path (cybo → its grants; non-cybo → its
+      // spawning user; viewer/non-member rejected).
+      const resolved = await this.resolveCyboWriteActor(pg, {
+        type: "cybo_write_request",
+        requestId: msg.requestId,
+        workspaceId: msg.workspaceId,
+        cyboId: msg.cyboId,
+        createdBy: msg.createdBy,
+        agentId: msg.agentId,
+        kind: "create_task",
+      });
+      if (!resolved.ok) {
+        fail(resolved.error);
+        return;
+      }
+      // The PAGE owner — for the owner-ACL (a private page is visible to its owner).
+      // A cybo inherits its OWNER's page visibility (the same principle the page READ
+      // path uses), so a cybo-created page is owned by + visible to the human owner,
+      // not the ephemeral cybo id (which the human UI could never see). A non-cybo
+      // agent acts as its spawning user (actorId === that user).
+      const pageOwnerId = msg.cyboId
+        ? ((await pg.getCybos(msg.workspaceId)).find((c) => c.id === msg.cyboId)?.created_by ??
+          resolved.actorId)
+        : resolved.actorId;
+
+      const page =
+        msg.kind === "create_page"
+          ? await this.cyboCreatePage(pg, msg, pageOwnerId, resolved.assertProjectVisible, fail)
+          : await this.cyboEditPage(pg, msg, pageOwnerId, resolved.assertProjectVisible, fail);
+      if (!page) return; // a failure reply was already sent
+      this.emitPagesChanged(
+        msg.workspaceId,
+        page.projectId,
+        msg.kind === "create_page" ? "created" : "updated",
+        page,
+      );
+      this.send(ws, {
+        type: "cybo_page_write_response",
+        requestId: msg.requestId,
+        ok: true,
+        page: { id: page.id, title: page.title, parentId: page.parentId, icon: page.icon },
+      });
+    } catch (err) {
+      fail(`cybo page write failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  // create_page: insert a blank page in a visible project (owned by pageOwnerId), then
+  // set body/icon in a follow-up update (storage.createPage takes no body, so the cloud
+  // path matches). Returns the page, or null after sending a failure reply.
+  private async cyboCreatePage(
+    pg: PgSync,
+    msg: CyboPageWriteRequest,
+    pageOwnerId: string,
+    assertProjectVisible: (projectId: string) => Promise<boolean>,
+    fail: (error: string) => void,
+  ): Promise<Awaited<ReturnType<PgSync["insertPage"]>> | null> {
+    if (!msg.projectId || !msg.title) {
+      fail("projectId and title required");
+      return null;
+    }
+    if (!(await assertProjectVisible(msg.projectId))) {
+      fail("project not found");
+      return null;
+    }
+    let page: Awaited<ReturnType<PgSync["insertPage"]>>;
+    try {
+      page = await pg.insertPage({
+        projectId: msg.projectId,
+        title: msg.title,
+        ownedBy: pageOwnerId,
+        parentId: msg.parentId ?? null,
+      });
+    } catch (err) {
+      fail(err instanceof Error ? err.message : "page create failed");
+      return null;
+    }
+    if (msg.content !== undefined || msg.icon !== undefined) {
+      const updated = await pg.updatePage(page.id, { content: msg.content, icon: msg.icon });
+      if (updated) page = updated;
+    }
+    return page;
+  }
+
+  // update_page | nest_page: gate the page's project (owner-ACL), then apply the patch.
+  // The backend updatePage enforces the cycle + cross-project parent guard. Returns the
+  // updated page, or null after sending a failure reply.
+  private async cyboEditPage(
+    pg: PgSync,
+    msg: CyboPageWriteRequest,
+    pageOwnerId: string,
+    assertProjectVisible: (projectId: string) => Promise<boolean>,
+    fail: (error: string) => void,
+  ): Promise<Awaited<ReturnType<PgSync["updatePage"]>> | null> {
+    if (!msg.pageId) {
+      fail("pageId required");
+      return null;
+    }
+    const projectId = await pg.getPageProjectId(msg.pageId);
+    if (!projectId || !(await assertProjectVisible(projectId))) {
+      fail("page not found");
+      return null;
+    }
+    // Owner-gate: a non-null-owner private page is editable only by its owner (the
+    // project gate above is membership-only); fail closed otherwise.
+    const current = await pg.getPageById(msg.pageId);
+    if (current && isPageRestrictedFromUser(current, pageOwnerId)) {
+      fail("page not found");
+      return null;
+    }
+    try {
+      const page =
+        msg.kind === "nest_page"
+          ? await pg.updatePage(msg.pageId, { parentId: msg.parentId ?? null })
+          : await pg.updatePage(msg.pageId, {
+              title: msg.title,
+              content: msg.content,
+              icon: msg.icon,
+            });
+      if (!page) {
+        fail("page not found");
+        return null;
+      }
+      return page;
+    } catch (err) {
+      // Cycle / cross-project parent rejections are user input, not a 500.
+      if (
+        err instanceof PageCycleError ||
+        (err instanceof Error && err.message === "parent page not found in this project")
+      ) {
+        fail(err.message);
+        return null;
+      }
+      fail(err instanceof Error ? err.message : "page update failed");
+      return null;
+    }
+  }
+
   // Agent image upload (daemon → relay → S3). The daemon ships an agent-generated
   // image's bytes inline; the relay PUTs them to S3 (the only side with creds) and
   // returns the public URL so the daemon can rewrite the timeline item's markdown
@@ -2052,6 +2243,7 @@ export class WorkspaceRelay {
       | RelayError
       | CyboReadResponse
       | CyboWriteResponse
+      | CyboPageWriteResponse
       | UploadImageResponse,
   ): void {
     if (ws.readyState === WebSocket.OPEN) {

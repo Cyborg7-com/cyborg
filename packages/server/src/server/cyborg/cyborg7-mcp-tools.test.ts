@@ -1,7 +1,12 @@
 import { describe, it, expect } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createCyborg7McpServer, type Cyborg7McpDeps } from "./cyborg7-mcp-tools.js";
+import {
+  createCyborg7McpServer,
+  formatTasksByStatus,
+  TASK_STATUSES,
+  type Cyborg7McpDeps,
+} from "./cyborg7-mcp-tools.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";
@@ -948,8 +953,11 @@ describe("cyborg7 task tools — relay-backed (cloud daemon)", () => {
   it("list_tasks reads the SHARED tasks via the relay (same rows the UI sees)", async () => {
     const { deps, reads } = makeTaskRelayDeps();
     const text = await callToolAsCybo(deps, "cyborg7_list_tasks", {});
-    expect(text).toContain("[pending] t1: Ship the relay");
-    expect(text).toContain("[done] t2: Cut the DMG (-> u9)");
+    // Grouped by the REAL status (board-shaped), with per-status counts.
+    expect(text).toContain("pending (1):");
+    expect(text).toContain("  t1: Ship the relay");
+    expect(text).toContain("done (1):");
+    expect(text).toContain("  t2: Cut the DMG (-> u9)");
     expect(reads[0]).toMatchObject({ kind: "tasks", cyboId: "cybo_1", workspaceId: "ws_1" });
   });
 
@@ -1004,7 +1012,8 @@ describe("cyborg7 task tools — relay-backed (cloud daemon)", () => {
       { id: "sl1", title: "Local-only", status: "pending", assignee_id: null },
     ];
     const text = await callToolAsCybo(deps, "cyborg7_list_tasks", {});
-    expect(text).toContain("[pending] sl1: Local-only");
+    expect(text).toContain("pending (1):");
+    expect(text).toContain("  sl1: Local-only");
   });
 
   // Tasks Phase 2 (watcher): the watcher scopes a created task to the channel it
@@ -1431,5 +1440,318 @@ describe("cyborg7 cross-session recall tools — owner-scoped (cybo)", () => {
     const out = await callRecall(deps, "cyborg7_read_session", { sessionId: "s_theirs" });
     expect(out).toMatch(/not found/i);
     await cleanup();
+  });
+});
+
+// ─── D1 GATING: list_tasks surfaces EVERY status (the prod backlog/pending bug) ──
+//
+// Prod symptom: a workspace had 74+ tasks across backlog/pending/in_progress/done,
+// but the cybo's list_tasks (no filter) surfaced only in_progress and called the
+// rest empty — because the tool ADVERTISED a fictional `todo | in_progress |
+// pending_review | done` taxonomy, so the cybo reasoned in non-existent buckets.
+// The read itself never dropped anything (getTasks with no status returns all). The
+// confirmation the owner requires: given a fixture mirroring 55 backlog + 23 pending
+// + 3 in_progress + 4 done, an unfiltered list_tasks returns ALL 85, every status.
+describe("cyborg7_list_tasks — D1 taxonomy: returns every status incl. backlog/pending", () => {
+  // Build the proven prod distribution: 55 backlog + 23 pending + 3 in_progress + 4 done.
+  function buildFixture() {
+    const counts: Record<string, number> = {
+      backlog: 55,
+      pending: 23,
+      in_progress: 3,
+      done: 4,
+    };
+    const tasks: { id: string; title: string; status: string; assignee_id: null }[] = [];
+    for (const [status, n] of Object.entries(counts)) {
+      for (let i = 0; i < n; i++) {
+        tasks.push({
+          id: `${status}_${i}`,
+          title: `${status} task ${i}`,
+          status,
+          assignee_id: null,
+        });
+      }
+    }
+    return { tasks, counts, total: tasks.length };
+  }
+
+  it("the pure formatter groups by status and counts every bucket (no drop)", () => {
+    const { tasks, counts, total } = buildFixture();
+    expect(total).toBe(85);
+    const out = formatTasksByStatus(tasks);
+    // Every real status is a labeled section with its true count.
+    expect(out).toContain(`backlog (${counts.backlog}):`);
+    expect(out).toContain(`pending (${counts.pending}):`);
+    expect(out).toContain(`in_progress (${counts.in_progress}):`);
+    expect(out).toContain(`done (${counts.done}):`);
+    // Board order: backlog before pending before in_progress before done.
+    expect(out.indexOf("backlog (")).toBeLessThan(out.indexOf("pending ("));
+    expect(out.indexOf("pending (")).toBeLessThan(out.indexOf("in_progress ("));
+    expect(out.indexOf("in_progress (")).toBeLessThan(out.indexOf("done ("));
+    // The sum of the per-status counts equals the full fixture (nothing dropped).
+    const summed = [...out.matchAll(/\((\d+)\):/g)].reduce((a, m) => a + Number(m[1]), 0);
+    expect(summed).toBe(total);
+  });
+
+  it("an unfiltered list_tasks returns ALL 85 tasks across every status (incl. backlog + pending)", async () => {
+    const { tasks, total } = buildFixture();
+    // Cloud daemon: the cybo's read round-trips to the relay's getTasks. With NO
+    // status filter the relay returns the full set — we assert the tool surfaces it.
+    let lastReq: Record<string, unknown> | null = null;
+    const cyboRead = async (req: Record<string, unknown>) => {
+      lastReq = req;
+      if (req.kind === "tasks") {
+        // The relay applies status only when asked; an unfiltered read returns all.
+        const filtered = req.status ? tasks.filter((t) => t.status === req.status) : tasks;
+        return { ok: true, tasks: filtered };
+      }
+      return { ok: false, error: "unexpected read" };
+    };
+    const deps = {
+      storage: { getChannels: () => [], getMessages: () => [], pg: null },
+      messageRouter: {},
+      cyboRead,
+    } as unknown as Cyborg7McpDeps;
+
+    const text = await callToolAsCybo(deps, "cyborg7_list_tasks", {});
+    // The cybo asked WITHOUT a status filter (the bug was an implicit narrowing in
+    // the cybo's reasoning, not the wire) — so the relay returns the full board.
+    expect(lastReq).toMatchObject({ kind: "tasks" });
+    expect((lastReq as Record<string, unknown> | null)?.status).toBeUndefined();
+    // EVERY status section is present with its real count — backlog + pending are
+    // NO LONGER invisible.
+    expect(text).toContain("backlog (55):");
+    expect(text).toContain("pending (23):");
+    expect(text).toContain("in_progress (3):");
+    expect(text).toContain("done (4):");
+    // The full 85 are accounted for in the grouped output.
+    const summed = [...text.matchAll(/\((\d+)\):/g)].reduce((a, m) => a + Number(m[1]), 0);
+    expect(summed).toBe(total);
+  });
+
+  it("the advertised status filter values are the REAL taxonomy (no `pending_review`/`todo`-only)", () => {
+    // The tool no longer invents buckets; backlog + pending are first-class.
+    expect([...TASK_STATUSES]).toEqual([
+      "backlog",
+      "todo",
+      "pending",
+      "in_progress",
+      "done",
+      "cancelled",
+    ]);
+    expect(TASK_STATUSES).not.toContain("pending_review");
+    expect(TASK_STATUSES).toContain("backlog");
+    expect(TASK_STATUSES).toContain("pending");
+  });
+});
+
+// ─── D2: documented-Page WRITE tools (create / update / nest + cycle guard) ──
+//
+// The cybo gained cyborg7_create_page / cyborg7_update_page / cyborg7_nest_page,
+// mirroring the UI's page RPCs (#1041/#1042). Cloud writes go through cyboPageWrite;
+// these tests exercise the SOLO (local SQLite) path (no cyboPageWrite dep), proving
+// create→read, update metadata, nest under a parent, and a cycle rejection.
+describe("cyborg7 page write tools — local store (solo)", () => {
+  // A tiny in-memory page store standing in for DualStorage's page methods, applying
+  // the SAME cross-project + cycle guards the real storage.updatePage enforces.
+  function makePageDeps() {
+    interface P {
+      id: string;
+      projectId: string;
+      workspaceId: string;
+      title: string;
+      content: string;
+      icon: string | null;
+      parentId: string | null;
+      ownedBy: string | null;
+    }
+    const pages = new Map<string, P>();
+    let seq = 0;
+    const brief = (p: P) => ({ id: p.id, title: p.title, parentId: p.parentId, icon: p.icon });
+    const isDescendant = (id: string, candidateParent: string): boolean => {
+      // Is candidateParent inside id's subtree? Walk up from candidateParent to root.
+      let cur: string | null = candidateParent;
+      while (cur) {
+        if (cur === id) return true;
+        cur = pages.get(cur)?.parentId ?? null;
+      }
+      return false;
+    };
+    const storage = {
+      getChannels: () => [],
+      getMessages: () => [],
+      pg: null,
+      createPage: (opts: {
+        projectId: string;
+        title?: string;
+        ownedBy?: string | null;
+        parentId?: string | null;
+      }) => {
+        if (opts.parentId) {
+          const parent = pages.get(opts.parentId);
+          if (!parent || parent.projectId !== opts.projectId) {
+            throw new Error("parent page not found in this project");
+          }
+        }
+        const id = `page_${seq++}`;
+        const p: P = {
+          id,
+          projectId: opts.projectId,
+          workspaceId: "ws_1",
+          title: opts.title ?? "",
+          content: "",
+          icon: null,
+          parentId: opts.parentId ?? null,
+          ownedBy: opts.ownedBy ?? null,
+        };
+        pages.set(id, p);
+        return brief(p);
+      },
+      getPage: (id: string) => {
+        const p = pages.get(id);
+        return p ? { ...p } : null;
+      },
+      updatePage: (
+        id: string,
+        u: { title?: string; content?: string; icon?: string | null; parentId?: string | null },
+      ) => {
+        const p = pages.get(id);
+        if (!p) return null;
+        if (u.parentId !== undefined && u.parentId !== null) {
+          if (u.parentId === id) throw new Error("page cycle: page cannot be its own parent");
+          const parent = pages.get(u.parentId);
+          if (!parent || parent.projectId !== p.projectId) {
+            throw new Error("parent page not found in this project");
+          }
+          if (isDescendant(id, u.parentId)) {
+            throw new Error("page cycle: parent is a descendant");
+          }
+        }
+        if (u.title !== undefined) p.title = u.title;
+        if (u.content !== undefined) p.content = u.content;
+        if (u.icon !== undefined) p.icon = u.icon;
+        if (u.parentId !== undefined) p.parentId = u.parentId;
+        return brief(p);
+      },
+    };
+    return { deps: { storage, messageRouter: {} } as unknown as Cyborg7McpDeps, pages };
+  }
+
+  it("create_page round-trips: a created page is readable with title + parent + icon", async () => {
+    const { deps } = makePageDeps();
+    const createdText = await callToolAsCybo(deps, "cyborg7_create_page", {
+      title: "Runbook",
+      projectId: "tp_eng",
+      content: "step 1",
+      icon: "📘",
+    });
+    const created = JSON.parse(createdText) as { id: string; title: string; icon: string | null };
+    expect(created.title).toBe("Runbook");
+    expect(created.icon).toBe("📘");
+    // The body was set via the follow-up update (storage.createPage takes no body).
+    expect(
+      (deps.storage as unknown as { getPage: (id: string) => { content: string } }).getPage(
+        created.id,
+      ).content,
+    ).toBe("step 1");
+  });
+
+  it("update_page edits metadata (title) without touching unrelated fields", async () => {
+    const { deps } = makePageDeps();
+    const created = JSON.parse(
+      await callToolAsCybo(deps, "cyborg7_create_page", {
+        title: "Old",
+        projectId: "tp_eng",
+        icon: "📘",
+      }),
+    ) as { id: string };
+    const updated = JSON.parse(
+      await callToolAsCybo(deps, "cyborg7_update_page", { pageId: created.id, title: "New" }),
+    ) as { id: string; title: string; icon: string | null };
+    expect(updated.title).toBe("New");
+    expect(updated.icon).toBe("📘"); // untouched
+  });
+
+  it("nest_page sets the parent (and null un-nests to root)", async () => {
+    const { deps } = makePageDeps();
+    const parent = JSON.parse(
+      await callToolAsCybo(deps, "cyborg7_create_page", { title: "Parent", projectId: "tp_eng" }),
+    ) as { id: string };
+    const child = JSON.parse(
+      await callToolAsCybo(deps, "cyborg7_create_page", { title: "Child", projectId: "tp_eng" }),
+    ) as { id: string };
+    const nested = JSON.parse(
+      await callToolAsCybo(deps, "cyborg7_nest_page", { pageId: child.id, parentId: parent.id }),
+    ) as { id: string; parentId: string | null };
+    expect(nested.parentId).toBe(parent.id);
+    const unnested = JSON.parse(
+      await callToolAsCybo(deps, "cyborg7_nest_page", { pageId: child.id, parentId: null }),
+    ) as { parentId: string | null };
+    expect(unnested.parentId).toBeNull();
+  });
+
+  it("nest_page REJECTS a cycle (a page cannot become its own descendant's child)", async () => {
+    const { deps } = makePageDeps();
+    const a = JSON.parse(
+      await callToolAsCybo(deps, "cyborg7_create_page", { title: "A", projectId: "tp_eng" }),
+    ) as { id: string };
+    const b = JSON.parse(
+      await callToolAsCybo(deps, "cyborg7_create_page", { title: "B", projectId: "tp_eng" }),
+    ) as { id: string };
+    // B under A, then try to put A under B → cycle.
+    await callToolAsCybo(deps, "cyborg7_nest_page", { pageId: b.id, parentId: a.id });
+    const cycle = await callToolAsCybo(deps, "cyborg7_nest_page", { pageId: a.id, parentId: b.id });
+    expect(cycle).toMatch(/cycle/i);
+    // Self-parent is also rejected.
+    const selfParent = await callToolAsCybo(deps, "cyborg7_nest_page", {
+      pageId: a.id,
+      parentId: a.id,
+    });
+    expect(selfParent).toMatch(/cycle/i);
+  });
+
+  it("the page WRITE tools require the create_task grant (read tools stay read-only)", async () => {
+    const server = createCyborg7McpServer({} as unknown as Cyborg7McpDeps, {
+      workspaceId: "ws_1",
+      agentId: "ag_1",
+      platformPermissions: ["read_messages"], // no create_task
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    const client = new Client({ name: "test", version: "1.0.0" });
+    await client.connect(clientTransport);
+    try {
+      const names = (await client.listTools()).tools.map((t) => t.name);
+      // Read tools present, write tools withheld.
+      expect(names).toContain("cyborg7_list_pages");
+      expect(names).toContain("cyborg7_read_page");
+      expect(names).not.toContain("cyborg7_create_page");
+      expect(names).not.toContain("cyborg7_update_page");
+      expect(names).not.toContain("cyborg7_nest_page");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it("a create_task grant exposes the page write tools", async () => {
+    const server = createCyborg7McpServer({} as unknown as Cyborg7McpDeps, {
+      workspaceId: "ws_1",
+      agentId: "ag_1",
+      platformPermissions: ["create_task"],
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    const client = new Client({ name: "test", version: "1.0.0" });
+    await client.connect(clientTransport);
+    try {
+      const names = (await client.listTools()).tools.map((t) => t.name);
+      expect(names).toContain("cyborg7_create_page");
+      expect(names).toContain("cyborg7_update_page");
+      expect(names).toContain("cyborg7_nest_page");
+    } finally {
+      await client.close();
+      await server.close();
+    }
   });
 });

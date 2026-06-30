@@ -314,6 +314,53 @@ export const CyboWriteResponseSchema = z.object({
   cybo: z.object({ id: z.string(), slug: z.string(), soul: z.string() }).optional(),
 });
 
+// Cybo documented-Page WRITES over the relay (daemon → relay → PG). Same rationale
+// as cybo_write for tasks: a cloud daemon's local page write never reaches the
+// shared PG the UI reads. The relay validates (the cybo's OWNER may see the target
+// project) and mutates PG via insertPage/updatePage — applying the backend's cycle
+// guard on a nest. Old relays without this handler never answer → the daemon times
+// out and falls back to its local write. kind:
+//  - create_page — title + projectId required; parentId nests at birth.
+//  - update_page — title/content/icon (icon null clears); pageId required.
+//  - nest_page   — set parentId (or null to un-nest); pageId required.
+export const CyboPageWriteRequestSchema = z.object({
+  type: z.literal("cybo_page_write_request"),
+  requestId: z.string(),
+  workspaceId: z.string(),
+  // The acting cybo (the relay resolves its OWNER for the page-visibility ACL).
+  cyboId: z.string().optional(),
+  // The spawning user for a NON-cybo agent (acts with that user's authority).
+  createdBy: z.string().optional(),
+  agentId: z.string().optional(),
+  kind: z.enum(["create_page", "update_page", "nest_page"]),
+  // create_page
+  projectId: z.string().optional(),
+  title: z.string().optional(),
+  content: z.string().optional(),
+  // icon: a string sets the emoji; explicit null clears; absent = unchanged.
+  icon: z.string().nullish(),
+  // create_page (nest at birth) + nest_page; null moves to root.
+  parentId: z.string().nullish(),
+  // update_page / nest_page
+  pageId: z.string().optional(),
+});
+
+export const CyboPageWriteResponseSchema = z.object({
+  type: z.literal("cybo_page_write_response"),
+  requestId: z.string(),
+  ok: z.boolean(),
+  error: z.string().optional(),
+  page: z
+    .object({
+      id: z.string(),
+      title: z.string(),
+      parentId: z.string().nullable(),
+      icon: z.string().nullable(),
+    })
+    .nullable()
+    .optional(),
+});
+
 // Agent-generated image upload over the relay (daemon → relay → S3). An agent
 // (Codex / imagegen skill) emits an image as a LOCAL file path the daemon owns
 // but the browser/relay can't read; only the relay holds the S3 credentials. The
@@ -436,6 +483,8 @@ export type CyboReadRequest = z.infer<typeof CyboReadRequestSchema>;
 export type CyboReadResponse = z.infer<typeof CyboReadResponseSchema>;
 export type CyboWriteRequest = z.infer<typeof CyboWriteRequestSchema>;
 export type CyboWriteResponse = z.infer<typeof CyboWriteResponseSchema>;
+export type CyboPageWriteRequest = z.infer<typeof CyboPageWriteRequestSchema>;
+export type CyboPageWriteResponse = z.infer<typeof CyboPageWriteResponseSchema>;
 export type UploadImageRequest = z.infer<typeof UploadImageRequestSchema>;
 export type UploadImageResponse = z.infer<typeof UploadImageResponseSchema>;
 
@@ -446,6 +495,7 @@ export type DaemonToRelay =
   | RelayHeartbeat
   | CyboReadRequest
   | CyboWriteRequest
+  | CyboPageWriteRequest
   | UploadImageRequest;
 export type RelayToDaemon =
   | RelaySubscribed
@@ -454,4 +504,5 @@ export type RelayToDaemon =
   | RelayError
   | CyboReadResponse
   | CyboWriteResponse
+  | CyboPageWriteResponse
   | UploadImageResponse;
