@@ -3922,31 +3922,78 @@ export class CyborgStorage {
   // cybo's display name/avatar on its messages — works for a cloud/disk cybo the
   // daemon never created locally. No-op when already present (cheap, idempotent).
   persistCybo(cybo: StoredCybo): void {
-    if (cybo.id.startsWith("local:") || this.getCybo(cybo.id)) return;
-    this.insertCyboStmt.run(
-      cybo.id,
-      cybo.workspace_id,
-      cybo.slug,
-      cybo.name,
-      cybo.description ?? null,
-      cybo.avatar ?? null,
-      cybo.role ?? null,
-      cybo.soul,
-      cybo.provider,
-      cybo.model ?? null,
-      cybo.mcp_servers ?? null,
-      cybo.tool_grants ?? null,
-      cybo.llm_auth_mode ?? "cli",
-      cybo.behavior_mode ?? "responsive",
-      cybo.home_daemon_id ?? null,
-      cybo.autonomy_level ?? null,
-      cybo.monthly_spend_cap ?? null,
-      cybo.platform_permissions ?? JSON.stringify([]),
-      cybo.is_default ? 1 : 0,
-      cybo.created_by,
-      cybo.created_at ?? Date.now(),
-      cybo.updated_at ?? Date.now(),
-    );
+    // Disk-local cybos (`local:<slug>`) have no PG workspace row and must never
+    // occupy a workspace cybos slot.
+    if (cybo.id.startsWith("local:")) return;
+    // Already cached under this exact id → nothing to do (cheap, idempotent).
+    if (this.getCybo(cybo.id)) return;
+    // The cybos table is UNIQUE(workspace_id, slug). Local SQLite can already hold
+    // a STALE duplicate under the SAME (workspace_id, slug) but a DIFFERENT id — a
+    // failed PG mirror or a pre-PG daemon-local row (see cybo-roster-merge.ts). PG
+    // is authoritative for workspace cybos and the caller passes the PG-resolved
+    // row, so drop the stale duplicate and converge on the canonical id. A plain
+    // INSERT here threw "UNIQUE constraint failed: cybos.workspace_id, cybos.slug",
+    // which aborted the whole @-mention spawn (the cybo never answered).
+    const stale = this.getCyboBySlug(cybo.workspace_id, cybo.slug);
+    // Converge + insert ATOMICALLY. Every other table stores cybo_id as a PLAIN
+    // TEXT column, NOT a foreign key (no ON DELETE CASCADE) — so dropping the
+    // stale row WITHOUT re-pointing them would ORPHAN those references and later
+    // throw CyboNotFoundError when a schedule fires or an archived session
+    // resumes. Re-point each cybo_id reference onto the canonical id, drop the
+    // stale row, and insert the canonical row in ONE transaction so a mid-way
+    // failure rolls back to the valid pre-state instead of leaving dangling refs.
+    // The four tables below are the COMPLETE set with a cybo_id column (verified
+    // against every CREATE TABLE / ALTER TABLE in this file); none has a UNIQUE
+    // index on cybo_id, so the UPDATE can never hit a conflict.
+    this.db.transaction(() => {
+      if (stale && stale.id !== cybo.id) {
+        for (const table of [
+          "agent_bindings",
+          "schedules",
+          "archived_sessions",
+          "ephemeral_session_context",
+        ]) {
+          this.db
+            .prepare(`UPDATE ${table} SET cybo_id = ? WHERE cybo_id = ?`)
+            .run(cybo.id, stale.id);
+        }
+        // messages carries the cybo id BY VALUE (no cybo_id column): a cybo's own
+        // replies store from_id = cybo.id (workspace-relay.ts), and a human's DM
+        // to a cybo stores the cybo as the to_id peer. The client renders the
+        // author by matching cybo.id === message.from_id, so an un-repointed
+        // from_id would render the stale cybo's history as an unknown author.
+        // Mirror reassignUserId's from_id/to_id re-point. The match is on the
+        // unique stale cybo id, so it can never touch a human/agent row (and is a
+        // harmless no-op when no such message exists).
+        this.db.prepare("UPDATE messages SET from_id = ? WHERE from_id = ?").run(cybo.id, stale.id);
+        this.db.prepare("UPDATE messages SET to_id = ? WHERE to_id = ?").run(cybo.id, stale.id);
+        this.deleteCyboStmt.run(stale.id);
+      }
+      this.insertCyboStmt.run(
+        cybo.id,
+        cybo.workspace_id,
+        cybo.slug,
+        cybo.name,
+        cybo.description ?? null,
+        cybo.avatar ?? null,
+        cybo.role ?? null,
+        cybo.soul,
+        cybo.provider,
+        cybo.model ?? null,
+        cybo.mcp_servers ?? null,
+        cybo.tool_grants ?? null,
+        cybo.llm_auth_mode ?? "cli",
+        cybo.behavior_mode ?? "responsive",
+        cybo.home_daemon_id ?? null,
+        cybo.autonomy_level ?? null,
+        cybo.monthly_spend_cap ?? null,
+        cybo.platform_permissions ?? JSON.stringify([]),
+        cybo.is_default ? 1 : 0,
+        cybo.created_by,
+        cybo.created_at ?? Date.now(),
+        cybo.updated_at ?? Date.now(),
+      );
+    })();
   }
 
   getCyboBySlug(workspaceId: string, slug: string): StoredCybo | undefined {

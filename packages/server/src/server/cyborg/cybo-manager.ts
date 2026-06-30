@@ -397,9 +397,18 @@ export async function spawnCybo(opts: {
 
   // Denormalize the cybo into local SQLite so getCybo resolves its display name +
   // avatar for the messages it posts (otherwise a cloud @-mention reply renders as
-  // the raw agent UUID, not "Apex" with its photo). persistCybo is idempotent and
-  // skips local:/already-present ids, so this is a safe unconditional call.
-  storage.persistCybo(cybo);
+  // the raw agent UUID, not "Apex" with its photo). persistCybo is best-effort: it
+  // is idempotent and reconciles a stale same-slug row, but guard defensively so
+  // any unforeseen SQLite error can NEVER abort the spawn — a throw here previously
+  // surfaced as "@x couldn't start" and the cybo never answered.
+  try {
+    storage.persistCybo(cybo);
+  } catch (err) {
+    logger?.warn(
+      { err, cyboId: cybo.id, slug: cybo.slug },
+      "persistCybo failed; spawning without local cybo denormalization",
+    );
+  }
 
   const isLocal = cybo.id.startsWith("local:");
   if (!isLocal && cybo.workspace_id !== workspaceId) {
