@@ -48,6 +48,14 @@ const SPAWN_TYPES = new Set<string>([
   "cyborg:set_schedule_enabled",
   "cyborg:delete_schedule",
   "cyborg:run_schedule_once",
+  // Built-in integrations (recipes): enabling provisions a cybo + schedules +
+  // channel memberships, disabling deletes the cybo (cascade) — both configure
+  // recurring code execution on a daemon, same authority tier as schedule CRUD
+  // and spawn_cybo. add/remove cybo↔channel mutates daemon-owned cybo state.
+  "cyborg:enable_recipe",
+  "cyborg:disable_recipe",
+  "cyborg:add_cybo_to_channel",
+  "cyborg:remove_cybo_from_channel",
   // Agent-control (DAEMON_AGENT_CONTROL_TYPES) — mutating an existing agent folds
   // into `spawn` per the issue (a user who can spawn already controls what it
   // spawned; keeps the scope set small).

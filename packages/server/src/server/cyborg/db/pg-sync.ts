@@ -47,6 +47,7 @@ import type {
   StoredScheduledMessage,
   ScheduledMessageErrorCode,
   StoredPromptTemplate,
+  StoredInstalledRecipe,
   PageShape,
 } from "../storage.js";
 // Phase 0 — shared opaque-cursor + reorder math (defined in the dependency-free
@@ -4099,6 +4100,88 @@ export class PgSync {
 
   async deleteSchedule(id: string): Promise<void> {
     await this.db.delete(schema.schedules).where(eq(schema.schedules.id, id));
+  }
+
+  // ─── Built-in integrations (recipes) ─────────────────────────────
+  // The installed_recipes mirror. Unlike schedules, the relay READS this table
+  // PG-direct (list_recipes) so cloud users see installs even when the owning
+  // daemon is asleep — same pattern as listSchedules. DualStorage writes SQLite
+  // first then mirrors here; the daemon's enable/disable handlers are the writers.
+
+  // Enable (install) a recipe. Upsert against the partial UNIQUE (workspace,
+  // recipe) WHERE enabled — a re-enable reuses the existing active row (refresh
+  // config + enabled + updated_at). Raw SQL because drizzle's onConflictDoUpdate
+  // can't express a partial-index conflict target (see addCyboToChannel). config
+  // is a JSON object; passed parameterized so it can't break out of the literal.
+  async enableRecipe(r: {
+    id: string;
+    workspaceId: string;
+    recipeId: string;
+    config?: Record<string, unknown>;
+    createdBy: string;
+  }): Promise<void> {
+    const configJson = JSON.stringify(r.config ?? {});
+    await this.db.execute(sql`
+      INSERT INTO installed_recipes (id, workspace_id, recipe_id, enabled, config, cybo_id, schedule_ids, created_by)
+      VALUES (${r.id}, ${r.workspaceId}, ${r.recipeId}, true, ${configJson}::jsonb, NULL, '[]'::jsonb, ${r.createdBy})
+      ON CONFLICT (workspace_id, recipe_id) WHERE enabled
+      DO UPDATE SET config = ${configJson}::jsonb, enabled = true, updated_at = now()
+    `);
+  }
+
+  // Stamp the provisioned cybo + schedule ids onto the active install, scoped by
+  // id so a concurrent disable can't resurrect ids onto a torn-down row.
+  async setRecipeProvisioned(id: string, cyboId: string, scheduleIds: string[]): Promise<void> {
+    await this.db
+      .update(schema.installedRecipes)
+      .set({ cyboId, scheduleIds, updatedAt: new Date() })
+      .where(eq(schema.installedRecipes.id, id));
+  }
+
+  // Disable the active install for (workspace, recipe): flip enabled=false and
+  // clear the provisioned ids (the cybo + its schedules/memberships are removed by
+  // the caller via the cybo FK cascade). The row is kept for history, never deleted.
+  async disableRecipe(workspaceId: string, recipeId: string): Promise<void> {
+    await this.db
+      .update(schema.installedRecipes)
+      .set({ enabled: false, cyboId: null, scheduleIds: [], updatedAt: new Date() })
+      .where(
+        and(
+          eq(schema.installedRecipes.workspaceId, workspaceId),
+          eq(schema.installedRecipes.recipeId, recipeId),
+          eq(schema.installedRecipes.enabled, true),
+        ),
+      );
+  }
+
+  // Cloud READ of the recipe mirror (relay answers list_recipes PG-direct).
+  async listRecipesForWorkspace(workspaceId: string): Promise<StoredInstalledRecipe[]> {
+    const rows = await this.db
+      .select()
+      .from(schema.installedRecipes)
+      .where(eq(schema.installedRecipes.workspaceId, workspaceId))
+      .orderBy(desc(schema.installedRecipes.createdAt));
+    return rows.map(mapInstalledRecipeRow);
+  }
+
+  // The ACTIVE install for (workspace, recipe), or null. Disabled history rows are
+  // excluded so callers see at most one (the live install).
+  async getInstalledRecipe(
+    workspaceId: string,
+    recipeId: string,
+  ): Promise<StoredInstalledRecipe | null> {
+    const [row] = await this.db
+      .select()
+      .from(schema.installedRecipes)
+      .where(
+        and(
+          eq(schema.installedRecipes.workspaceId, workspaceId),
+          eq(schema.installedRecipes.recipeId, recipeId),
+          eq(schema.installedRecipes.enabled, true),
+        ),
+      )
+      .limit(1);
+    return row ? mapInstalledRecipeRow(row) : null;
   }
 
   // Cloud READ of the schedule mirror. Unlike the runner's SQLite reads, the
@@ -11055,6 +11138,27 @@ function mapScheduleRow(r: typeof schema.schedules.$inferSelect): StoredSchedule
     max_runs: r.maxRuns,
     run_count: r.runCount,
     catch_up: r.catchUp ? 1 : 0,
+    created_by: r.createdBy,
+    created_at: r.createdAt.getTime(),
+    updated_at: r.updatedAt.getTime(),
+  };
+}
+
+// Map an installed_recipes row to the Stored shape. PG `config`/`schedule_ids` are
+// jsonb (returned as JS object/array); StoredInstalledRecipe keeps them as JSON TEXT
+// (the SQLite shape), so we re-serialize — the same convention mapScheduledMessageRow
+// uses for `mentions`. A NULL schedule_ids normalizes to '[]'.
+function mapInstalledRecipeRow(
+  r: typeof schema.installedRecipes.$inferSelect,
+): StoredInstalledRecipe {
+  return {
+    id: r.id,
+    workspace_id: r.workspaceId,
+    recipe_id: r.recipeId,
+    enabled: r.enabled ? 1 : 0,
+    config: JSON.stringify(r.config ?? {}),
+    cybo_id: r.cyboId,
+    schedule_ids: JSON.stringify(r.scheduleIds ?? []),
     created_by: r.createdBy,
     created_at: r.createdAt.getTime(),
     updated_at: r.updatedAt.getTime(),

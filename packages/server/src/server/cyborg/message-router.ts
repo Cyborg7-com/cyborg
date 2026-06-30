@@ -1954,6 +1954,19 @@ export class MessageRouter {
     });
   }
 
+  // Broadcast a recipe install/teardown to all workspace guests so open
+  // integrations views refresh live (Built-in integrations). Mirrors the relay's
+  // cyborg:recipes_changed. The payload carries only the workspaceId — clients
+  // re-fetch list_recipes on receipt (the install set is small and PG-direct).
+  broadcastRecipesChanged(opts: { workspaceId: string }): void {
+    this.broadcast.toWorkspace(opts.workspaceId, {
+      type: "cyborg:recipes_changed" as const,
+      payload: {
+        workspaceId: opts.workspaceId,
+      },
+    });
+  }
+
   // Task-processing observability (#Logs tab): fan a structured, human-readable
   // task/watcher pipeline event out to the workspace as `cyborg:task_event`. The
   // client transport pushes its payload straight into logState, so it appears in

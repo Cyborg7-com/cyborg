@@ -275,6 +275,20 @@ const DAEMON_FORWARD_TYPES = new Set([
   "cyborg:set_schedule_enabled",
   "cyborg:delete_schedule",
   "cyborg:run_schedule_once",
+  // Built-in integrations (recipes) WRITES execute on the owning daemon, exactly
+  // like the schedule WRITES above: enabling a recipe provisions a cybo + N
+  // schedules + channel memberships (daemon-owned; the daemon's handlers write
+  // them through DualStorage→PG, including the install row), and disabling deletes
+  // the cybo (FK cascade tears down its schedules + memberships). add/remove cybo↔
+  // channel likewise mutate daemon-owned cybo state. list_recipes is NOT here: the
+  // relay answers it PG-direct from the mirror (below) so cloud/DMG users see
+  // installs even when the owning daemon is asleep. A forward with no daemon
+  // connected returns the standard "no daemon connected" error (acceptable — the
+  // recipe's cybo needs a daemon host).
+  "cyborg:enable_recipe",
+  "cyborg:disable_recipe",
+  "cyborg:add_cybo_to_channel",
+  "cyborg:remove_cybo_from_channel",
   // Slash commands summon an ephemeral cybo, which needs a daemon's AgentManager
   // (the cloud relay runs no local agents) — forward to the owning daemon.
   "cyborg:slash_command",
@@ -336,6 +350,14 @@ const DAEMON_SPAWN_TYPES = new Set([
   "cyborg:set_schedule_enabled",
   "cyborg:delete_schedule",
   "cyborg:run_schedule_once",
+  // Built-in integrations (recipes): enabling/disabling provisions/destroys a
+  // daemon-owned cybo + schedules; add/remove cybo↔channel mutates cybo state.
+  // Same privileged gate as a spawn (non-viewer + daemon access + license +
+  // single-daemon resolution), and `spawn` scope via scopeForType.
+  "cyborg:enable_recipe",
+  "cyborg:disable_recipe",
+  "cyborg:add_cybo_to_channel",
+  "cyborg:remove_cybo_from_channel",
   // Opening a terminal = running a shell on a daemon — same privileged gate as a
   // spawn (#654): non-viewer + daemon access (+ license + single-daemon resolve).
   "cyborg:start_terminal",
@@ -4818,6 +4840,52 @@ async function main() {
               createdBy: s.created_by,
               createdAt: s.created_at,
             })),
+          });
+          break;
+        }
+
+        // Built-in integrations (recipes): list a workspace's recipe installs.
+        // Answered PG-direct from the mirror — like list_schedules — so cloud/DMG
+        // users see installs even when the owning daemon is asleep. Read-only;
+        // scoped to the workspace. Maps the Stored row (snake_case; config +
+        // schedule_ids are JSON STRINGS; enabled 0|1; timestamps epoch-ms) to the
+        // wire CyborgRecipeView, degrading a corrupt JSON blob to {} / [].
+        case "cyborg:list_recipes": {
+          if (!workspaceId) break;
+          const rows = await pg.listRecipesForWorkspace(workspaceId);
+          respond("cyborg:list_recipes_response", {
+            recipes: rows.map((r) => {
+              let config: Record<string, unknown> = {};
+              let scheduleIds: string[] = [];
+              try {
+                const c = JSON.parse(r.config) as unknown;
+                if (c && typeof c === "object" && !Array.isArray(c)) {
+                  config = c as Record<string, unknown>;
+                }
+              } catch {
+                // corrupt config blob → {} (the row is still surfaced)
+              }
+              try {
+                const s = JSON.parse(r.schedule_ids) as unknown;
+                if (Array.isArray(s)) {
+                  scheduleIds = s.filter((x): x is string => typeof x === "string");
+                }
+              } catch {
+                // corrupt schedule_ids → [] (same degradation as config)
+              }
+              return {
+                id: r.id,
+                workspaceId: r.workspace_id,
+                recipeId: r.recipe_id,
+                enabled: r.enabled === 1,
+                config,
+                cyboId: r.cybo_id,
+                scheduleIds,
+                createdBy: r.created_by,
+                createdAt: r.created_at,
+                updatedAt: r.updated_at,
+              };
+            }),
           });
           break;
         }

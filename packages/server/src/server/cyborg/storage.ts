@@ -367,6 +367,24 @@ export interface StoredSchedule {
   updated_at: number;
 }
 
+// Built-in integrations (recipes): one row per recipe install in a workspace.
+// Mirrors the PG `installed_recipes` table. `config` + `schedule_ids` are stored
+// as JSON TEXT in SQLite (jsonb in PG) — parsed/serialized at the storage edge.
+// enabled is 0|1 (SQLite has no boolean). cybo_id/schedule_ids carry the
+// provisioned ids; null/[] until provisioned and again after a disable/teardown.
+export interface StoredInstalledRecipe {
+  id: string;
+  workspace_id: string;
+  recipe_id: string;
+  enabled: number; // 0 | 1
+  config: string; // JSON object
+  cybo_id: string | null;
+  schedule_ids: string; // JSON string[]
+  created_by: string;
+  created_at: number;
+  updated_at: number;
+}
+
 // Closed-set reason a scheduled run was skipped (never fired). Mirrors the PG
 // schedule_runs.skip_reason check — failures are shown, never dropped (#619).
 export type ScheduleSkipReason = "license_paused" | "overlap" | "unauthorized";
@@ -1123,6 +1141,28 @@ export class CyborgStorage {
       -- AFTER addColumnIfMissing("schedules", "task_id", ...) — an inline CREATE
       -- INDEX here threw "no such column: task_id" on upgraded DBs (the schedules
       -- table predates task_id) and crash-looped the daemon migration.
+
+      -- Built-in integrations (recipes). One row per recipe install in a workspace;
+      -- mirrors the PG installed_recipes table. config + schedule_ids are JSON TEXT
+      -- (jsonb in PG); enabled is 0|1. The partial UNIQUE index enforces "one ACTIVE
+      -- install per (workspace, recipe)" — only enabled rows participate, so a
+      -- disabled history row may sit alongside a fresh re-enable.
+      CREATE TABLE IF NOT EXISTS installed_recipes (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        recipe_id TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        config TEXT NOT NULL DEFAULT '{}',
+        cybo_id TEXT,
+        schedule_ids TEXT DEFAULT '[]',
+        created_by TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_installed_recipes_active
+        ON installed_recipes(workspace_id, recipe_id) WHERE enabled = 1;
+      CREATE INDEX IF NOT EXISTS idx_installed_recipes_ws
+        ON installed_recipes(workspace_id);
 
       -- Phase 2 (#619): per-schedule run history (the trust/visibility layer).
       -- The runner writes a row at fire/finish/skip; the UI reads "last runs".
@@ -3444,6 +3484,76 @@ export class CyborgStorage {
 
   deleteSchedule(id: string): void {
     this.db.prepare("DELETE FROM schedules WHERE id = ?").run(id);
+  }
+
+  // ─── Built-in integrations (recipes) ─────────────────────────────
+  // Mirrors the PG installed_recipes table. SQLite is the authoritative copy on a
+  // solo/local daemon; DualStorage writes here first then fire-and-forgets to PG.
+  // config + schedule_ids are JSON TEXT here (jsonb in PG) — the JSON is
+  // serialized on write, returned as raw TEXT (the caller/mapper parses it).
+
+  // Enable (install) a recipe. Upsert on the partial UNIQUE (workspace, recipe)
+  // WHERE enabled = 1: a re-enable reuses the existing active row (refreshing
+  // config + enabled + updated_at). Returns the resulting row.
+  enableRecipe(opts: {
+    id: string;
+    workspaceId: string;
+    recipeId: string;
+    config?: Record<string, unknown>;
+    createdBy: string;
+  }): StoredInstalledRecipe {
+    const now = Date.now();
+    const configJson = JSON.stringify(opts.config ?? {});
+    this.db
+      .prepare(
+        `INSERT INTO installed_recipes (id, workspace_id, recipe_id, enabled, config, cybo_id, schedule_ids, created_by, created_at, updated_at)
+         VALUES (?, ?, ?, 1, ?, NULL, '[]', ?, ?, ?)
+         ON CONFLICT (workspace_id, recipe_id) WHERE enabled = 1
+         DO UPDATE SET config = excluded.config, enabled = 1, updated_at = excluded.updated_at`,
+      )
+      .run(opts.id, opts.workspaceId, opts.recipeId, configJson, opts.createdBy, now, now);
+    return this.getInstalledRecipe(opts.workspaceId, opts.recipeId) as StoredInstalledRecipe;
+  }
+
+  // Stamp the provisioned cybo + schedule ids onto the active install (called
+  // after the daemon creates them). Scoped by id so a concurrent disable can't
+  // resurrect ids onto a torn-down row.
+  setRecipeProvisioned(id: string, cyboId: string, scheduleIds: string[]): void {
+    this.db
+      .prepare(
+        "UPDATE installed_recipes SET cybo_id = ?, schedule_ids = ?, updated_at = ? WHERE id = ?",
+      )
+      .run(cyboId, JSON.stringify(scheduleIds), Date.now(), id);
+  }
+
+  // Disable the active install for (workspace, recipe): flip enabled=0 and clear
+  // the provisioned ids (the cybo + its schedules/memberships are deleted by the
+  // caller via the cybo FK cascade). The row is kept for history, never deleted.
+  disableRecipe(workspaceId: string, recipeId: string): void {
+    this.db
+      .prepare(
+        `UPDATE installed_recipes
+         SET enabled = 0, cybo_id = NULL, schedule_ids = '[]', updated_at = ?
+         WHERE workspace_id = ? AND recipe_id = ? AND enabled = 1`,
+      )
+      .run(Date.now(), workspaceId, recipeId);
+  }
+
+  listRecipesForWorkspace(workspaceId: string): StoredInstalledRecipe[] {
+    return this.db
+      .prepare("SELECT * FROM installed_recipes WHERE workspace_id = ? ORDER BY created_at DESC")
+      .all(workspaceId) as StoredInstalledRecipe[];
+  }
+
+  // The ACTIVE install for (workspace, recipe), or null. Disabled history rows are
+  // intentionally excluded so callers see at most one (the live install).
+  getInstalledRecipe(workspaceId: string, recipeId: string): StoredInstalledRecipe | null {
+    const row = this.db
+      .prepare(
+        "SELECT * FROM installed_recipes WHERE workspace_id = ? AND recipe_id = ? AND enabled = 1 LIMIT 1",
+      )
+      .get(workspaceId, recipeId) as StoredInstalledRecipe | undefined;
+    return row ?? null;
   }
 
   // ─── Schedule runs (run history — #619) ──────────────────────────

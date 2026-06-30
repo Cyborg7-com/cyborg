@@ -53,6 +53,12 @@ describe("scopeForType — maps each relay action set to its required scope", ()
       "cyborg:restore_session",
       // import_session resumes a NEW live agent (a spawn) — same scope as restore.
       "cyborg:import_session",
+      // Built-in integrations (recipes) provision/destroy daemon-owned cybos +
+      // schedules + channel memberships — same authority tier as schedule CRUD.
+      "cyborg:enable_recipe",
+      "cyborg:disable_recipe",
+      "cyborg:add_cybo_to_channel",
+      "cyborg:remove_cybo_from_channel",
     ]) {
       expect(scopeForType(t)).toBe("spawn");
     }

@@ -86,6 +86,27 @@ export interface ScheduleMutatedPayload {
   error?: string;
 }
 
+// ─── Built-in integrations (recipes) ─────────────────────────────────────────
+// A "recipe" enables a built-in automation: the daemon provisions a cybo (preset
+// soul + permissions) + N schedules + channel membership, recorded in
+// installed_recipes. Disable tears the cybo down (cascade) and marks the row
+// disabled. The display catalog (id/keys) lives in lib/integrations/recipes-catalog.ts;
+// the server registry is the provisioning source of truth — they share recipeId +
+// config keys. Mirrors the server's RecipeView (Stream A contract).
+export interface RecipeView {
+  id: string;
+  workspaceId: string;
+  recipeId: string;
+  enabled: boolean;
+  config: Record<string, unknown>;
+  // The provisioned cybo's id (null until provisioned / after teardown).
+  cyboId: string | null;
+  scheduleIds: string[];
+  createdBy: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
 // Secret-bearing credential payload for `cyborg:set_cybo_credential` — mirrors the
 // server `ProviderCredentialPayload` union (api | oauth | wellknown; `cli` stores
 // nothing). NEVER echoed back: set/remove return `{ ok: true }`, list returns
@@ -332,6 +353,9 @@ interface CyborgEventMap extends SlackEventMap {
   save_message: SaveMessagePayload;
   task_event: TaskEventPayload;
   audit_event: AuditEventPayload;
+  // A built-in recipe was enabled/disabled (possibly by another client). The relay
+  // fans `cyborg:recipes_changed` out so every open integrations view re-lists.
+  recipes_changed: { workspaceId: string };
 }
 
 export type {
@@ -491,6 +515,8 @@ const SIMPLE_PASSTHROUGH: Record<string, keyof CyborgEventMap> = {
   // Personal save toggled on another of my devices (#609) — keep the Saved view
   // in sync. Per-user only; never carries another user's bookmarks.
   "cyborg:save_message_broadcast": "save_message",
+  // A built-in recipe install changed — re-list the integrations "Built-in" section.
+  "cyborg:recipes_changed": "recipes_changed",
 };
 
 // Resuming an archived session (restore_session / import_session) is far slower
@@ -939,6 +965,46 @@ export class CyborgClient extends SlackClient<CyborgEventMap> {
         ...(daemonId ? { daemonId } : {}),
       },
     );
+  }
+
+  // ─── Built-in integrations (recipes) ────────────────────────────────
+  // Enable/disable/list the workspace's built-in automation recipes. enable +
+  // disable are forwarded to the daemon (they create/destroy cybos + schedules);
+  // list is answered PG-direct on the relay from the mirror, so cloud users see
+  // installs even when the daemon is asleep. Mutations also broadcast
+  // `cyborg:recipes_changed` so every open client re-lists.
+
+  // Enable (or re-configure) a recipe. `config` carries the recipe's config keys
+  // (channel ids, crons, timezone — see lib/integrations/recipes-catalog.ts).
+  // Resolves with the resulting install row. Fails with "no daemon connected" if
+  // no daemon is hosting the workspace (the recipe's cybo needs a daemon host).
+  async enableRecipe(
+    workspaceId: string,
+    recipeId: string,
+    config: Record<string, unknown>,
+  ): Promise<{ recipe: RecipeView }> {
+    return this.request<{ recipe: RecipeView }>("cyborg:enable_recipe", {
+      workspaceId,
+      recipeId,
+      config,
+    });
+  }
+
+  // Disable a recipe: tears down its cybo (cascade removes schedules + channel
+  // memberships) and marks the install row disabled.
+  async disableRecipe(
+    workspaceId: string,
+    recipeId: string,
+  ): Promise<{ recipeId: string; disabled: true }> {
+    return this.request<{ recipeId: string; disabled: true }>("cyborg:disable_recipe", {
+      workspaceId,
+      recipeId,
+    });
+  }
+
+  // List the workspace's installed recipes (enabled + disabled rows).
+  async listRecipes(workspaceId: string): Promise<{ recipes: RecipeView[] }> {
+    return this.request<{ recipes: RecipeView[] }>("cyborg:list_recipes", { workspaceId });
   }
 
   respondToPermission(

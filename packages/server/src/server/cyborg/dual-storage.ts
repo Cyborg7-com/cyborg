@@ -13,6 +13,7 @@ import type {
   StoredScheduledMessage,
   ScheduledMessageErrorCode,
   StoredPromptTemplate,
+  StoredInstalledRecipe,
   StoredAgentBinding,
   StoredEphemeralSessionContext,
   StoredArchivedSession,
@@ -945,6 +946,58 @@ export class DualStorage {
   async getScheduleFromPg(id: string): Promise<StoredSchedule | undefined> {
     if (!this._pg) return undefined;
     return this._pg.getSchedule(id);
+  }
+
+  // ─── Built-in integrations (recipes) ─────────────────────────────
+  // SQLite is authoritative on a solo/local daemon; writes mirror to PG
+  // fire-and-forget (logged on failure). Reads come from SQLite, EXCEPT the cloud
+  // relay which calls listRecipesFromPg so installs are visible while the owning
+  // daemon is asleep (the same exception listSchedulesFromPg makes for schedules).
+
+  enableRecipe(opts: {
+    id: string;
+    workspaceId: string;
+    recipeId: string;
+    config?: Record<string, unknown>;
+    createdBy: string;
+  }): StoredInstalledRecipe {
+    const recipe = this.sqlite.enableRecipe(opts);
+    if (this._pg) {
+      this._pg.enableRecipe(opts).catch(this.logSyncError("enableRecipe"));
+    }
+    return recipe;
+  }
+
+  setRecipeProvisioned(id: string, cyboId: string, scheduleIds: string[]): void {
+    this.sqlite.setRecipeProvisioned(id, cyboId, scheduleIds);
+    if (this._pg) {
+      this._pg
+        .setRecipeProvisioned(id, cyboId, scheduleIds)
+        .catch(this.logSyncError("setRecipeProvisioned"));
+    }
+  }
+
+  disableRecipe(workspaceId: string, recipeId: string): void {
+    this.sqlite.disableRecipe(workspaceId, recipeId);
+    if (this._pg) {
+      this._pg.disableRecipe(workspaceId, recipeId).catch(this.logSyncError("disableRecipe"));
+    }
+  }
+
+  listRecipesForWorkspace(workspaceId: string): StoredInstalledRecipe[] {
+    return this.sqlite.listRecipesForWorkspace(workspaceId);
+  }
+
+  getInstalledRecipe(workspaceId: string, recipeId: string): StoredInstalledRecipe | null {
+    return this.sqlite.getInstalledRecipe(workspaceId, recipeId);
+  }
+
+  // Cloud-only READ from the PG mirror: the relay answers list_recipes for
+  // cloud/DMG users from PG so installs are visible even when the owning daemon is
+  // offline. Returns [] in solo mode (no PG).
+  async listRecipesFromPg(workspaceId: string): Promise<StoredInstalledRecipe[]> {
+    if (!this._pg) return [];
+    return this._pg.listRecipesForWorkspace(workspaceId);
   }
 
   // ─── Schedule runs (run history — #619) ──────────────────────────

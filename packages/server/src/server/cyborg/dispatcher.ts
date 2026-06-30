@@ -151,6 +151,11 @@ import {
   CyborgDeleteScheduleRequestSchema,
   CyborgRunScheduleOnceRequestSchema,
   CyborgListScheduleRunsRequestSchema,
+  CyborgEnableRecipeRequestSchema,
+  CyborgDisableRecipeRequestSchema,
+  CyborgListRecipesRequestSchema,
+  CyborgAddCyboToChannelRequestSchema,
+  CyborgRemoveCyboFromChannelRequestSchema,
   CyborgScheduleMessageCreateRequestSchema,
   CyborgScheduleMessageListRequestSchema,
   CyborgScheduleMessageCancelRequestSchema,
@@ -230,7 +235,11 @@ import type {
 import { scheduledMessageView } from "./scheduled-message-runner.js";
 import { promptTemplateView, validatePromptTemplate } from "./prompt-template-expand.js";
 import type { CyborgScheduleView, CyborgScheduleRunView } from "./cyborg-messages.js";
+import type { CyborgRecipeView } from "./cyborg-messages.js";
 import type { CyborgOutgoingWebhookView } from "./cyborg-messages.js";
+import type { StoredInstalledRecipe } from "./storage.js";
+import { RECIPES } from "./recipes/registry.js";
+import { randomUUID } from "node:crypto";
 import {
   cyboRequiredBackend,
   findBackendGap,
@@ -1436,6 +1445,16 @@ export class CyborgDispatcher {
         return this.handleRunScheduleOnce(msg, auth, emit);
       case "cyborg:list_schedule_runs":
         return this.handleListScheduleRuns(msg, auth, emit);
+      case "cyborg:enable_recipe":
+        return this.handleEnableRecipe(msg, auth, emit);
+      case "cyborg:disable_recipe":
+        return this.handleDisableRecipe(msg, auth, emit);
+      case "cyborg:list_recipes":
+        return this.handleListRecipes(msg, auth, emit);
+      case "cyborg:add_cybo_to_channel":
+        return this.handleAddCyboToChannel(msg, auth, emit);
+      case "cyborg:remove_cybo_from_channel":
+        return this.handleRemoveCyboFromChannel(msg, auth, emit);
       case "cyborg:schedule_message_create":
         return this.handleScheduleMessageCreate(msg, auth, emit);
       case "cyborg:schedule_message_list":
@@ -7784,6 +7803,320 @@ export class CyborgDispatcher {
         scheduleId: parsed.scheduleId,
         runs: runs.map((r) => this.scheduleRunView(r)),
       },
+    });
+    return undefined;
+  }
+
+  // ─── Built-in integrations (recipes) ─────────────────────────────
+  // Enabling a recipe provisions a cybo (preset soul + grants) + N schedules +
+  // channel memberships and records the install in installed_recipes; disabling
+  // deletes the cybo (FK cascade drops its schedules + channel memberships) and
+  // flips the row disabled. The registry (recipes/registry.ts) is the pure plan;
+  // these handlers are the side-effecting executor. Provisioning is daemon-owned
+  // (the cybo + schedules live in SQLite/PG on the host), so the relay FORWARDS
+  // enable/disable here and only answers list_recipes PG-direct. Authority is
+  // create_agent — the same gate as spawning a cybo or scheduling one.
+
+  // Map an installed_recipes Stored row (snake_case; config/schedule_ids are JSON
+  // STRINGS; enabled 0|1; timestamps already epoch-ms) to the wire CyborgRecipeView.
+  private recipeView(r: StoredInstalledRecipe): CyborgRecipeView {
+    let config: Record<string, unknown> = {};
+    try {
+      const parsed = JSON.parse(r.config) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        config = parsed as Record<string, unknown>;
+      }
+    } catch {
+      // intentional: a corrupt config blob degrades to {} rather than crashing the
+      // whole list — the install row itself is still surfaced.
+    }
+    return {
+      id: r.id,
+      workspaceId: r.workspace_id,
+      recipeId: r.recipe_id,
+      enabled: r.enabled === 1,
+      config,
+      cyboId: r.cybo_id,
+      scheduleIds: this.parseRecipeScheduleIds(r),
+      createdBy: r.created_by,
+      createdAt: r.created_at,
+      updatedAt: r.updated_at,
+    };
+  }
+
+  // Parse the JSON `schedule_ids` TEXT off a Stored install into a string[],
+  // degrading a corrupt blob to []. Shared by the teardown + the view mapper.
+  private parseRecipeScheduleIds(stored: StoredInstalledRecipe): string[] {
+    try {
+      const ids = JSON.parse(stored.schedule_ids) as unknown;
+      if (Array.isArray(ids)) return ids.filter((s): s is string => typeof s === "string");
+    } catch {
+      // corrupt schedule_ids → [] (the cybo cascade still cleans PG; SQLite leaves
+      // the orphan to a future reconcile rather than crashing the teardown).
+    }
+    return [];
+  }
+
+  // Tear down a recipe install's provisioning: delete its recorded schedules
+  // (DualStorage writes both stores — SQLite has NO cybo→schedule FK cascade, so
+  // a bare deleteCybo would orphan them locally) then delete its cybo (drops the
+  // SQLite cybo row + the PG cybo, whose channel_members + schedules cascade in
+  // PG). Used by disable AND by the re-enable re-provision path.
+  private teardownRecipeProvisioning(install: StoredInstalledRecipe): void {
+    for (const scheduleId of this.parseRecipeScheduleIds(install)) {
+      this.storage.deleteSchedule(scheduleId);
+    }
+    if (install.cybo_id) {
+      this.storage.deleteCybo(install.cybo_id);
+    }
+  }
+
+  private async handleEnableRecipe(
+    msg: CyborgMsg,
+    auth: CyborgAuthContext,
+    emit: EmitFn,
+  ): Promise<void> {
+    const parsed = CyborgEnableRecipeRequestSchema.parse(msg);
+    const { allowed } = this.workspaceManager.checkPermission(
+      parsed.workspaceId,
+      auth.user.id,
+      "create_agent",
+    );
+    if (!allowed) {
+      emit({
+        type: "cyborg:error",
+        payload: {
+          requestId: parsed.requestId,
+          code: "forbidden",
+          message: "Cannot enable integrations here",
+        },
+      });
+      return undefined;
+    }
+    const def = RECIPES[parsed.recipeId];
+    if (!def) {
+      emit({
+        type: "cyborg:error",
+        payload: {
+          requestId: parsed.requestId,
+          code: "not_found",
+          message: `Unknown recipe "${parsed.recipeId}"`,
+        },
+      });
+      return undefined;
+    }
+    const plan = def.plan(parsed.config);
+
+    // Validate every schedule's cron BEFORE any side effect — a recipe's defaults
+    // are safe, but a Configure form may override a cron with a bad value (#206
+    // schedule parity). Validating up front avoids a half-provisioned recipe (cybo
+    // created but a later schedule rejected).
+    for (const spec of plan.schedules) {
+      try {
+        validateScheduleCadence({
+          type: "cron" as const,
+          expression: spec.cron,
+          timezone: spec.timezone ?? undefined,
+        });
+      } catch (err) {
+        const m = err instanceof Error ? err.message : "invalid cron expression";
+        emit({
+          type: "cyborg:error",
+          payload: {
+            requestId: parsed.requestId,
+            code: "invalid_request",
+            message: `Invalid cron "${spec.cron}": ${m}`,
+          },
+        });
+        return undefined;
+      }
+    }
+
+    // Re-enable is a re-provision: storage.enableRecipe upserts the SAME install
+    // row (one active per workspace+recipe), but a recipe's cybo has a FIXED slug
+    // — so a fresh createCybo would collide with the prior cybo on (workspace,
+    // slug). Tear the previous provisioning down first, so re-enabling cleanly
+    // swaps in a new cybo + schedules with the refreshed config. A first-time
+    // enable finds no prior install and skips this.
+    const prior = this.storage.getInstalledRecipe(parsed.workspaceId, parsed.recipeId);
+    if (prior) this.teardownRecipeProvisioning(prior);
+
+    // 1) Provision the cybo (preset soul + grants). createCybo returns the StoredCybo.
+    const cybo = this.storage.createCybo({
+      workspaceId: parsed.workspaceId,
+      slug: plan.cybo.slug,
+      name: plan.cybo.name,
+      soul: plan.cybo.soul,
+      provider: plan.cybo.provider,
+      model: plan.cybo.model,
+      platformPermissions: plan.cybo.platformPermissions,
+      createdBy: auth.user.id,
+    });
+
+    // 2) Add it to each target channel (membership = read/react/respond there).
+    // addCyboToChannel lives on the PG mirror only (channel_members is a PG table);
+    // a solo/PG-less daemon simply has no channel membership rows — the schedules
+    // still run. Awaited so the install is fully provisioned before we respond.
+    for (const channelId of plan.channelIds) {
+      await this.storage.pg?.addCyboToChannel(channelId, cybo.id);
+    }
+
+    // 3) Create each schedule, resolving its target channel from the saved config.
+    const scheduleIds: string[] = [];
+    for (const spec of plan.schedules) {
+      const channelId =
+        spec.targetChannelKey && typeof parsed.config[spec.targetChannelKey] === "string"
+          ? (parsed.config[spec.targetChannelKey] as string)
+          : null;
+      const nextRunAt = computeNextRunAt(
+        { type: "cron" as const, expression: spec.cron, timezone: spec.timezone ?? undefined },
+        new Date(),
+      ).getTime();
+      const schedule = this.storage.createSchedule({
+        workspaceId: parsed.workspaceId,
+        cyboId: cybo.id,
+        cronExpr: spec.cron,
+        prompt: spec.prompt,
+        createdBy: auth.user.id,
+        channelId,
+        timezone: spec.timezone ?? null,
+        nextRunAt,
+        maxRuns: spec.maxRuns ?? null,
+        catchUp: spec.catchUp,
+      });
+      scheduleIds.push(schedule.id);
+    }
+
+    // 4) Record the install, then stamp the provisioned ids onto it.
+    const installId = `recipe_${randomUUID()}`;
+    const install = this.storage.enableRecipe({
+      id: installId,
+      workspaceId: parsed.workspaceId,
+      recipeId: parsed.recipeId,
+      config: parsed.config,
+      createdBy: auth.user.id,
+    });
+    this.storage.setRecipeProvisioned(install.id, cybo.id, scheduleIds);
+    // Re-read so the response carries the stamped cybo_id + schedule_ids.
+    const provisioned =
+      this.storage.getInstalledRecipe(parsed.workspaceId, parsed.recipeId) ?? install;
+
+    emit({
+      type: "cyborg:enable_recipe_response",
+      payload: { requestId: parsed.requestId, recipe: this.recipeView(provisioned) },
+    });
+    this.messageRouter.broadcastRecipesChanged({ workspaceId: parsed.workspaceId });
+    return undefined;
+  }
+
+  private async handleDisableRecipe(
+    msg: CyborgMsg,
+    auth: CyborgAuthContext,
+    emit: EmitFn,
+  ): Promise<void> {
+    const parsed = CyborgDisableRecipeRequestSchema.parse(msg);
+    const { allowed } = this.workspaceManager.checkPermission(
+      parsed.workspaceId,
+      auth.user.id,
+      "create_agent",
+    );
+    if (!allowed) {
+      emit({
+        type: "cyborg:error",
+        payload: {
+          requestId: parsed.requestId,
+          code: "forbidden",
+          message: "Cannot disable integrations here",
+        },
+      });
+      return undefined;
+    }
+    // Tear down the provisioned schedules + cybo (see teardownRecipeProvisioning),
+    // then flip the install row disabled (kept as history, never deleted).
+    // Idempotent: a missing/already-disabled install is a no-op.
+    const install = this.storage.getInstalledRecipe(parsed.workspaceId, parsed.recipeId);
+    if (install) this.teardownRecipeProvisioning(install);
+    this.storage.disableRecipe(parsed.workspaceId, parsed.recipeId);
+
+    emit({
+      type: "cyborg:disable_recipe_response",
+      payload: { requestId: parsed.requestId, recipeId: parsed.recipeId, disabled: true },
+    });
+    this.messageRouter.broadcastRecipesChanged({ workspaceId: parsed.workspaceId });
+    return undefined;
+  }
+
+  private handleListRecipes(msg: CyborgMsg, _auth: CyborgAuthContext, emit: EmitFn): undefined {
+    const parsed = CyborgListRecipesRequestSchema.parse(msg);
+    const rows = this.storage.listRecipesForWorkspace(parsed.workspaceId);
+    emit({
+      type: "cyborg:list_recipes_response",
+      payload: {
+        requestId: parsed.requestId,
+        recipes: rows.map((r) => this.recipeView(r)),
+      },
+    });
+    return undefined;
+  }
+
+  private async handleAddCyboToChannel(
+    msg: CyborgMsg,
+    auth: CyborgAuthContext,
+    emit: EmitFn,
+  ): Promise<void> {
+    const parsed = CyborgAddCyboToChannelRequestSchema.parse(msg);
+    const { allowed } = this.workspaceManager.checkPermission(
+      parsed.workspaceId,
+      auth.user.id,
+      "create_agent",
+    );
+    if (!allowed) {
+      emit({
+        type: "cyborg:error",
+        payload: {
+          requestId: parsed.requestId,
+          code: "forbidden",
+          message: "Cannot add cybo to channel",
+        },
+      });
+      return undefined;
+    }
+    // channel_members lives in PG (member_type=cybo via addCyboToChannel). A
+    // PG-less solo daemon has no such table; the op is a no-op there.
+    await this.storage.pg?.addCyboToChannel(parsed.channelId, parsed.cyboId);
+    emit({
+      type: "cyborg:add_cybo_to_channel_response",
+      payload: { requestId: parsed.requestId, ok: true },
+    });
+    return undefined;
+  }
+
+  private async handleRemoveCyboFromChannel(
+    msg: CyborgMsg,
+    auth: CyborgAuthContext,
+    emit: EmitFn,
+  ): Promise<void> {
+    const parsed = CyborgRemoveCyboFromChannelRequestSchema.parse(msg);
+    const { allowed } = this.workspaceManager.checkPermission(
+      parsed.workspaceId,
+      auth.user.id,
+      "create_agent",
+    );
+    if (!allowed) {
+      emit({
+        type: "cyborg:error",
+        payload: {
+          requestId: parsed.requestId,
+          code: "forbidden",
+          message: "Cannot remove cybo from channel",
+        },
+      });
+      return undefined;
+    }
+    await this.storage.pg?.removeCyboFromChannel(parsed.channelId, parsed.cyboId);
+    emit({
+      type: "cyborg:remove_cybo_from_channel_response",
+      payload: { requestId: parsed.requestId, ok: true },
     });
     return undefined;
   }

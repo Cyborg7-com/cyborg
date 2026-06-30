@@ -3925,6 +3925,124 @@ export const CyborgScheduleMutatedResponseSchema = z.object({
   }),
 });
 
+// ─── Built-in integrations (recipes) ──────────────────────────────────
+// A "recipe" is a preset automation (registry id: standup | retro | blocker_sweep)
+// that, when enabled, provisions a cybo + N schedules + channel memberships and is
+// recorded in the installed_recipes table. enable/disable + the cybo↔channel ops
+// are forwarded to the DAEMON (they create/destroy daemon-owned cybos+schedules);
+// list_recipes is answered PG-direct on the relay (like list_schedules) so cloud
+// users see installs even when the daemon is asleep. recipes_changed is broadcast
+// to a workspace after an install/teardown so clients refresh. (Dispatcher + relay
+// wiring is Stream B; this file only owns the wire contract.)
+
+// The wire shape of an installed recipe (the installed_recipes row, UI/read shape).
+// camelCase + epoch-ms numbers, matching the schedule/installation views. `config`
+// is the user's saved config object; `scheduleIds` the provisioned schedule ids
+// (empty until provisioned / after teardown); `cyboId` null until provisioned.
+export const CyborgRecipeViewSchema = z.object({
+  id: z.string(),
+  workspaceId: z.string(),
+  recipeId: z.string(),
+  enabled: z.boolean(),
+  config: z.record(z.string(), z.unknown()),
+  cyboId: z.string().nullable(),
+  scheduleIds: z.array(z.string()),
+  createdBy: z.string(),
+  createdAt: z.number(),
+  updatedAt: z.number(),
+});
+
+export const CyborgEnableRecipeRequestSchema = z.object({
+  type: z.literal("cyborg:enable_recipe"),
+  requestId: z.string(),
+  workspaceId: z.string(),
+  recipeId: z.string(),
+  config: z.record(z.string(), z.unknown()),
+  // Cloud: target daemon to host the recipe's cybo. Omitted → relay picks.
+  daemonId: z.string().optional(),
+});
+
+export const CyborgEnableRecipeResponseSchema = z.object({
+  type: z.literal("cyborg:enable_recipe_response"),
+  payload: z.object({
+    requestId: z.string(),
+    recipe: CyborgRecipeViewSchema,
+  }),
+});
+
+export const CyborgDisableRecipeRequestSchema = z.object({
+  type: z.literal("cyborg:disable_recipe"),
+  requestId: z.string(),
+  workspaceId: z.string(),
+  recipeId: z.string(),
+  daemonId: z.string().optional(),
+});
+
+export const CyborgDisableRecipeResponseSchema = z.object({
+  type: z.literal("cyborg:disable_recipe_response"),
+  payload: z.object({
+    requestId: z.string(),
+    recipeId: z.string(),
+    disabled: z.literal(true),
+  }),
+});
+
+export const CyborgListRecipesRequestSchema = z.object({
+  type: z.literal("cyborg:list_recipes"),
+  requestId: z.string(),
+  workspaceId: z.string(),
+});
+
+export const CyborgListRecipesResponseSchema = z.object({
+  type: z.literal("cyborg:list_recipes_response"),
+  payload: z.object({
+    requestId: z.string(),
+    recipes: z.array(CyborgRecipeViewSchema),
+  }),
+});
+
+// Broadcast to a workspace after an install/teardown so clients refresh the list.
+export const CyborgRecipesChangedSchema = z.object({
+  type: z.literal("cyborg:recipes_changed"),
+  payload: z.object({
+    workspaceId: z.string(),
+  }),
+});
+
+export const CyborgAddCyboToChannelRequestSchema = z.object({
+  type: z.literal("cyborg:add_cybo_to_channel"),
+  requestId: z.string(),
+  workspaceId: z.string(),
+  channelId: z.string(),
+  cyboId: z.string(),
+  daemonId: z.string().optional(),
+});
+
+export const CyborgAddCyboToChannelResponseSchema = z.object({
+  type: z.literal("cyborg:add_cybo_to_channel_response"),
+  payload: z.object({
+    requestId: z.string(),
+    ok: z.literal(true),
+  }),
+});
+
+export const CyborgRemoveCyboFromChannelRequestSchema = z.object({
+  type: z.literal("cyborg:remove_cybo_from_channel"),
+  requestId: z.string(),
+  workspaceId: z.string(),
+  channelId: z.string(),
+  cyboId: z.string(),
+  daemonId: z.string().optional(),
+});
+
+export const CyborgRemoveCyboFromChannelResponseSchema = z.object({
+  type: z.literal("cyborg:remove_cybo_from_channel_response"),
+  payload: z.object({
+    requestId: z.string(),
+    ok: z.literal(true),
+  }),
+});
+
 // ─── Scheduled messages (user "send later", #607) ──────────────────────
 // A user-facing "send this message later" feature — distinct from the recurring
 // cybo `schedules` above (cronExpr automation). create/list/cancel are
@@ -4582,6 +4700,11 @@ export const CyborgInboundSchemas = [
   CyborgDeleteScheduleRequestSchema,
   CyborgRunScheduleOnceRequestSchema,
   CyborgListScheduleRunsRequestSchema,
+  CyborgEnableRecipeRequestSchema,
+  CyborgDisableRecipeRequestSchema,
+  CyborgListRecipesRequestSchema,
+  CyborgAddCyboToChannelRequestSchema,
+  CyborgRemoveCyboFromChannelRequestSchema,
   CyborgScheduleMessageCreateRequestSchema,
   CyborgScheduleMessageListRequestSchema,
   CyborgScheduleMessageCancelRequestSchema,
@@ -4728,6 +4851,12 @@ export const CyborgOutboundSchemas = [
   CyborgScheduleListResponseSchema,
   CyborgScheduleMutatedResponseSchema,
   CyborgScheduleRunsResponseSchema,
+  CyborgEnableRecipeResponseSchema,
+  CyborgDisableRecipeResponseSchema,
+  CyborgListRecipesResponseSchema,
+  CyborgRecipesChangedSchema,
+  CyborgAddCyboToChannelResponseSchema,
+  CyborgRemoveCyboFromChannelResponseSchema,
   CyborgScheduleMessageCreateResponseSchema,
   CyborgScheduleMessageListResponseSchema,
   CyborgScheduleMessageCancelResponseSchema,
@@ -4780,6 +4909,14 @@ export type CyborgDeleteScheduleRequest = z.infer<typeof CyborgDeleteScheduleReq
 export type CyborgRunScheduleOnceRequest = z.infer<typeof CyborgRunScheduleOnceRequestSchema>;
 export type CyborgListScheduleRunsRequest = z.infer<typeof CyborgListScheduleRunsRequestSchema>;
 export type CyborgScheduleRunView = z.infer<typeof CyborgScheduleRunViewSchema>;
+export type CyborgRecipeView = z.infer<typeof CyborgRecipeViewSchema>;
+export type CyborgEnableRecipeRequest = z.infer<typeof CyborgEnableRecipeRequestSchema>;
+export type CyborgDisableRecipeRequest = z.infer<typeof CyborgDisableRecipeRequestSchema>;
+export type CyborgListRecipesRequest = z.infer<typeof CyborgListRecipesRequestSchema>;
+export type CyborgAddCyboToChannelRequest = z.infer<typeof CyborgAddCyboToChannelRequestSchema>;
+export type CyborgRemoveCyboFromChannelRequest = z.infer<
+  typeof CyborgRemoveCyboFromChannelRequestSchema
+>;
 export type ScheduledMessageErrorCode = z.infer<typeof ScheduledMessageErrorCodeSchema>;
 export type CyborgScheduledMessageView = z.infer<typeof CyborgScheduledMessageViewSchema>;
 export type CyborgScheduleMessageCreateRequest = z.infer<

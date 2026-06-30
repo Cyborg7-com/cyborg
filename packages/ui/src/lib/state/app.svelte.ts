@@ -9,6 +9,7 @@ import { terminalAlias } from "./terminal-alias.svelte.js";
 import { favoritesState } from "./favorites.svelte.js";
 import { scheduledMessagesState } from "./scheduled-messages.svelte.js";
 import { schedulesState } from "./schedules.svelte.js";
+import { recipesState } from "./recipes.svelte.js";
 import { promptTemplatesState } from "./prompt-templates.svelte.js";
 import { draftsState } from "../drafts.svelte.js";
 import {
@@ -84,6 +85,9 @@ export {
 // Recurring cybo schedules (#611/#613/#619 — the Tasks-tab "Scheduled" board).
 // Re-exported so the Tasks route + create dialog import it alongside app state.
 export { schedulesState } from "./schedules.svelte.js";
+// Built-in integrations (recipes — the integrations "Built-in" section). Re-exported
+// so the integrations routes import it alongside app state.
+export { recipesState } from "./recipes.svelte.js";
 export type { ThreadSummary } from "../core/client.js";
 export { AuthError, NetworkError } from "../core/client.js";
 // Client-only notification prefs (DND, custom keywords, per-channel ignore-
@@ -1124,6 +1128,13 @@ client.on("schedule_message_failed", (row) => {
 // payload — the structural fields (ok/op/scheduleId/schedule) line up.
 client.on("schedule_mutated", (p) => {
   schedulesState.applyMutation(p as Parameters<typeof schedulesState.applyMutation>[0]);
+});
+
+// A built-in recipe install changed (enabled/disabled by another client). Re-list
+// for the affected workspace so the integrations "Built-in" section stays live.
+// The mutating client also patches its store from the ack; this keeps OTHERS synced.
+client.on("recipes_changed", (p) => {
+  if (p.workspaceId) void recipesState.load(p.workspaceId);
 });
 
 export async function fetchThreads(unreadOnly = false): Promise<void> {
@@ -3278,6 +3289,9 @@ export function disconnectFromServer(): void {
   scheduledMessagesState.clear();
   // #619: drop the cached recurring-schedule board for the same reason.
   schedulesState.clear();
+  // Drop the cached built-in recipe installs so the next account/workspace doesn't
+  // inherit the previous one's integrations state.
+  recipesState.clear();
   // #602: drop the cached prompt-template list so the next account/workspace
   // doesn't inherit the previous workspace's templates in the composer menu.
   promptTemplatesState.clear();

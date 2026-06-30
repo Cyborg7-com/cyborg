@@ -2418,3 +2418,46 @@ export type GithubIssueSync = typeof githubIssueSyncs.$inferSelect;
 export type GithubPrStateMapping = typeof githubPrStateMappings.$inferSelect;
 export type GithubPrSync = typeof githubPrSyncs.$inferSelect;
 export type GithubUserConnection = typeof githubUserConnections.$inferSelect;
+
+// ─── Built-in integrations (recipes) ───────────────────────────────────
+// One row per recipe install in a workspace. A "recipe" is a preset automation
+// (registry id: "standup"|"retro"|"blocker_sweep") that, when enabled, provisions
+// a cybo (preset soul + permissions) + N schedules + channel memberships. Enabling
+// records the install here; the provisioned ids (cyboId + scheduleIds) are stamped
+// once the daemon has created them. Disabling deletes the cybo (its FK ON DELETE
+// CASCADE removes the schedules + channel memberships) and marks the row disabled
+// (enabled=false, cyboId=null, scheduleIds=[]) — kept for history, NOT hard-deleted.
+//
+// The partial UNIQUE index enforces "one ACTIVE install per recipe per workspace"
+// (only enabled rows participate, so a disabled row may sit alongside a fresh
+// re-enable — the enableRecipe upsert targets that partial conflict). cyboId is
+// plain text (not an FK to cybos): a deleted cybo must NOT cascade-drop the history
+// row; the disable path nulls it explicitly, and a stale id resolves-or-skips at
+// read time, matching the loose coupling github_repo_syncs.installation_id uses.
+export const installedRecipes = pgTable(
+  "installed_recipes",
+  {
+    id: text("id").primaryKey(),
+    workspaceId: text("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    recipeId: text("recipe_id").notNull(),
+    enabled: boolean("enabled").notNull().default(true),
+    config: jsonb("config").notNull().default({}),
+    cyboId: text("cybo_id"),
+    scheduleIds: jsonb("schedule_ids").$type<string[]>().default([]),
+    createdBy: text("created_by").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    // One ACTIVE install per (workspace, recipe). Partial: only enabled rows
+    // participate, so re-enabling after a disable reuses this conflict target.
+    uniqueIndex("idx_installed_recipes_active")
+      .on(t.workspaceId, t.recipeId)
+      .where(sql`${t.enabled}`),
+    index("idx_installed_recipes_ws").on(t.workspaceId),
+  ],
+);
+
+export type InstalledRecipe = typeof installedRecipes.$inferSelect;
