@@ -3608,6 +3608,26 @@ async function main() {
           break;
         }
 
+        case "cyborg:search_tasks": {
+          const query = (inner.query as string | undefined) ?? "";
+          if (!workspaceId) {
+            respondError("workspaceId required");
+            break;
+          }
+          const results = await pg.searchTasks(
+            workspaceId,
+            // Per-PROJECT visibility gate (fail-closed): the relay only checks
+            // workspace membership, so thread the authed guest's userId so searchTasks
+            // can scope the hits to the projects this caller may see (same as
+            // fetch_tasks → getTasksPage and searchMessages).
+            guest.userId,
+            query,
+            typeof inner.limit === "number" ? Math.min(inner.limit, 100) : undefined,
+          );
+          respond("cyborg:search_tasks_response", { results });
+          break;
+        }
+
         case "cyborg:fetch_backend_status": {
           const maskUrl = (raw: string | undefined): string | null => {
             if (!raw) return null;

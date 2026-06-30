@@ -183,6 +183,74 @@ export function parseProviderModel(raw: string | null): { provider: string; mode
   return { provider: raw.slice(0, i), model: raw.slice(i + 1) };
 }
 
+// Escape LIKE/ILIKE wildcards so a user typing %, _ or \ searches for the
+// literal character instead of a wildcard. Backslash first (it's the escape char).
+export function escapeLikePattern(input: string): string {
+  return input.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
+}
+
+// Enriched, workspace-wide task-search row returned by searchTasks (relay
+// cyborg:search_tasks). camelCase; the relay passes it through verbatim and the
+// UI client mirrors it as TaskSearchResult. Timestamps are epoch ms.
+export interface TaskSearchHit {
+  id: string;
+  workspaceId: string;
+  title: string;
+  description: string | null;
+  status: string;
+  stateId: string | null;
+  sequenceId: number | null;
+  priority: string | null;
+  assigneeId: string | null;
+  createdAt: number;
+  updatedAt: number;
+  project: {
+    id: string;
+    identifier: string;
+    name: string;
+    color: string | null;
+    isInbox: boolean;
+    chatProjectId: string | null;
+  } | null;
+  state: { id: string; name: string; color: string; group: string } | null;
+  assignee: {
+    id: string;
+    name: string | null;
+    imageUrl: string | null;
+    kind: "user" | "cybo";
+  } | null;
+}
+
+// Row shape of the searchTasks main query (task + left-joined project/chat-project/
+// state/user columns). Extracted so the private mapper has a named input type and
+// the method body stays simple (complexity cap).
+interface TaskSearchRow {
+  id: string;
+  workspaceId: string;
+  title: string;
+  description: string | null;
+  status: string;
+  stateId: string | null;
+  sequenceId: number | null;
+  priority: string | null;
+  assigneeId: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+  tpId: string | null;
+  tpIdentifier: string | null;
+  tpColor: string | null;
+  chatProjectId: string | null;
+  chatProjectName: string | null;
+  chatProjectColor: string | null;
+  stateRowId: string | null;
+  stateName: string | null;
+  stateColor: string | null;
+  stateGroup: string | null;
+  userId: string | null;
+  userName: string | null;
+  userImageUrl: string | null;
+}
+
 export class PgSync {
   private db: NodePgDatabase<typeof schema>;
 
@@ -6661,6 +6729,166 @@ export class PgSync {
       console.warn("[search] query failed:", err instanceof Error ? err.message : err);
       return [];
     }
+  }
+
+  // Workspace-wide task search: case-insensitive ILIKE over title OR description,
+  // scoped to the workspace AND fail-closed to the projects the user may see. The
+  // relay only enforces workspace-level membership; per-PROJECT visibility is NOT
+  // implied by it, so this read must gate it itself (same as getTasksPage and
+  // searchMessages). taskVisibilityCondition keeps legacy/no-project tasks visible
+  // and limits project-tagged tasks to the user's visible tasks_projects — a member
+  // can never read a task in a private-channel project they were not given access to.
+  // No FTS / index — a plain ILIKE with the workspace + visibility filter is enough.
+  // Returns enriched rows (project/state/assignee resolved) ordered by most-recently-
+  // updated. Short (<2 char) or empty queries short-circuit to []. Any error → log +
+  // [] so a bad query never surfaces a DB error to the client (mirrors searchMessages).
+  async searchTasks(
+    workspaceId: string,
+    userId: string,
+    query: string,
+    limit = 50,
+  ): Promise<TaskSearchHit[]> {
+    const q = query.trim();
+    if (q.length < 2) return [];
+    const cap = Math.min(Math.max(1, limit), 100);
+    const pattern = `%${escapeLikePattern(q)}%`;
+    try {
+      const rows: TaskSearchRow[] = await this.db
+        .select({
+          id: schema.tasks.id,
+          workspaceId: schema.tasks.workspaceId,
+          title: schema.tasks.title,
+          description: schema.tasks.description,
+          status: schema.tasks.status,
+          stateId: schema.tasks.stateId,
+          sequenceId: schema.tasks.sequenceId,
+          priority: schema.tasks.priority,
+          assigneeId: schema.tasks.assigneeId,
+          createdAt: schema.tasks.createdAt,
+          updatedAt: schema.tasks.updatedAt,
+          tpId: schema.tasksProjects.id,
+          tpIdentifier: schema.tasksProjects.identifier,
+          tpColor: schema.tasksProjects.color,
+          chatProjectId: schema.tasksProjects.chatProjectId,
+          chatProjectName: schema.projects.name,
+          chatProjectColor: schema.projects.color,
+          stateRowId: schema.taskStates.id,
+          stateName: schema.taskStates.name,
+          stateColor: schema.taskStates.color,
+          stateGroup: schema.taskStates.group,
+          userId: schema.users.id,
+          userName: schema.users.name,
+          userImageUrl: schema.users.imageUrl,
+        })
+        .from(schema.tasks)
+        .leftJoin(schema.tasksProjects, eq(schema.tasksProjects.id, schema.tasks.projectId))
+        .leftJoin(schema.projects, eq(schema.projects.id, schema.tasksProjects.chatProjectId))
+        .leftJoin(schema.taskStates, eq(schema.taskStates.id, schema.tasks.stateId))
+        .leftJoin(schema.users, eq(schema.users.id, schema.tasks.assigneeId))
+        .where(
+          and(
+            eq(schema.tasks.workspaceId, workspaceId),
+            this.taskVisibilityCondition(workspaceId, userId)!,
+            or(ilike(schema.tasks.title, pattern), ilike(schema.tasks.description, pattern)),
+          ),
+        )
+        .orderBy(desc(schema.tasks.updatedAt))
+        .limit(cap);
+
+      // Cybo-assignee fallback: rows whose assignee is set but matched no users row
+      // are cybo-assigned. Batch-resolve those ids in ONE query (no N+1), mirroring
+      // loadChatProjectIds.
+      const cyboMap = await this.loadTaskSearchCybos(rows);
+      return rows.map((row) => this.mapTaskSearchRow(row, cyboMap));
+    } catch (err) {
+      console.warn("[search] task query failed:", err instanceof Error ? err.message : err);
+      return [];
+    }
+  }
+
+  // Batch-load the cybo (id → name/avatar) for task-search rows whose assignee is a
+  // cybo (assigneeId set but the users join returned null). One query; empty input
+  // skipped. Mirrors loadChatProjectIds' batch pattern.
+  private async loadTaskSearchCybos(
+    rows: readonly TaskSearchRow[],
+  ): Promise<Map<string, { name: string; avatar: string | null }>> {
+    const out = new Map<string, { name: string; avatar: string | null }>();
+    const ids = [
+      ...new Set(
+        rows
+          .filter((r) => r.assigneeId !== null && r.userId === null)
+          .map((r) => r.assigneeId as string),
+      ),
+    ];
+    if (ids.length === 0) return out;
+    const cyboRows = await this.db
+      .select({ id: schema.cybos.id, name: schema.cybos.name, avatar: schema.cybos.avatar })
+      .from(schema.cybos)
+      .where(inArray(schema.cybos.id, ids));
+    for (const c of cyboRows) out.set(c.id, { name: c.name, avatar: c.avatar ?? null });
+    return out;
+  }
+
+  // Resolve a task-search row's project block (null when the task has no
+  // tasks_project). Reuses mapTasksProjectListRow's name/color/Inbox logic.
+  private mapTaskSearchProject(row: TaskSearchRow): TaskSearchHit["project"] {
+    if (!row.tpId) return null;
+    return {
+      id: row.tpId,
+      identifier: row.tpIdentifier ?? "",
+      name: row.chatProjectId ? (row.chatProjectName ?? row.tpIdentifier ?? "") : "Inbox",
+      color: row.tpColor ?? row.chatProjectColor ?? null,
+      isInbox: row.chatProjectId === null,
+      chatProjectId: row.chatProjectId,
+    };
+  }
+
+  // Resolve a task-search row's assignee block: a matched users row → kind "user";
+  // else a batch-resolved cybo → kind "cybo"; else null.
+  private mapTaskSearchAssignee(
+    row: TaskSearchRow,
+    cyboMap: Map<string, { name: string; avatar: string | null }>,
+  ): TaskSearchHit["assignee"] {
+    if (row.assigneeId === null) return null;
+    if (row.userId !== null) {
+      return { id: row.assigneeId, name: row.userName, imageUrl: row.userImageUrl, kind: "user" };
+    }
+    const cybo = cyboMap.get(row.assigneeId);
+    if (cybo) return { id: row.assigneeId, name: cybo.name, imageUrl: cybo.avatar, kind: "cybo" };
+    return null;
+  }
+
+  // Row → TaskSearchHit. Sub-blocks (project/state/assignee) live in small helpers
+  // so the per-row mapping stays under the complexity cap.
+  private mapTaskSearchRow(
+    row: TaskSearchRow,
+    cyboMap: Map<string, { name: string; avatar: string | null }>,
+  ): TaskSearchHit {
+    const state =
+      row.stateRowId && row.stateName && row.stateColor && row.stateGroup
+        ? {
+            id: row.stateRowId,
+            name: row.stateName,
+            color: row.stateColor,
+            group: row.stateGroup,
+          }
+        : null;
+    return {
+      id: row.id,
+      workspaceId: row.workspaceId,
+      title: row.title,
+      description: row.description,
+      status: row.status,
+      stateId: row.stateId,
+      sequenceId: row.sequenceId,
+      priority: row.priority,
+      assigneeId: row.assigneeId,
+      createdAt: row.createdAt.getTime(),
+      updatedAt: row.updatedAt.getTime(),
+      project: this.mapTaskSearchProject(row),
+      state,
+      assignee: this.mapTaskSearchAssignee(row, cyboMap),
+    };
   }
 
   private mapCybo(r: typeof schema.cybos.$inferSelect): StoredCybo {

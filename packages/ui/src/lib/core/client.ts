@@ -6,6 +6,7 @@ import type {
   Attachment,
   Task,
   TaskPriority,
+  TaskSearchResult,
   TaskState,
   TaskLabel,
   Cycle,
@@ -2047,6 +2048,19 @@ export class SlackClient<EventMap extends SlackEventMap = SlackEventMap> {
       ...opts,
     });
     return resp.tasks.map(mapRawTask);
+  }
+
+  // Workspace-wide task search (title OR description, ILIKE, enriched rows). Short
+  // (<2 char) or empty queries short-circuit to []. Mirrors searchMessages.
+  async searchTasks(workspaceId: string, query: string, limit = 50): Promise<TaskSearchResult[]> {
+    const q = query.trim();
+    if (q.length < 2) return [];
+    const resp = await this.request<{ results: TaskSearchResult[] }>("cyborg:search_tasks", {
+      workspaceId,
+      query: q,
+      limit,
+    });
+    return resp.results;
   }
 
   // ─── Tasks Redesign read-only catalog (board/detail) ─────────────

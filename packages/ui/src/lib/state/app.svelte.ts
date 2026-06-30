@@ -5390,6 +5390,20 @@ export async function searchMessages(query: string): Promise<import("../core/typ
   }
 }
 
+// Workspace-wide task search (title OR description, ILIKE server-side). Fail-soft:
+// returns [] on error or a short/empty query so the search box never throws.
+export async function searchTasks(
+  query: string,
+): Promise<import("../core/types.js").TaskSearchResult[]> {
+  const wsId = workspaceState.current?.id;
+  if (!wsId || query.trim().length < 2) return [];
+  try {
+    return await client.searchTasks(wsId, query);
+  } catch {
+    return [];
+  }
+}
+
 // Self-join a channel: add to channel_members, surface it in the sidebar.
 export async function joinChannel(channel: Channel | { id: string }): Promise<void> {
   if (!workspaceState.current || !authState.user) return;

@@ -358,6 +358,38 @@ export interface Task {
   updatedAt: number;
 }
 
+// The enriched, workspace-wide search row returned by cyborg:search_tasks
+// (relay → client). Structurally mirrors the server's TaskSearchHit (pg-sync.ts),
+// camelCase, timestamps in epoch ms. `priority` reuses the TaskPriority union.
+export interface TaskSearchResult {
+  id: string;
+  workspaceId: string;
+  title: string;
+  description: string | null;
+  status: string;
+  stateId: string | null;
+  sequenceId: number | null;
+  priority: TaskPriority | null;
+  assigneeId: string | null;
+  createdAt: number;
+  updatedAt: number;
+  project: {
+    id: string;
+    identifier: string;
+    name: string;
+    color: string | null;
+    isInbox: boolean;
+    chatProjectId: string | null;
+  } | null;
+  state: { id: string; name: string; color: string; group: string } | null;
+  assignee: {
+    id: string;
+    name: string | null;
+    imageUrl: string | null;
+    kind: "user" | "cybo";
+  } | null;
+}
+
 // ─── Tasks Redesign supporting catalog shapes ─────────────────────────
 // Per-project metadata referenced by a task's stateId / labelIds / cycleId /
 // moduleIds. Field names mirror the server's Drizzle rows (db/schema.ts) so a

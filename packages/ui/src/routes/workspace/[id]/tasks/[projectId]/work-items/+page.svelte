@@ -28,6 +28,7 @@
   import TasksGantt from "$lib/components/tasks/TasksGantt.svelte";
   import WorkItemsHeader from "$lib/components/tasks/WorkItemsHeader.svelte";
   import WorkItemFiltersRow from "$lib/components/tasks/WorkItemFiltersRow.svelte";
+  import TaskSearch from "$lib/components/tasks/TaskSearch.svelte";
   import CreateTaskDialog from "$lib/components/tasks/CreateTaskDialog.svelte";
   import TaskDetailDialog from "$lib/components/tasks/TaskDetailDialog.svelte";
   import TasksEmptyState from "$lib/components/tasks/TasksEmptyState.svelte";
@@ -236,6 +237,13 @@
       taskDialogOpen = true;
     }}
   />
+
+  <!-- Workspace-wide task search (title + description, enriched results). Lives in
+       the board header region; matches span ALL projects and a result navigates to
+       that task wherever it lives. Localized to the header — rows are untouched. -->
+  <div class="flex items-center border-b border-edge px-4 py-1.5">
+    <TaskSearch workspaceId={wsId} />
+  </div>
 
   <!-- Rich filter pill row (shown when the header's Filters toggle is on). -->
   {#if filtersOpen}
