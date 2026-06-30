@@ -5,6 +5,7 @@ import {
   offlineAgentRows,
   auditAgentRows,
   shouldGcOwnerBindings,
+  canClearAgentBinding,
   type OfflineAgentBinding,
 } from "./relay-offline-agent-rows.js";
 
@@ -213,5 +214,88 @@ describe("relay-offline-agent-rows", () => {
 
   it("shouldGcOwnerBindings: SKIPS an EMPTY response (ambiguous/transient — never delete-all)", () => {
     expect(shouldGcOwnerBindings({ requestFiltered: false, liveAgentCount: 0 })).toBe(false);
+  });
+
+  // ─── Archive/clear authorization (shared by the ONLINE owner-archive bypass and
+  //     the OFFLINE clear path) ───────────────────────────────────────────────
+  describe("canClearAgentBinding", () => {
+    const privateBinding = {
+      channelId: null,
+      initiatedBy: "global-owner",
+      initiatedByEmail: "owner@test.dev",
+    };
+
+    it("a workspace OWNER (non-initiator) CAN clear a PRIVATE session — the online-daemon regression case", () => {
+      // The bug: owner archives a session running on a daemon they don't own; the
+      // spawn-scope gate rejected them. The predicate now admits the owner.
+      expect(
+        canClearAgentBinding(privateBinding, {
+          userId: "global-someone-else",
+          email: "admin@test.dev",
+          role: "owner",
+        }),
+      ).toBe(true);
+    });
+
+    it("an ADMIN (non-initiator) CAN clear a PRIVATE session", () => {
+      expect(
+        canClearAgentBinding(privateBinding, {
+          userId: "global-someone-else",
+          email: "admin2@test.dev",
+          role: "admin",
+        }),
+      ).toBe(true);
+    });
+
+    it("a non-owner/non-admin NON-initiator member CANNOT clear a PRIVATE session", () => {
+      expect(
+        canClearAgentBinding(privateBinding, {
+          userId: "global-someone-else",
+          email: "member@test.dev",
+          role: "member",
+        }),
+      ).toBe(false);
+    });
+
+    it("the INITIATOR (matched by email, case-insensitive) CAN clear their own PRIVATE session", () => {
+      expect(
+        canClearAgentBinding(
+          { channelId: null, initiatedBy: "local-x", initiatedByEmail: "Owner@Test.dev" },
+          { userId: "global-different", email: "owner@test.dev", role: "member" },
+        ),
+      ).toBe(true);
+    });
+
+    it("the INITIATOR matched by GLOBAL id (initiated_by) CAN clear, even when the email does not match (#810)", () => {
+      expect(
+        canClearAgentBinding(
+          {
+            channelId: null,
+            initiatedBy: "global-acct-4871",
+            initiatedByEmail: "global-acct-4871@remote.local",
+          },
+          { userId: "global-acct-4871", email: "owner@cyborg7.com", role: "member" },
+        ),
+      ).toBe(true);
+    });
+
+    it("a SHARED (non-ephemeral) channel agent is clearable by ANY member", () => {
+      expect(
+        canClearAgentBinding(
+          { channelId: "chan-1", initiatedBy: "global-owner", initiatedByEmail: "owner@test.dev" },
+          { userId: "global-someone-else", email: "member@test.dev", role: "member" },
+        ),
+      ).toBe(true);
+    });
+
+    it("role null (not a member) + non-initiator + private ⇒ CANNOT clear", () => {
+      expect(
+        canClearAgentBinding(privateBinding, {
+          userId: "global-someone-else",
+          email: "stranger@test.dev",
+          role: null,
+        }),
+      ).toBe(false);
+    });
   });
 });

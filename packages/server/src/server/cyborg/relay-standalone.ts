@@ -68,6 +68,7 @@ import {
   offlineAgentRows,
   auditAgentRows,
   shouldGcOwnerBindings,
+  canClearAgentBinding,
 } from "./relay-offline-agent-rows.js";
 import {
   computeCyboReadiness,
@@ -2345,6 +2346,16 @@ async function main() {
       // viewer/license gate) but scopeForType returns `terminal` for it — the
       // intentional reclassification: a spawn-only user can NOT open a host shell.
       const requiredScope = scopeForType(type);
+      // archive_agent ONLY: set when a workspace owner/admin (or the session
+      // initiator) bypasses the spawn-scope gate below. Read after the gate to
+      // route the archive through the relay-side PG clear + best-effort forward
+      // (so an owner can ALWAYS clear a session, even one whose daemon they don't
+      // own — the #1059 daemon/offline owner-override never reached this ONLINE gate).
+      let archiveOwnerBypass = false;
+      // The archive_agent binding, fetched + validated ONCE in the gate below and
+      // reused by the bypass block (no redundant DB round-trip). Non-null whenever
+      // archiveOwnerBypass is true (it only flips after a successful fetch + pass).
+      let archiveBinding: Awaited<ReturnType<typeof pg.getAgentBinding>> = null;
       // Scope check against a specific daemon, factored so the SPAWN branch's
       // three resolution paths share one decision. Owner ⇒ all scopes (size>0 +
       // isScopeAllowed both pass). Empty set (no row, not owner) ⇒ denied.
@@ -2562,16 +2573,40 @@ async function main() {
           respondError("agentId required");
           return;
         }
-        const control = await checkAgentAccess(
-          pg,
-          targetWorkspace,
-          guest.userId,
-          controlAgentId,
-          "spawn",
-        );
-        if (!control.allowed) {
-          respondError(control.reason ?? "no access to this daemon");
-          return;
+        // archive_agent ONLY: a workspace OWNER/ADMIN (or the session initiator)
+        // can ALWAYS clear a session, even one running on a daemon they don't own
+        // — the spawn-scope gate would otherwise reject them (they hold no scope on
+        // the owning daemon). Mirrors the #1059 owner-override that already exists
+        // in the OFFLINE branch and the daemon's handleArchiveAgent, but was never
+        // wired into this ONLINE gate. When bypassed, the archive is handled by the
+        // dedicated relay-side clear + best-effort forward block below (NOT the
+        // generic forward), so it works even when the owner lacks daemon access.
+        // Every OTHER agent-control op (set model/mode/thinking, rewind, reload,
+        // restore, import) still legitimately requires spawn scope here.
+        archiveBinding =
+          type === "cyborg:archive_agent" ? await pg.getAgentBinding(controlAgentId) : null;
+        if (
+          type === "cyborg:archive_agent" &&
+          archiveBinding &&
+          canClearAgentBinding(archiveBinding, {
+            userId: guest.userId,
+            email: guest.email,
+            role: callerRole,
+          })
+        ) {
+          archiveOwnerBypass = true;
+        } else {
+          const control = await checkAgentAccess(
+            pg,
+            targetWorkspace,
+            guest.userId,
+            controlAgentId,
+            "spawn",
+          );
+          if (!control.allowed) {
+            respondError(control.reason ?? "no access to this daemon");
+            return;
+          }
         }
       } else if (DAEMON_TERMINAL_CONTROL_TYPES.has(type)) {
         // Terminal control targets a daemon-scoped session, so it carries an
@@ -2619,6 +2654,68 @@ async function main() {
         role: callerRole,
         inner,
       };
+
+      // OWNER/ADMIN archive bypass (online owning daemon). The gate above set
+      // archiveOwnerBypass for an archive the caller is authorized to clear but
+      // lacks spawn scope for. The relay is the AUTHORITATIVE responder here: it
+      // clears the PG mirror itself (so the session disappears even if the owning
+      // daemon is offline OR on OLD code that lacks the #1059 owner-override) AND
+      // best-effort forwards to the owning daemon so a CURRENT daemon also stops the
+      // live process. Returns before the generic forward below so we never
+      // double-clear / double-respond.
+      if (archiveOwnerBypass) {
+        const agentId = inner.agentId as string;
+        // Reuse the binding the gate already fetched + validated (no second DB
+        // round-trip). It is guaranteed non-null here — archiveOwnerBypass only
+        // flips true after a successful getAgentBinding + canClearAgentBinding — so
+        // this guard is purely defensive (and narrows the type for the compiler).
+        const binding = archiveBinding;
+        if (!binding) {
+          respondError("agent not found");
+          return;
+        }
+        // Best-effort forward FIRST so a live, current daemon stops the running
+        // process. Forward a requestId-STRIPPED copy: the daemon still archives +
+        // broadcasts its own `agent_status removed` (idempotent with our PG clear),
+        // but cannot send a requestId-matched archive_agent_response that would
+        // collide with the relay's authoritative response below. We ignore the
+        // forward result — the PG clear runs regardless.
+        const owningDaemonId =
+          (inner.daemonId as string | undefined) ??
+          binding.daemonId ??
+          (await pg.getAgentDaemonId(agentId, targetWorkspace)) ??
+          undefined;
+        const fwdInner = { ...inner };
+        delete fwdInner.requestId;
+        relay.sendToDaemonInWorkspace(
+          targetWorkspace,
+          { ...relayRpc, inner: fwdInner },
+          owningDaemonId,
+        );
+        // Relay-side PG clear (mirrors the OFFLINE archive block). Acceptable
+        // residual: if the owning daemon is online but on OLD code, the relay still
+        // clears the PG binding (the session disappears from everyone's view) and
+        // the orphaned live process keeps running on that machine until it
+        // dies/updates — an acceptable consistency wart, far better than the owner
+        // being unable to clear it.
+        await pg.deleteAgentBinding(agentId);
+        await pg
+          .archiveAgentSession(agentId)
+          .catch((err) =>
+            relayLog.error({ err, agentId }, "archiveAgentSession failed clearing owner-archive"),
+          );
+        broadcastToGuests(targetWorkspace, {
+          type: "cyborg:agent_status",
+          payload: {
+            agentId,
+            lifecycle: "removed",
+            provider: binding.provider,
+            workspaceId: targetWorkspace,
+          },
+        });
+        respond("cyborg:archive_agent_response", { sessionId: null });
+        return;
+      }
 
       // list_agents must aggregate across ALL daemons in the workspace (each only
       // knows its own agents) — fan out and merge per-daemon responses. Everything
@@ -2865,25 +2962,25 @@ async function main() {
             respondError("agent not found");
             return;
           }
-          // SAME rule as the daemon's handleArchiveAgent: a SHARED channel agent
-          // (channel-bound; the PG mirror only ever holds NON-ephemeral bindings,
-          // so channelId ⇒ shared) is clearable by any member. Otherwise PRIVATE:
-          // the INITIATOR (real email OR the GLOBAL account id — a cloud-forwarded
-          // session stamps initiated_by = the global id, even on old rows whose
-          // mirrored email is the synthetic <id>@remote.local placeholder) OR a
-          // workspace OWNER/ADMIN. Conditions computed flat (role looked up only
-          // for a private session) to keep one combined guard.
+          // SAME rule as the daemon's handleArchiveAgent (shared via
+          // canClearAgentBinding): a SHARED channel agent (channel-bound; the PG
+          // mirror only ever holds NON-ephemeral bindings, so channelId ⇒ shared)
+          // is clearable by any member. Otherwise PRIVATE: the INITIATOR (real email
+          // OR the GLOBAL account id — a cloud-forwarded session stamps initiated_by
+          // = the global id, even on old rows whose mirrored email is the synthetic
+          // <id>@remote.local placeholder) OR a workspace OWNER/ADMIN. Role is looked
+          // up only for a private session (the helper short-circuits on channelId).
           const isSharedChannelAgent = !!binding.channelId;
           const archiverRole = isSharedChannelAgent
             ? null
             : await pg.getMemberRole(targetWorkspace, guest.userId);
-          const isAdmin = archiverRole === "owner" || archiverRole === "admin";
-          const isInitiator =
-            (!!binding.initiatedByEmail &&
-              !!guest.email &&
-              binding.initiatedByEmail.toLowerCase() === guest.email.toLowerCase()) ||
-            (!!binding.initiatedBy && binding.initiatedBy === guest.userId);
-          if (!isSharedChannelAgent && !isAdmin && !isInitiator) {
+          if (
+            !canClearAgentBinding(binding, {
+              userId: guest.userId,
+              email: guest.email,
+              role: archiverRole,
+            })
+          ) {
             respondError(
               "only workspace admins or the session initiator can clear an offline agent",
             );

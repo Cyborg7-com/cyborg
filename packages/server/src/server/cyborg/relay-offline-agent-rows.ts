@@ -170,6 +170,29 @@ export function shouldGcOwnerBindings(opts: {
   return !opts.requestFiltered && opts.liveAgentCount > 0;
 }
 
+// Authorization for CLEARING / ARCHIVING an agent session from the relay (the PG
+// mirror). The SAME rule the daemon's handleArchiveAgent enforces: a SHARED channel
+// agent (channel-bound; the PG mirror only ever holds NON-ephemeral bindings, so a
+// channelId ⇒ shared) is clearable by ANY member. Otherwise the session is PRIVATE
+// and clearable only by its INITIATOR (matched by canonical email, case-insensitive,
+// OR by the global account id == initiated_by) OR a workspace OWNER/ADMIN. Shared by
+// the relay's ONLINE owner-archive bypass and its OFFLINE clear path so the two can
+// never disagree.
+export function canClearAgentBinding(
+  b: { channelId: string | null; initiatedBy: string | null; initiatedByEmail: string | null },
+  caller: { userId: string; email: string | null; role: string | null },
+): boolean {
+  const isSharedChannelAgent = !!b.channelId;
+  if (isSharedChannelAgent) return true;
+  const isAdmin = caller.role === "owner" || caller.role === "admin";
+  const isInitiator =
+    (!!b.initiatedByEmail &&
+      !!caller.email &&
+      b.initiatedByEmail.toLowerCase() === caller.email.toLowerCase()) ||
+    (!!b.initiatedBy && b.initiatedBy === caller.userId);
+  return isAdmin || isInitiator;
+}
+
 // Visible offline rows for a workspace's mirrored bindings, EXCLUDING any agentId
 // already present in the live fan-out (the live daemon row always wins on dedupe).
 export function offlineAgentRows(
