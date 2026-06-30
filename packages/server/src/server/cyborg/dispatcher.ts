@@ -5546,9 +5546,17 @@ export class CyborgDispatcher {
     });
 
     try {
-      await this.messageRouter.routeToAgent(parsed.agentId, prompt, {
-        rawPrompt: parsed.prompt,
-      });
+      // This path frames the prompt as a DM ([DM from …]), so the cybo's reply is
+      // meant for THIS user, not the cybo's persistent bound channel. Route through
+      // the armed DM path (routeDmTurn) so dmTurnRecipient is set for the turn:
+      // otherwise a channel-bound cybo's narration + reply auto-post to its channel
+      // (bare routeToAgent never armed the guard — the send_agent_prompt DM leak).
+      await this.messageRouter.routeDmTurn(
+        parsed.agentId,
+        { userId: auth.user.id, email: auth.user.email },
+        prompt,
+        { rawPrompt: parsed.prompt },
+      );
       emit({
         type: "cyborg:send_agent_prompt_response",
         payload: { requestId: parsed.requestId, status: "routed" },

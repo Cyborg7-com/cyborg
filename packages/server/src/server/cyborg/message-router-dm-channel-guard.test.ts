@@ -145,6 +145,128 @@ describe("message-router: DM turn cannot post to a channel", () => {
     expect(broadcastTypes()).not.toContain("cyborg:dm_broadcast");
   });
 
+  // ─── Autonomous (cron/scheduled) narration must not auto-flush to the channel ───
+  // The bug: a channel-bound AUTONOMOUS cybo's running commentary becomes a channel
+  // post (no send_message call needed). The daemon must emit channelId:null + the
+  // `autonomous` flag so the relay accumulator drops the prose (see
+  // workspace-relay-dm-flush-guard.test.ts). The cybo reaches a channel/DM only via
+  // an explicit cyborg7_send_message.
+
+  it("an AUTONOMOUS channel turn's agent_stream is scoped away from the channel (channelId:null + autonomous)", () => {
+    const autoAgentId = "agent-cron";
+    storage.createAgentBinding({
+      agentId: autoAgentId,
+      workspaceId,
+      channelId,
+      provider: "pi",
+      autonomous: true,
+    });
+    (messageRouter as any).emitAgentStream(autoAgentId, storage.getAgentBinding(autoAgentId), {
+      type: "timeline",
+      item: {
+        type: "assistant_message",
+        text: "I'll send you a private DM. Let me load the messaging tool first.",
+        messageId: "auto1",
+      },
+    });
+    const stream = broadcasts.find((b) => b.type === "cyborg:agent_stream");
+    expect(stream).toBeDefined();
+    // Channel nulled → relay never persists the narration into the bound channel...
+    expect(stream!.payload.channelId).toBeNull();
+    // ...and the autonomous flag tells the relay to DROP it (not even an orphan row).
+    expect(stream!.payload.autonomous).toBe(true);
+  });
+
+  it("a NON-autonomous channel turn's agent_stream keeps the channel scope (autonomous:false)", () => {
+    // The default binding created in beforeEach is non-autonomous (human-spawned).
+    (messageRouter as any).emitAgentStream(agentId, storage.getAgentBinding(agentId), {
+      type: "timeline",
+      item: { type: "assistant_message", text: "daily standup", messageId: "norm1" },
+    });
+    const stream = broadcasts.find((b) => b.type === "cyborg:agent_stream");
+    expect(stream).toBeDefined();
+    expect(stream!.payload.channelId).toBe(channelId);
+    expect(stream!.payload.autonomous).toBe(false);
+  });
+
+  it("an autonomous turn's EXPLICIT cyborg7_send_message still posts to the channel", () => {
+    const autoAgentId = "agent-cron2";
+    storage.createAgentBinding({
+      agentId: autoAgentId,
+      workspaceId,
+      channelId,
+      provider: "pi",
+      autonomous: true,
+    });
+    // The narration is dropped, but an explicit tool-call channel post is NOT — this
+    // is the cybo's ONLY way to reach the channel on an autonomous turn.
+    messageRouter.handleAgentMessage(autoAgentId, workspaceId, channelId, null, "scheduled report");
+    const post = broadcasts.find((b) => b.type === "cyborg:channel_message_broadcast");
+    expect(post).toBeDefined();
+    expect(post!.payload.text).toBe("scheduled report");
+    expect(post!.payload.channelId).toBe(channelId);
+  });
+
+  // ─── agent_status must obey the SAME scoping as the stream ───
+  // The bug: agent_status hardcoded channelId/privateToEmail and never consulted the
+  // DM-turn guard, so a DM turn's progress/error broadcast to the whole channel.
+
+  // Drive the real agentManager subscriber: capture its callback, then emit an
+  // agent_state event for the bound agent and inspect the resulting agent_status.
+  function emitAgentState(id: string, lifecycle: "running" | "error", lastError?: string): void {
+    let captured: ((e: any) => void) | null = null;
+    const fakeAgentManager = {
+      subscribe: (fn: any) => {
+        captured = fn;
+        return () => {};
+      },
+      getAgent: () => ({ id, provider: "pi" }),
+    };
+    (messageRouter as any).setAgentManager(fakeAgentManager);
+    captured!({
+      type: "agent_state",
+      agent: { id, lifecycle, persistence: undefined, lastError },
+    });
+  }
+
+  it("agent_status for a DM turn is scoped to the DM (channelId:null + recipient email), not the channel", () => {
+    // Arm the DM guard for this channel-bound cybo (a DM turn in flight).
+    (messageRouter as any).dmTurnRecipient.set(
+      agentId,
+      new Map([[owner.user.id, owner.user.email]]),
+    );
+    emitAgentState(agentId, "running");
+    const status = broadcasts.find((b) => b.type === "cyborg:agent_status");
+    expect(status).toBeDefined();
+    expect(status!.payload.channelId).toBeNull();
+    expect(status!.payload.privateToEmail).toBe(owner.user.email);
+  });
+
+  it("agent_status for an AUTONOMOUS turn is not scoped to the bound channel", () => {
+    const autoAgentId = "agent-cron3";
+    storage.createAgentBinding({
+      agentId: autoAgentId,
+      workspaceId,
+      channelId,
+      provider: "pi",
+      autonomous: true,
+    });
+    emitAgentState(autoAgentId, "error", "boom");
+    const status = broadcasts.find((b) => b.type === "cyborg:agent_status");
+    expect(status).toBeDefined();
+    expect(status!.payload.channelId).toBeNull();
+    expect(status!.payload.autonomous).toBe(true);
+    expect(status!.payload.status).toBe("error");
+  });
+
+  it("agent_status for a normal channel turn still carries the channel (control)", () => {
+    emitAgentState(agentId, "running");
+    const status = broadcasts.find((b) => b.type === "cyborg:agent_status");
+    expect(status).toBeDefined();
+    expect(status!.payload.channelId).toBe(channelId);
+    expect(status!.payload.autonomous).toBe(false);
+  });
+
   // REGRESSION (#1026/#1030 only guarded handleDm — the CLOUD desktop DMG never calls
   // it). The cloud DM-to-cybo path is relay-standalone send_agent_prompt →
   // agent_prompt_forward → daemon bootstrap, which now calls routeDmTurn (NOT bare

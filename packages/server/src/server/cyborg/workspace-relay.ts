@@ -88,6 +88,13 @@ interface PendingAgentMessage {
   // DM-origin reply is STRUCTURALLY unable to land in a channel even if the owning
   // (or a peer) daemon's in-process guard is stale/absent. null = channel-scoped.
   dmRecipientEmail?: string | null;
+  // An AUTONOMOUS (cron/scheduled) turn's narration must NEVER auto-persist as a
+  // channel/DM message — the cybo reaches a channel/DM ONLY via an explicit
+  // cyborg7_send_message tool call (a separate broadcast). The daemon tags the stream
+  // payload `autonomous`; when set, flushPendingAgentMessage DROPS the accumulated
+  // prose instead of persisting an orphan (channelId+toId null) row that getDmMessages
+  // would otherwise surface in the user's DM-with-cybo view on reload.
+  autonomous?: boolean;
 }
 
 export class WorkspaceRelay {
@@ -892,6 +899,8 @@ export class WorkspaceRelay {
     const dmRecipientEmail =
       typeof payload.privateToEmail === "string" ? payload.privateToEmail : null;
     const channelId = dmRecipientEmail ? null : ((payload.channelId as string | null) ?? null);
+    // An autonomous turn's narration is dropped at flush (see flushPendingAgentMessage).
+    const autonomous = payload.autonomous === true;
     const existing = this.pendingAgentMessages.get(agentId);
     if (existing) {
       this.mergeAgentStreamDelta(existing, {
@@ -900,6 +909,7 @@ export class WorkspaceRelay {
         cyboName,
         cyboId,
         dmRecipientEmail,
+        autonomous,
         images,
       });
     } else {
@@ -917,6 +927,7 @@ export class WorkspaceRelay {
         seq,
         imageAttachments: images.length > 0 ? images : undefined,
         dmRecipientEmail,
+        autonomous,
       });
     }
   }
@@ -931,6 +942,7 @@ export class WorkspaceRelay {
       cyboName: string | null;
       cyboId: string | null;
       dmRecipientEmail: string | null;
+      autonomous: boolean;
       images: AgentImageAttachment[];
     },
   ): void {
@@ -939,6 +951,8 @@ export class WorkspaceRelay {
     // A split delta may carry the cybo identity later; set it once, never clobber.
     if (delta.cyboName && !existing.cyboName) existing.cyboName = delta.cyboName;
     if (delta.cyboId && !existing.cyboId) existing.cyboId = delta.cyboId;
+    // Sticky: once any delta marks this turn autonomous, the whole reply is dropped.
+    if (delta.autonomous) existing.autonomous = true;
     // The DM scope may arrive on a later delta — sticky: once a delta marks this turn
     // private, it STAYS private (null channel) for the whole reply.
     if (delta.dmRecipientEmail) {
@@ -961,6 +975,16 @@ export class WorkspaceRelay {
     // empty text after the markdown token is stripped — it must still persist).
     if (!pending || (!pending.text && !(pending.imageAttachments?.length ?? 0))) {
       this.pendingAgentMessages.delete(agentId);
+      return null;
+    }
+
+    // An AUTONOMOUS (cron/scheduled) turn's narration is NEVER auto-persisted: the
+    // cybo reaches a channel/DM only via an explicit cyborg7_send_message (a separate
+    // broadcast). Drop the accumulated prose so it can't land as a channel post — nor
+    // as an orphan (channelId+toId null) row that getDmMessages would surface.
+    if (pending.autonomous) {
+      this.pendingAgentMessages.delete(agentId);
+      this.lastFlushedDmEmail.delete(agentId);
       return null;
     }
 

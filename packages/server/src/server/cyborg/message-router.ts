@@ -204,6 +204,16 @@ export class MessageRouter {
   // (not a single id) so a second concurrent DM whose routeToAgent rejects ("agent
   // busy") can't clear the guard out from under the first, still-running turn.
   // Untouched for @-mention/scheduled turns (not in this map).
+  //
+  // ponytail: this guard is keyed per-AGENT, not per-TURN. A reused/persistent cybo
+  // (schedule-runner's reuseLiveCyboBinding) shares ONE agentId across its channel
+  // session AND its DMs, so in principle interleaved channel+DM turns could clobber
+  // each other's scope. In practice routeToAgent serializes turns per agent (a second
+  // run rejects with "agent busy" before its events stream), so only one turn's events
+  // are ever in flight while the guard is armed — the per-agent key is correct for the
+  // serialized case. A fully turn-scoped delivery target (carry channel-vs-DM on the
+  // stream event itself) would require threading a turn id through Paseo's
+  // AgentManager stream events (upstream-owned, agent/), which is out of scope here.
   private dmTurnRecipient = new Map<string, Map<string, string>>();
   private logger: Logger | null = null;
   private relayClient: DaemonRelayClient | null = null;
@@ -402,39 +412,9 @@ export class MessageRouter {
           // complexity budget — see captureProviderSessionId).
           this.captureProviderSessionId(event.agent.id, event.agent.persistence, binding);
 
-          const lifecycle = event.agent.lifecycle;
-          let status: "idle" | "running" | "error" = "idle";
-          if (lifecycle === "running") status = "running";
-          else if (lifecycle === "error") status = "error";
-
-          this.broadcast.toWorkspace(binding.workspace_id, {
-            type: "cyborg:agent_status",
-            payload: {
-              agentId: event.agent.id,
-              workspaceId: binding.workspace_id,
-              channelId: binding.channel_id,
-              status,
-              // Session-history identity for the Home "This week" stats. The relay
-              // is the only PG-connected component (solo daemons have no RDS
-              // access), so it records agent_sessions off this forwarded status —
-              // these fields are what it needs to build the row. Daemon-side
-              // recordAgentSessionStart stays for the connected-daemon case.
-              provider: binding.provider,
-              cyboId: binding.cybo_id,
-              cwd: binding.cwd,
-              userId: binding.initiated_by,
-              // Carry the initiator's email so the relay can resolve the
-              // daemon-local userId to the global PG account id before writing.
-              userEmail: this.initiatorEmail(binding.initiated_by),
-              sessionType: binding.cybo_id ? "cybo" : "session",
-              // Surface WHAT failed alongside the error status — without it the
-              // client can only show a bare red badge.
-              ...(status === "error" && event.agent.lastError
-                ? { error: event.agent.lastError }
-                : {}),
-              privateToEmail: this.privateAgentEmail(binding),
-            },
-          });
+          // Build + broadcast the agent_status (extracted to keep this hot subscriber
+          // under the complexity budget — see emitAgentStatus).
+          this.emitAgentStatus(binding, event.agent);
           return;
         }
 
@@ -682,6 +662,55 @@ export class MessageRouter {
     this.assistantTextAccum.clear();
   }
 
+  // Build + broadcast the cyborg:agent_status for an agent lifecycle change. Extracted
+  // from the agent-event subscriber to keep that hot callback under the complexity
+  // budget. Scopes the status the SAME way emitAgentStream scopes the stream: a DM
+  // turn's progress/error reaches ONLY the DM recipient (channelId null + their email),
+  // and an AUTONOMOUS turn never broadcasts into its bound channel — without consulting
+  // the DM-turn guard here, a private DM's "running"/error blip leaked to the channel.
+  private emitAgentStatus(
+    binding: StoredAgentBinding,
+    agent: {
+      id: string;
+      lifecycle: "running" | "idle" | "error" | string;
+      lastError?: string | null;
+    },
+  ): void {
+    let status: "idle" | "running" | "error" = "idle";
+    if (agent.lifecycle === "running") status = "running";
+    else if (agent.lifecycle === "error") status = "error";
+
+    const dmEmail = this.dmTurnRecipientEmail(agent.id);
+    const autonomous = binding.autonomous === 1;
+    this.broadcast.toWorkspace(binding.workspace_id, {
+      type: "cyborg:agent_status",
+      payload: {
+        agentId: agent.id,
+        workspaceId: binding.workspace_id,
+        channelId: dmEmail || autonomous ? null : binding.channel_id,
+        status,
+        // Session-history identity for the Home "This week" stats. The relay
+        // is the only PG-connected component (solo daemons have no RDS
+        // access), so it records agent_sessions off this forwarded status —
+        // these fields are what it needs to build the row. Daemon-side
+        // recordAgentSessionStart stays for the connected-daemon case.
+        provider: binding.provider,
+        cyboId: binding.cybo_id,
+        cwd: binding.cwd,
+        userId: binding.initiated_by,
+        // Carry the initiator's email so the relay can resolve the
+        // daemon-local userId to the global PG account id before writing.
+        userEmail: this.initiatorEmail(binding.initiated_by),
+        sessionType: binding.cybo_id ? "cybo" : "session",
+        // Surface WHAT failed alongside the error status — without it the
+        // client can only show a bare red badge.
+        ...(status === "error" && agent.lastError ? { error: agent.lastError } : {}),
+        privateToEmail: dmEmail ?? this.privateAgentEmail(binding),
+        autonomous,
+      },
+    });
+  }
+
   private emitAgentStream(
     agentId: string,
     binding: StoredAgentBinding,
@@ -698,16 +727,26 @@ export class MessageRouter {
     // broadcastAgentReply down its privateToEmail (dm_broadcast) path. Falls back
     // to the binding's private email for a genuine DM agent / non-DM turn.
     const dmEmail = this.dmTurnRecipientEmail(agentId);
+    // An AUTONOMOUS (cron/scheduled) turn must NOT auto-flush its narration into the
+    // bound channel. Its running commentary ("I'll send you a private DM. Let me load
+    // the messaging tool first.") would otherwise become a channel post even when the
+    // prompt said to reply privately. Null the channel (like the DM guard) and tag the
+    // payload `autonomous` so the relay accumulator DROPS the prose instead of
+    // persisting it — an autonomous cybo reaches a channel/DM ONLY via an explicit
+    // cyborg7_send_message tool call (which routes through handleAgentMessage, not this
+    // accumulator). A DM turn already nulls the channel via dmEmail.
+    const autonomous = binding.autonomous === 1;
     this.broadcast.toWorkspace(binding.workspace_id, {
       type: "cyborg:agent_stream",
       payload: {
         agentId,
         workspaceId: binding.workspace_id,
-        channelId: dmEmail ? null : binding.channel_id,
+        channelId: dmEmail || autonomous ? null : binding.channel_id,
         cyboId,
         cyboName,
         event: streamEvent,
         privateToEmail: dmEmail ?? this.privateAgentEmail(binding),
+        autonomous,
       },
     });
   }
@@ -1564,18 +1603,27 @@ export class MessageRouter {
     binding: StoredAgentBinding,
     event: AgentStreamEvent,
   ): void {
+    // Scope these daemon-side error events the SAME way emitAgentStream scopes the
+    // live stream: a DM turn's failure must surface only to the DM recipient, and an
+    // AUTONOMOUS turn's error must not flush into its bound channel. The main
+    // subscriber path consulted the DM-turn guard; this forwarded-error path omitted
+    // it, so a private/scheduled turn's error leaked to the whole workspace channel.
+    const dmEmail = this.dmTurnRecipientEmail(agentId);
+    const autonomous = binding.autonomous === 1;
     this.broadcast.toWorkspace(binding.workspace_id, {
       type: "cyborg:agent_stream",
       payload: {
         agentId,
         workspaceId: binding.workspace_id,
+        channelId: dmEmail || autonomous ? null : binding.channel_id,
         // Mirror the main subscriber funnel: classify a turn_failed so the UI can
         // show the remedy. No-op for the hardcoded daemon-side errors here.
         event: enrichTurnFailedEvent(event as unknown as Record<string, unknown>),
         // Scope DM-agent events to the initiator, matching the main
         // subscriber path — otherwise errors for private agents leak to
         // the whole workspace.
-        privateToEmail: this.privateAgentEmail(binding),
+        privateToEmail: dmEmail ?? this.privateAgentEmail(binding),
+        autonomous,
       },
     });
   }

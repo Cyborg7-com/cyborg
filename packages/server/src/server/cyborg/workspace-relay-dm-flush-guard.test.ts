@@ -94,6 +94,43 @@ describe("WorkspaceRelay — DM-origin agent reply cannot land in a channel", ()
     expect(dm!.payload.channelId).toBeNull();
   });
 
+  // An AUTONOMOUS (cron/scheduled) turn's narration must NEVER auto-persist into the
+  // bound channel — the live repro where Apex, told to reply privately, posted "I'll
+  // send you a private DM…" into #general. The daemon tags the stream `autonomous`;
+  // the relay must DROP the accumulated prose (no PG row, no broadcast). The cybo
+  // reaches a channel/DM only via an explicit cyborg7_send_message (a separate path).
+  it("DROPS an autonomous turn's narration — no channel post, no orphan DM row", async () => {
+    await (relay as any).persistMessage(workspaceId, 1, {
+      type: "cyborg:agent_stream",
+      payload: {
+        agentId,
+        workspaceId,
+        channelId, // its bound channel — must NOT receive the narration
+        autonomous: true,
+        cyboId: "cybo-rick",
+        cyboName: "Rick",
+        event: {
+          type: "timeline",
+          item: {
+            type: "assistant_message",
+            text: "I'll send you a private DM. Let me load the messaging tool first.",
+            messageId: "m3",
+          },
+        },
+      },
+    });
+    await (relay as any).persistMessage(workspaceId, 2, {
+      type: "cyborg:agent_stream",
+      payload: { agentId, workspaceId, autonomous: true, event: { type: "turn_completed" } },
+    });
+
+    // Nothing persisted — not into the channel, and not as an orphan (channelId+toId
+    // null) row that getDmMessages would surface in the user's DM-with-cybo view.
+    expect(pg.inserted.length).toBe(0);
+    // Nothing broadcast either.
+    expect(broadcasts.length).toBe(0);
+  });
+
   // Control: a genuine channel turn (no privateToEmail) still persists + broadcasts to
   // the channel — the fix must not break normal channel/mention replies.
   it("a genuine channel turn (no privateToEmail) still posts to the channel", async () => {
