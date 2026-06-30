@@ -1728,6 +1728,7 @@ export class SlackClient<EventMap extends SlackEventMap = SlackEventMap> {
     workspaceId: string,
     email: string,
     role?: "admin" | "member" | "viewer",
+    channelIds?: string[],
   ): Promise<{ membership: Membership; invitationId: string; inviteUrl: string }> {
     const resp = await this.request<{
       membership: Membership;
@@ -1737,12 +1738,40 @@ export class SlackClient<EventMap extends SlackEventMap = SlackEventMap> {
       workspaceId,
       email,
       role,
+      // Prod relay ignores channelIds until the new relay deploy lands; harmless.
+      channelIds,
     });
     return {
       membership: resp.membership,
       invitationId: resp.invitationId,
       inviteUrl: resp.inviteUrl,
     };
+  }
+
+  // Single reusable workspace invite link ("open invite"). NEW relay endpoints —
+  // they DON'T exist on the prod relay yet, so callers must try/catch (the modal
+  // shows a soft "available after next update" note on error).
+  async getOpenInvite(
+    workspaceId: string,
+  ): Promise<{ token: string; inviteUrl: string; role: string; channelIds: string[] } | null> {
+    const resp = await this.request<{
+      invite: { token: string; inviteUrl: string; role: string; channelIds: string[] } | null;
+    }>("cyborg:get_open_invite", { workspaceId });
+    return resp.invite;
+  }
+
+  // Create or update the reusable invite link. `rotate:true` mints a brand-new
+  // token (the "Reset link" action), invalidating the old one.
+  async upsertOpenInvite(
+    workspaceId: string,
+    role: string,
+    channelIds: string[],
+    rotate = false,
+  ): Promise<{ token: string; inviteUrl: string; role: string; channelIds: string[] }> {
+    const resp = await this.request<{
+      invite: { token: string; inviteUrl: string; role: string; channelIds: string[] };
+    }>("cyborg:upsert_open_invite", { workspaceId, role, channelIds, rotate });
+    return resp.invite;
   }
 
   // Re-issue an existing pending invitation: resets the 7-day expiry and

@@ -35,6 +35,9 @@
   // clearSavedSession()/goto() twice.
   let loggingOut = $state(false);
   let daemonInfo = $state<Record<string, WsDaemonInfo>>({});
+  // The id of the workspace currently being entered, so the clicked card shows a
+  // spinner (selectWorkspace → goto is async and gave NO feedback → looked frozen).
+  let selectingId = $state<string | null>(null);
   let showCreate = $state(false);
   let newName = $state("");
   let creating = $state(false);
@@ -220,11 +223,21 @@
   }
 
   async function handleSelect(ws: typeof workspaceState.list[0]): Promise<void> {
-    await selectWorkspace(ws);
-    // Mobile (boss directive): land on Home tab, not the bare root.
-    // The bare root's restore-to-last-channel effect is desktop-only; mobile has
-    // a dedicated Home tab and must not bounce straight into a channel on entry.
-    goto(viewportState.isMobile ? `/workspace/${ws.id}/chats` : `/workspace/${ws.id}`);
+    if (selectingId) return; // ignore re-clicks while a selection is in flight
+    selectingId = ws.id;
+    try {
+      await selectWorkspace(ws);
+      // Mobile (boss directive): land on Home tab, not the bare root.
+      // The bare root's restore-to-last-channel effect is desktop-only; mobile has
+      // a dedicated Home tab and must not bounce straight into a channel on entry.
+      await goto(viewportState.isMobile ? `/workspace/${ws.id}/chats` : `/workspace/${ws.id}`);
+    } finally {
+      // Always clear. On success we navigate away (the reset is harmless), but if
+      // selection throws OR goto resolves false (SvelteKit returns false on an
+      // aborted/redirected navigation instead of throwing), this frees the card so
+      // it isn't stuck spinning forever.
+      selectingId = null;
+    }
   }
 
   async function handleCreate(): Promise<void> {
@@ -454,7 +467,9 @@
             {/if}
             <button
               onclick={() => handleSelect(ws)}
-              class="pressable-row flex h-[72px] w-full items-center gap-3 px-4 text-left"
+              disabled={selectingId !== null}
+              aria-busy={selectingId === ws.id}
+              class="pressable-row flex h-[72px] w-full items-center gap-3 px-4 text-left disabled:cursor-default"
               aria-label={ws.name}
             >
               <!-- 48px logo tile, rounded-[12px] per spec -->
@@ -491,8 +506,12 @@
                 </div>
               </div>
 
-              <!-- Chevron -->
-              <svg class="shrink-0 text-content-muted" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6" /></svg>
+              <!-- Chevron, or a spinner while this workspace is being entered -->
+              {#if selectingId === ws.id}
+                <svg class="h-[18px] w-[18px] shrink-0 animate-spin text-content-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>
+              {:else}
+                <svg class="shrink-0 text-content-muted" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6" /></svg>
+              {/if}
             </button>
           {/each}
         </div>
@@ -681,7 +700,9 @@
         {#each workspaceState.list as ws (ws.id)}
           <button
             onclick={() => handleSelect(ws)}
-            class="flex w-full items-center gap-3 rounded-lg bg-surface-alt border border-edge p-4 hover:border-edge-light transition-colors text-left"
+            disabled={selectingId !== null}
+            aria-busy={selectingId === ws.id}
+            class="flex w-full items-center gap-3 rounded-lg bg-surface-alt border border-edge p-4 hover:border-edge-light transition-colors text-left disabled:cursor-default"
           >
             {#if ws.avatarUrl}
               <img src={ws.avatarUrl} alt={ws.name} class="h-10 w-10 rounded-lg object-cover" />
@@ -713,6 +734,10 @@
                 {/if}
               </div>
             </div>
+            {#if selectingId === ws.id}
+              <!-- Entering this workspace: spinner so the click isn't silent. -->
+              <svg class="h-4 w-4 shrink-0 animate-spin text-content-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>
+            {/if}
           </button>
         {/each}
       </div>

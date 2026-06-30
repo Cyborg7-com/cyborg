@@ -4419,17 +4419,40 @@ export interface PendingInvitation {
 export async function inviteMember(
   email: string,
   role: "admin" | "member" | "viewer" = "member",
+  channelIds?: string[],
 ): Promise<{ invitationId: string; inviteUrl: string }> {
   if (!workspaceState.current) throw new Error("No workspace selected");
   const { invitationId, inviteUrl } = await client.inviteMember(
     workspaceState.current.id,
     email,
     role,
+    channelIds,
   );
   const members = await client.listMembers(workspaceState.current.id);
   workspaceState.members = members;
   authState.setMemberImagesFromMembers(members);
   return { invitationId, inviteUrl };
+}
+
+// Reusable workspace invite link. Both wrappers hit NEW relay endpoints that
+// don't exist on prod yet — callers must try/catch and degrade gracefully.
+export async function getOpenInvite(): Promise<{
+  token: string;
+  inviteUrl: string;
+  role: string;
+  channelIds: string[];
+} | null> {
+  if (!workspaceState.current) throw new Error("No workspace selected");
+  return client.getOpenInvite(workspaceState.current.id);
+}
+
+export async function upsertOpenInvite(
+  role: string,
+  channelIds: string[],
+  rotate = false,
+): Promise<{ token: string; inviteUrl: string; role: string; channelIds: string[] }> {
+  if (!workspaceState.current) throw new Error("No workspace selected");
+  return client.upsertOpenInvite(workspaceState.current.id, role, channelIds, rotate);
 }
 
 export async function removeMember(userId: string): Promise<void> {

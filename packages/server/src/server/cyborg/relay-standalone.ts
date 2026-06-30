@@ -175,6 +175,10 @@ let relayLog: pino.Logger;
 // (`${INVITE_BASE_URL}/invite/${token}`) and the 7-day token lifetime.
 const INVITE_BASE_URL = process.env.CYBORG_APP_URL ?? "https://app.cyborg7.com";
 const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+// Reusable (open) workspace links expire 24h after they're created/refreshed by
+// default (security: a leaked link goes stale fast). Re-copying/Reset refreshes
+// the window; accept enforces it (an expired link can't be joined).
+const OPEN_INVITE_TTL_MS = 24 * 60 * 60 * 1000;
 // A foregrounded desktop/web client idle (no user-driven app message) longer than
 // this stops suppressing the user's phone (FCM) push — they've walked away from the
 // open screen. Push-suppression only; never affects presence/away status.
@@ -7906,6 +7910,17 @@ async function main() {
             respondError("only an owner can grant the owner role");
             break;
           }
+          // Optional "add to channels": keep only ids that are real channels in
+          // this workspace (drops stale/foreign ids before persisting on the invite).
+          const requestedChannelIds = Array.isArray(inner.channelIds)
+            ? (inner.channelIds as unknown[]).filter((c): c is string => typeof c === "string")
+            : [];
+          let inviteChannelIds: string[] = [];
+          if (requestedChannelIds.length > 0) {
+            const wsChannels = await pg.getChannels(workspaceId);
+            const validChannelIds = new Set(wsChannels.map((c) => c.id));
+            inviteChannelIds = requestedChannelIds.filter((c) => validChannelIds.has(c));
+          }
           let targetUser = await pg.getUserByEmail(email);
           if (!targetUser) {
             const newId = randomUUID();
@@ -7934,6 +7949,7 @@ async function main() {
           if (existingInvite) {
             invitationId = existingInvite.id;
             await pg.updateInvitationExpiry(invitationId, expiresAt);
+            await pg.setInvitationChannels(invitationId, inviteChannelIds);
           } else {
             invitationId = randomBytes(32).toString("hex");
             await pg.createInvitation({
@@ -7943,6 +7959,7 @@ async function main() {
               role,
               createdBy: guest.userId,
               expiresAt,
+              channelIds: inviteChannelIds,
             });
           }
           const inviteUrl = `${INVITE_BASE_URL}/invite/${invitationId}`;
@@ -7957,6 +7974,89 @@ async function main() {
           }
 
           respond("cyborg:invite_member_response", { membership, invitationId, inviteUrl });
+          break;
+        }
+
+        // Reusable workspace link (read). Returns the single live open invite, or
+        // null if none has been created yet. Owner/admin only.
+        case "cyborg:get_open_invite": {
+          if (!workspaceId) {
+            respondError("workspaceId required");
+            break;
+          }
+          const callerRole = await pg.getMemberRole(workspaceId, guest.userId);
+          if (callerRole !== "owner" && callerRole !== "admin") {
+            respondError("forbidden");
+            break;
+          }
+          const open = await pg.getOpenInvitation(workspaceId);
+          // Treat an expired link as "none" so the UI re-prompts to create a fresh
+          // one (the stale row is reused/refreshed by the next upsert).
+          const openLive = open && open.expiresAt.getTime() > Date.now() ? open : null;
+          respond("cyborg:get_open_invite_response", {
+            invite: openLive
+              ? {
+                  token: openLive.id,
+                  inviteUrl: `${INVITE_BASE_URL}/invite/${openLive.id}`,
+                  role: openLive.role,
+                  channelIds: openLive.channelIds ?? [],
+                  expiresAt: openLive.expiresAt.getTime(),
+                }
+              : null,
+          });
+          break;
+        }
+
+        // Reusable workspace link (create/update/reset). One link per workspace:
+        // updates role/channels in place, or with rotate=true mints a fresh token
+        // (revoking the old link). Owner/admin only; never grants owner (a leaked
+        // link must not be able to hand out workspace ownership).
+        case "cyborg:upsert_open_invite": {
+          if (!workspaceId) {
+            respondError("workspaceId required");
+            break;
+          }
+          const role = (inner.role as string) || "member";
+          if (!VALID_WORKSPACE_ROLES.has(role)) {
+            respondError("invalid role");
+            break;
+          }
+          if (role === "owner") {
+            respondError("a reusable link cannot grant the owner role");
+            break;
+          }
+          const callerRole = await pg.getMemberRole(workspaceId, guest.userId);
+          if (callerRole !== "owner" && callerRole !== "admin") {
+            respondError("forbidden");
+            break;
+          }
+          const requestedChannelIds = Array.isArray(inner.channelIds)
+            ? (inner.channelIds as unknown[]).filter((c): c is string => typeof c === "string")
+            : [];
+          let openChannelIds: string[] = [];
+          if (requestedChannelIds.length > 0) {
+            const wsChannels = await pg.getChannels(workspaceId);
+            const validChannelIds = new Set(wsChannels.map((c) => c.id));
+            openChannelIds = requestedChannelIds.filter((c) => validChannelIds.has(c));
+          }
+          const row = await pg.upsertOpenInvitation({
+            workspaceId,
+            role,
+            channelIds: openChannelIds,
+            createdBy: guest.userId,
+            expiresAt: new Date(Date.now() + OPEN_INVITE_TTL_MS),
+            newId: randomBytes(32).toString("hex"),
+            rotate: inner.rotate === true,
+          });
+          respond("cyborg:upsert_open_invite_response", {
+            invite: {
+              token: row.id,
+              inviteUrl: `${INVITE_BASE_URL}/invite/${row.id}`,
+              role: row.role,
+              channelIds: row.channelIds ?? [],
+              expiresAt: row.expiresAt.getTime(),
+            },
+          });
           break;
         }
 
@@ -7984,6 +8084,12 @@ async function main() {
             respondError("invitation already accepted");
             break;
           }
+          // Resend is for email-bound invites only; a reusable open link has no
+          // address to send to (and is shared by copy, not email).
+          if (invite.isOpen || !invite.email) {
+            respondError("cannot resend a reusable invite link");
+            break;
+          }
           const expiresAt = new Date(Date.now() + INVITE_TTL_MS);
           await pg.updateInvitationExpiry(invitationId, expiresAt);
           const inviteUrl = `${INVITE_BASE_URL}/invite/${invitationId}`;
@@ -8008,24 +8114,35 @@ async function main() {
             respondError("invitation not found");
             break;
           }
-          if (invite.acceptedAt) {
-            respondError("invitation already accepted");
-            break;
+          if (invite.isOpen) {
+            // Reusable link: NOT consumed on accept (stays usable for others) and
+            // has no email binding, but it DOES expire (24h default) — a stale link
+            // can't be joined.
+            if (invite.expiresAt.getTime() < Date.now()) {
+              respondError("invitation expired");
+              break;
+            }
+          } else {
+            if (invite.acceptedAt) {
+              respondError("invitation already accepted");
+              break;
+            }
+            if (invite.expiresAt.getTime() < Date.now()) {
+              respondError("invitation expired");
+              break;
+            }
+            // Email-bound invite — only the user who owns that address (the
+            // accepting guest) may accept it.
+            const invitedUser = invite.email ? await pg.getUserByEmail(invite.email) : null;
+            if (invitedUser?.id !== guest.userId) {
+              respondError("email mismatch");
+              break;
+            }
+            await pg.markInvitationAccepted(invitationToken, guest.userId);
           }
-          if (invite.expiresAt.getTime() < Date.now()) {
-            respondError("invitation expired");
-            break;
-          }
-          // The invite is bound to a specific email — only the user who owns
-          // that address (the accepting guest) may accept it.
-          const invitedUser = await pg.getUserByEmail(invite.email);
-          if (invitedUser?.id !== guest.userId) {
-            respondError("email mismatch");
-            break;
-          }
-          await pg.markInvitationAccepted(invitationToken, guest.userId);
           // Ensure an ACTIVE membership: flip an existing invited row, or add a
-          // fresh active one if none exists (e.g. the invited row was removed).
+          // fresh active one if none exists (e.g. the invited row was removed, or
+          // the joiner arrived via the open link with no prior membership).
           const existing = await pg.getMemberRole(invite.workspaceId, guest.userId);
           if (existing) {
             await pg.setMembershipType(invite.workspaceId, guest.userId, "active");
@@ -8033,8 +8150,12 @@ async function main() {
             await pg.addMember(invite.workspaceId, guest.userId, invite.role, "active");
           }
           // Auto-join the workspace's default public channel so the new member's
-          // channel list isn't empty (mirrors activateInvitedMemberships).
+          // channel list isn't empty (mirrors activateInvitedMemberships), plus any
+          // channels the inviter selected ("add to channels"). Inserts are idempotent.
           await pg.joinDefaultChannels(invite.workspaceId, guest.userId);
+          for (const channelId of invite.channelIds ?? []) {
+            await pg.addChannelMember(channelId, guest.userId, "member");
+          }
           const members = await pg.getMembers(invite.workspaceId);
           const membership = members.find((m) => m.userId === guest.userId);
           respond("cyborg:accept_invitation_response", {

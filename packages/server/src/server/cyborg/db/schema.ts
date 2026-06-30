@@ -2123,8 +2123,17 @@ export const invitations = pgTable(
     workspaceId: text("workspace_id")
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
-    email: text("email").notNull(),
+    // Email-bound invites carry the address. An OPEN (reusable) invite has a NULL
+    // email + is_open = true: anyone with the link can join, and accepting it does
+    // NOT consume it (acceptedAt stays null), so it stays live until reset.
+    email: text("email"),
     role: text("role").notNull().default("member"),
+    // Reusable workspace invite link (one per workspace; "Reset" rotates the token
+    // by replacing the row). Email-bound invites keep this false.
+    isOpen: boolean("is_open").notNull().default(false),
+    // Channels the invitee is auto-joined to on accept, on top of the default
+    // #general (Slack-style "add to channels"). Empty = just the defaults.
+    channelIds: jsonb("channel_ids").$type<string[]>().notNull().default([]),
     createdBy: text("created_by")
       .notNull()
       .references(() => users.id),
@@ -2136,12 +2145,18 @@ export const invitations = pgTable(
   (t) => [
     index("idx_invitations_workspace").on(t.workspaceId),
     index("idx_invitations_email").on(t.email),
-    // One PENDING invite per (workspace, email). Partial: only rows that are
-    // not yet accepted participate, so the same address can be re-invited after
-    // an accepted invite without a conflict.
+    // One PENDING email-bound invite per (workspace, email). Partial: only
+    // not-yet-accepted, email-bound rows participate, so the same address can be
+    // re-invited after an accepted invite, and open invites (NULL email) are
+    // excluded (they're keyed per-workspace below).
     uniqueIndex("idx_invitations_pending_workspace_email")
       .on(t.workspaceId, t.email)
-      .where(isNull(t.acceptedAt)),
+      .where(sql`${t.acceptedAt} IS NULL AND ${t.isOpen} = false`),
+    // At most ONE live reusable link per workspace. Reset deletes the old row
+    // before inserting a new token, so this never blocks a rotation.
+    uniqueIndex("idx_invitations_open_workspace")
+      .on(t.workspaceId)
+      .where(sql`${t.isOpen} = true AND ${t.acceptedAt} IS NULL`),
   ],
 );
 

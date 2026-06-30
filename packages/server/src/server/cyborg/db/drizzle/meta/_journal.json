@@ -302,6 +302,13 @@
       "when": 1783000020000,
       "tag": "0043_composio_tools",
       "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "7",
+      "when": 1783000021000,
+      "tag": "0044_invites_open_channels",
+      "breakpoints": true
     }
   ]
 }

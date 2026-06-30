@@ -8906,6 +8906,8 @@ export class PgSync {
     role: string;
     createdBy: string;
     expiresAt: Date;
+    // Channels the invitee is auto-joined to on accept (Slack "add to channels").
+    channelIds?: string[];
   }): Promise<schema.Invitation> {
     const [row] = await this.db
       .insert(schema.invitations)
@@ -8916,6 +8918,82 @@ export class PgSync {
         role: params.role,
         createdBy: params.createdBy,
         expiresAt: params.expiresAt,
+        channelIds: params.channelIds ?? [],
+      })
+      .returning();
+    return row;
+  }
+
+  // Update the stored auto-join channels on an existing (pending) invite — used
+  // when a re-invite reuses the pending row but the inviter picked new channels.
+  async setInvitationChannels(id: string, channelIds: string[]): Promise<void> {
+    await this.db
+      .update(schema.invitations)
+      .set({ channelIds })
+      .where(eq(schema.invitations.id, id));
+  }
+
+  // The workspace's single live reusable (OPEN) invite link, if one exists. Open
+  // invites have NULL email + is_open = true and are never consumed on accept.
+  async getOpenInvitation(workspaceId: string): Promise<schema.Invitation | null> {
+    const [row] = await this.db
+      .select()
+      .from(schema.invitations)
+      .where(
+        and(
+          eq(schema.invitations.workspaceId, workspaceId),
+          eq(schema.invitations.isOpen, true),
+          isNull(schema.invitations.acceptedAt),
+        ),
+      )
+      .limit(1);
+    return row ?? null;
+  }
+
+  // Create or update the workspace's ONE reusable link. rotate=true mints a fresh
+  // token (revoking the old link) by deleting the existing row first; otherwise an
+  // existing link's role/channels/expiry are updated in place (token preserved).
+  // email stays NULL (open = anyone with the link can join as `role`).
+  async upsertOpenInvitation(params: {
+    workspaceId: string;
+    role: string;
+    channelIds: string[];
+    createdBy: string;
+    expiresAt: Date;
+    newId: string;
+    rotate?: boolean;
+  }): Promise<schema.Invitation> {
+    // Reset: drop the current link first so the insert below mints a fresh token.
+    if (params.rotate) {
+      const existing = await this.getOpenInvitation(params.workspaceId);
+      if (existing) {
+        await this.db.delete(schema.invitations).where(eq(schema.invitations.id, existing.id));
+      }
+    }
+    // Insert the new token, or — if a live link already exists (non-rotate, incl.
+    // a concurrent create) — atomically UPDATE it in place via the one-per-
+    // workspace partial unique index. onConflictDoUpdate keeps the existing token
+    // and avoids the check-then-insert race (two admins generating the link at once).
+    const [row] = await this.db
+      .insert(schema.invitations)
+      .values({
+        id: params.newId,
+        workspaceId: params.workspaceId,
+        email: null,
+        role: params.role,
+        isOpen: true,
+        channelIds: params.channelIds,
+        createdBy: params.createdBy,
+        expiresAt: params.expiresAt,
+      })
+      .onConflictDoUpdate({
+        target: schema.invitations.workspaceId,
+        targetWhere: sql`${schema.invitations.isOpen} = true AND ${schema.invitations.acceptedAt} IS NULL`,
+        set: {
+          role: params.role,
+          channelIds: params.channelIds,
+          expiresAt: params.expiresAt,
+        },
       })
       .returning();
     return row;
@@ -8989,13 +9067,19 @@ export class PgSync {
       .from(schema.invitations)
       .leftJoin(schema.users, eq(schema.users.id, schema.invitations.createdBy))
       .where(
-        and(eq(schema.invitations.workspaceId, workspaceId), isNull(schema.invitations.acceptedAt)),
+        and(
+          eq(schema.invitations.workspaceId, workspaceId),
+          isNull(schema.invitations.acceptedAt),
+          // Email-bound only — the reusable open link isn't a per-person pending invite.
+          eq(schema.invitations.isOpen, false),
+        ),
       )
       .orderBy(desc(schema.invitations.createdAt));
 
     return rows.map((r) => ({
       id: r.id,
-      email: r.email,
+      // Non-null in practice (filtered to email-bound rows above); coerce for the type.
+      email: r.email ?? "",
       role: r.role,
       createdAt: r.createdAt.getTime(),
       expiresAt: r.expiresAt.getTime(),

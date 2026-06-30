@@ -1,7 +1,7 @@
 <script lang="ts">
   import { goto } from "$app/navigation";
   import { page } from "$app/state";
-  import { workspaceState, channelState, selectChannel, agentStreamState, attentionState, inviteMember, authState, userStatusState, presenceState, connectionState, workspaceUserStatusesState, archiveAgent, reloadSession, fetchProjects, createProject as createProjectAction, updateProject as updateProjectAction, deleteProject as deleteProjectAction, setChannelProject, deleteChannel, notificationState, unreadFlagState, daemonStatusState, threadsState, notifPrefsState, setChannelNotificationPref, rememberLastChannel, dmTypingState, sortMembersByDmRecency, dmActivityState, projectsCache, daemonState } from "$lib/state/app.svelte.js";
+  import { workspaceState, channelState, selectChannel, agentStreamState, attentionState, authState, userStatusState, presenceState, connectionState, workspaceUserStatusesState, archiveAgent, reloadSession, fetchProjects, createProject as createProjectAction, updateProject as updateProjectAction, deleteProject as deleteProjectAction, setChannelProject, deleteChannel, notificationState, unreadFlagState, daemonStatusState, threadsState, notifPrefsState, setChannelNotificationPref, rememberLastChannel, dmTypingState, sortMembersByDmRecency, dmActivityState, projectsCache, daemonState } from "$lib/state/app.svelte.js";
   import { Badge } from "$lib/components/ui/badge/index.js";
   import { shellConfig, pluginRegistry } from "$lib/core/plugin.svelte.js";
   import { viewportState } from "$lib/state/viewport.svelte.js";
@@ -33,7 +33,7 @@
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
   import MobileSheet from "$lib/components/MobileSheet.svelte";
   import Field, { fieldInputClass } from "$lib/components/Field.svelte";
-  import * as Select from "$lib/components/ui/select/index.js";
+  import InviteMembersModal from "$lib/components/settings/InviteMembersModal.svelte";
   import { cyboState } from "$lib/state/app.svelte.js";
   import { leaveChannel as leaveChannelAction, createChannel as createChannelAction, createGroupDm as createGroupDmAction } from "$lib/state/app.svelte.js";
   import { visibleChannels, groupDmChannels } from "$lib/channel-visibility.js";
@@ -68,13 +68,6 @@
     const L = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
     return L > 0.6 ? "#0d0e10" : "#ffffff";
   }
-
-  const INVITE_ROLES = [
-    { value: "member", label: "Member" },
-    { value: "admin", label: "Admin" },
-    { value: "viewer", label: "Viewer" },
-  ];
-  const inviteRoleLabel = $derived(INVITE_ROLES.find((r) => r.value === inviteRole)?.label ?? "Member");
 
   function folderName(cwd: string | null | undefined): string {
     if (!cwd) return "unknown";
@@ -666,16 +659,6 @@
   });
 
   let showInviteHuman = $state(false);
-  let inviteEmail = $state("");
-  let inviteRole = $state("member");
-  let inviteSentUrl = $state("");
-  let inviteSentEmail = $state("");
-  let inviteCopied = $state(false);
-  // Track the "Copied" reset timer so rapid re-clicks don't clobber each other —
-  // each click clears the prior timer so the badge shows for a full 2s.
-  let copyTimeout: ReturnType<typeof setTimeout> | null = null;
-  let inviting = $state(false);
-  let inviteError = $state<string | null>(null);
 
   // Project editing
   let editingProject = $state<string | null>(null);
@@ -945,59 +928,6 @@
     e.stopPropagation();
     channelMenuOpen = channelMenuOpen === channelId ? null : channelId;
     channelMenuPos = { x: e.clientX, y: e.clientY };
-  }
-
-  async function handleInviteHuman() {
-    if (!inviteEmail.trim()) return;
-    inviting = true;
-    inviteError = null;
-    try {
-      const sentTo = inviteEmail.trim();
-      const { inviteUrl } = await inviteMember(sentTo, inviteRole as "admin" | "member" | "viewer");
-      // Keep the dialog open and surface the shareable invite link + Copy button
-      // (matches the Members-settings modal) instead of silently closing.
-      inviteSentEmail = sentTo;
-      inviteSentUrl = inviteUrl;
-      inviteCopied = false;
-      inviteEmail = "";
-    } catch (err) {
-      const raw = err instanceof Error ? err.message : "Failed to send invite";
-      // Map the relay's raw permission/error strings to something readable.
-      if (raw === "forbidden") {
-        inviteError = "Only workspace owners and admins can invite people.";
-      } else if (raw === "already a member") {
-        inviteError = "That person is already a member of this workspace.";
-      } else {
-        inviteError = raw;
-      }
-    } finally {
-      inviting = false;
-    }
-  }
-
-  async function copyInviteLink() {
-    if (!inviteSentUrl) return;
-    try {
-      await navigator.clipboard.writeText(inviteSentUrl);
-    } catch {
-      const el = document.createElement("textarea");
-      el.value = inviteSentUrl;
-      el.style.cssText = "position:fixed;opacity:0;pointer-events:none";
-      document.body.appendChild(el);
-      el.select();
-      try {
-        document.execCommand("copy");
-      } catch {
-        /* ignore */
-      }
-      document.body.removeChild(el);
-    }
-    inviteCopied = true;
-    if (copyTimeout) clearTimeout(copyTimeout);
-    copyTimeout = setTimeout(() => {
-      inviteCopied = false;
-      copyTimeout = null;
-    }, 2000);
   }
 
   function toggleAgentMenu(agentId: string, e: MouseEvent) {
@@ -1940,54 +1870,57 @@
       </SidebarSection>
     {/if}
 
-    <!-- Threads (global followed-threads view) -->
-    <button
-      type="button"
-      onclick={() => wsId && goto(`/workspace/${wsId}/threads`)}
-      aria-label="Threads"
-      aria-current={pathname.endsWith("/threads") ? "page" : undefined}
-      class={cn(
-        "mx-2 mt-1 mb-1 flex h-[34px] w-[calc(100%-1rem)] items-center gap-2 rounded-md px-2 text-[15px] transition-colors touch-target-row focus-ring",
-        pathname.endsWith("/threads")
-          ? "bg-[var(--sidebar-active)] text-[var(--sidebar-active-text)] font-semibold"
-          : "hover:bg-hover-gray text-sidebar-gray",
-      )}
-    >
-      <svg class="shrink-0" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-      </svg>
-      <span class="flex-1 text-left font-medium">Threads</span>
-      {#if threadsState.counts.totalUnreadMentions > 0}
-        <span class="flex h-[16px] min-w-[16px] items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-bold leading-none text-accent-foreground shrink-0">
-          {threadsState.counts.totalUnreadMentions > 99 ? "99+" : threadsState.counts.totalUnreadMentions}
-        </span>
-      {:else if threadsState.counts.totalUnreadThreads > 0}
-        <span class="h-2 w-2 rounded-full bg-red-500 shrink-0"></span>
-      {/if}
-    </button>
+    <!-- Threads + Saved share one row (split the real estate 50/50) -->
+    <div class="mx-2 mt-1 mb-1 flex items-center gap-1.5">
+      <!-- Threads (global followed-threads view) -->
+      <button
+        type="button"
+        onclick={() => wsId && goto(`/workspace/${wsId}/threads`)}
+        aria-label="Threads"
+        aria-current={pathname.endsWith("/threads") ? "page" : undefined}
+        class={cn(
+          "flex h-[34px] min-w-0 flex-1 items-center gap-2 rounded-md px-2 text-[15px] transition-colors touch-target-row focus-ring",
+          pathname.endsWith("/threads")
+            ? "bg-[var(--sidebar-active)] text-[var(--sidebar-active-text)] font-semibold"
+            : "hover:bg-hover-gray text-sidebar-gray",
+        )}
+      >
+        <svg class="shrink-0" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+        </svg>
+        <span class="min-w-0 flex-1 truncate text-left font-medium">Threads</span>
+        {#if threadsState.counts.totalUnreadMentions > 0}
+          <span class="flex h-[16px] min-w-[16px] items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-bold leading-none text-accent-foreground shrink-0">
+            {threadsState.counts.totalUnreadMentions > 99 ? "99+" : threadsState.counts.totalUnreadMentions}
+          </span>
+        {:else if threadsState.counts.totalUnreadThreads > 0}
+          <span class="h-2 w-2 rounded-full bg-red-500 shrink-0"></span>
+        {/if}
+      </button>
 
-    <!-- Saved (personal saved-messages view, #609) -->
-    <button
-      type="button"
-      onclick={() => wsId && goto(`/workspace/${wsId}/saved`)}
-      aria-label="Saved"
-      aria-current={pathname.endsWith("/saved") ? "page" : undefined}
-      class={cn(
-        "mx-2 mb-1 flex h-[34px] w-[calc(100%-1rem)] items-center gap-2 rounded-md px-2 text-[15px] transition-colors touch-target-row focus-ring",
-        pathname.endsWith("/saved")
-          ? "bg-[var(--sidebar-active)] text-[var(--sidebar-active-text)] font-semibold"
-          : "hover:bg-hover-gray text-sidebar-gray",
-      )}
-    >
-      <svg class="shrink-0" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" />
-      </svg>
-      <span class="flex-1 text-left font-medium">Saved</span>
-    </button>
+      <!-- Saved (personal saved-messages view, #609) -->
+      <button
+        type="button"
+        onclick={() => wsId && goto(`/workspace/${wsId}/saved`)}
+        aria-label="Saved"
+        aria-current={pathname.endsWith("/saved") ? "page" : undefined}
+        class={cn(
+          "flex h-[34px] min-w-0 flex-1 items-center gap-2 rounded-md px-2 text-[15px] transition-colors touch-target-row focus-ring",
+          pathname.endsWith("/saved")
+            ? "bg-[var(--sidebar-active)] text-[var(--sidebar-active-text)] font-semibold"
+            : "hover:bg-hover-gray text-sidebar-gray",
+        )}
+      >
+        <svg class="shrink-0" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" />
+        </svg>
+        <span class="min-w-0 flex-1 truncate text-left font-medium">Saved</span>
+      </button>
+    </div>
 
     <!-- Channels grouped by project -->
     {#if cfg.channels}
-      <SidebarSection label="Channels" bind:open={channelsOpen}>
+      <SidebarSection label="Projects" bind:open={channelsOpen}>
         {#snippet actions()}
           <div class="flex items-center gap-0.5">
             <TooltipProvider>
@@ -2826,63 +2759,8 @@
   </DialogContent>
 </Dialog>
 
-<!-- Invite People Dialog -->
-<Dialog bind:open={showInviteHuman} onOpenChange={(open) => { if (!open) { inviteEmail = ""; inviteError = null; inviteSentUrl = ""; inviteSentEmail = ""; inviteCopied = false; } }}>
-  <DialogContent class="sm:max-w-[440px]" showCloseButton={true}>
-    <DialogHeader>
-      <DialogTitle>Invite Humans</DialogTitle>
-    </DialogHeader>
-
-    {#if inviteSentUrl}
-      <div class="flex flex-col gap-3">
-        <p class="text-sm text-online">✓ Invitation sent to {inviteSentEmail}</p>
-        <div class="space-y-1.5 rounded-lg px-3 py-2.5" style="background-color: var(--bg-base); border: 1px solid var(--border);">
-          <p class="text-xs text-content-muted">Share this link to invite them directly:</p>
-          <div class="flex items-center gap-2">
-            <p class="flex-1 select-all break-all font-mono text-xs text-content">{inviteSentUrl}</p>
-            <Button variant="outline" onclick={copyInviteLink}>{inviteCopied ? "✓ Copied" : "Copy"}</Button>
-          </div>
-        </div>
-      </div>
-
-      <DialogFooter>
-        <Button variant="outline" onclick={() => { inviteSentUrl = ""; inviteSentEmail = ""; inviteCopied = false; }}>Invite another</Button>
-        <Button onclick={() => { showInviteHuman = false; }}>Done</Button>
-      </DialogFooter>
-    {:else}
-      <div class="flex flex-col gap-4">
-        <Field label="Email address" forId="invite-email" error={inviteError}>
-          <input
-            id="invite-email"
-            type="email"
-            placeholder="colleague@example.com"
-            bind:value={inviteEmail}
-            class={fieldInputClass}
-            onkeydown={(e) => { if (e.key === "Enter") handleInviteHuman(); }}
-          />
-        </Field>
-
-        <Field label="Role" hint="Members post · Viewers read-only · Admins manage the workspace.">
-          <Select.Root type="single" bind:value={inviteRole}>
-            <Select.Trigger class={fieldInputClass}>{inviteRoleLabel}</Select.Trigger>
-            <Select.Content>
-              {#each INVITE_ROLES as role (role.value)}
-                <Select.Item value={role.value} label={role.label}>{role.label}</Select.Item>
-              {/each}
-            </Select.Content>
-          </Select.Root>
-        </Field>
-      </div>
-
-      <DialogFooter>
-        <Button variant="outline" onclick={() => { showInviteHuman = false; inviteEmail = ""; inviteError = null; }}>Cancel</Button>
-        <Button onclick={handleInviteHuman} disabled={!inviteEmail.trim() || inviting}>
-          {inviting ? "Inviting..." : "Send invite"}
-        </Button>
-      </DialogFooter>
-    {/if}
-  </DialogContent>
-</Dialog>
+<!-- Invite People Modal (consolidated — see settings/InviteMembersModal.svelte) -->
+<InviteMembersModal bind:open={showInviteHuman} />
 
 <!-- Channel context menu. Desktop: floating menu anchored at the cursor.
      Mobile: a bottom sheet — the cursor-anchored menu overflowed off the right
