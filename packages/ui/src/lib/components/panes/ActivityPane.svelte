@@ -156,7 +156,7 @@
       // per-row endpoint — otherwise getUnreadActivityCount keeps counting it and
       // the next seedFromServer resets the badge (only "Mark all read" cleared it).
       activityState.markRead(item.id);
-      if (workspaceId) client.markActivityRead(workspaceId, item.id);
+      if (workspaceId) client.markActivityRead(workspaceId, item.serverId ?? item.id);
       const req = item.sourceId ? daemonAccessRequestsState.byId(item.sourceId) : undefined;
       if (req) goto(`/workspace/${workspaceId}/daemons/${req.daemonId}`);
       return;
@@ -192,7 +192,7 @@
     // Fallback (permission_request / agent_error): also scope-less, so persist
     // the per-row read server-side — same reason as daemon_access_request above.
     activityState.markRead(item.id);
-    if (workspaceId) client.markActivityRead(workspaceId, item.id);
+    if (workspaceId) client.markActivityRead(workspaceId, item.serverId ?? item.id);
     if ((item.eventType === "permission_request" || item.eventType === "agent_error") && item.actorId) {
       goto(`/workspace/${workspaceId}/agent/${item.actorId}`);
     }
@@ -427,8 +427,19 @@
             <button
               type="button"
               onclick={() => handleClick(item)}
-              class="pressable-row flex w-full min-h-[68px] cursor-pointer items-center gap-3 px-4 py-2 text-left"
+              class={cn(
+                "pressable-row relative flex w-full min-h-[68px] cursor-pointer items-center gap-3 px-4 py-2 text-left",
+                item.isRead && "opacity-70",
+              )}
+              style={!item.isRead ? "background-color: var(--activity-unread-bg);" : undefined}
             >
+              {#if !item.isRead}
+                <span
+                  aria-hidden="true"
+                  class="absolute left-0 top-2 bottom-2 w-[3px] rounded-r-full"
+                  style="background-color: {accentColorForType(item.eventType)};"
+                ></span>
+              {/if}
               <Avatar
                 name={item.actorName}
                 image={item.actorType === "human" && item.actorId ? authState.getMemberImage(item.actorId) : null}
@@ -437,11 +448,11 @@
               />
               <span class="flex min-w-0 flex-1 flex-col justify-center gap-px">
                 <span class="truncate text-[16px] leading-[21px]">
-                  <span class="font-semibold text-content">{item.actorName}</span>
-                  <span class="text-content-dim">{actionLabel(item)}</span>
+                  <span class={cn(item.isRead ? "font-medium text-content-dim" : "font-bold text-content")}>{item.actorName}</span>
+                  <span class={item.isRead ? "text-content-muted" : "text-content-dim"}>{actionLabel(item)}</span>
                 </span>
                 {#if item.preview.trim()}
-                  <span class="truncate text-[15px] leading-[20px] text-content-muted">
+                  <span class={cn("truncate text-[15px] leading-[20px]", item.isRead ? "text-content-muted" : "font-medium text-content-dim")}>
                     {#each previewParts(item.preview) as part}
                       {#if part.mention}
                         <span
@@ -456,7 +467,7 @@
               <span class="flex shrink-0 flex-col items-end justify-center gap-[5px]">
                 <span class="text-[13px] leading-[16px] text-content-muted tabular-nums">{relativeTime(item.createdAt)}</span>
                 {#if !item.isRead}
-                  <span class="h-2 w-2 rounded-full bg-accent" aria-hidden="true"></span>
+                  <span class="h-2.5 w-2.5 rounded-full bg-accent ring-2 ring-[var(--activity-unread-bg)]" aria-hidden="true"></span>
                 {/if}
               </span>
             </button>
@@ -604,16 +615,17 @@
                   onclick={() => handleClick(item)}
                   class={cn(
                     "group relative w-full cursor-pointer rounded-lg border py-3 pl-5 pr-3 text-left transition-colors hover:bg-hover-gray",
-                    item.isRead ? "border-transparent" : "border-edge-dim",
+                    item.isRead ? "border-transparent opacity-75 hover:opacity-100" : "border-edge",
                     accessReq ? "rounded-b-none" : "",
                   )}
                   style={!item.isRead ? "background-color: var(--activity-unread-bg);" : undefined}
                 >
-                  <!-- Left accent strip — colored by event type, solid for unread, faint for read -->
+                  <!-- Left accent strip — colored by event type. Unread: bold full-height
+                       bar; read: thin faint stub so the row still reads as calm. -->
                   <span
                     aria-hidden="true"
-                    class="absolute left-0 top-2 bottom-2 w-[3px] rounded-r-full transition-opacity"
-                    style="background-color: {accent}; opacity: {item.isRead ? 0 : 1};"
+                    class="absolute left-0 top-1.5 bottom-1.5 rounded-r-full transition-all"
+                    style="background-color: {accent}; width: {item.isRead ? '2px' : '4px'}; opacity: {item.isRead ? 0.25 : 1};"
                   ></span>
 
                   <!-- Header row -->
@@ -639,8 +651,8 @@
                       />
                     </div>
                     <div class="min-w-0 flex-1">
-                      <div class="text-[13.5px] font-bold leading-tight text-content">{item.actorName}</div>
-                      <div class="mt-1 break-words text-[13.5px] leading-snug text-content">
+                      <div class={cn("text-[13.5px] font-bold leading-tight", item.isRead ? "text-content-dim" : "text-content")}>{item.actorName}</div>
+                      <div class={cn("mt-1 break-words text-[13.5px] leading-snug", item.isRead ? "font-normal text-content-muted" : "font-medium text-content")}>
                         {#each previewParts(item.preview) as part}
                           {#if part.mention}
                             <span

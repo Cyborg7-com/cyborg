@@ -1439,6 +1439,12 @@ export type ActivityEventType =
 
 export interface ActivityItem {
   id: string;
+  // Raw activity_events.id from the server seed (a UUID). The client `id` above
+  // is a synthetic dedupe key (`mention:<src>`, `activity:<uuid>`, …) that does
+  // NOT match the PG row, so the per-row read endpoint must clear by THIS id.
+  // Undefined for live client-only items (permission_request/agent_error) that
+  // were never persisted server-side.
+  serverId?: string;
   // Stable source id (e.g. the originating message id) for items that can be
   // rebuilt from history, so reload/reconnect dedupes and read-state persists.
   sourceId?: string;
@@ -1749,6 +1755,9 @@ export class ActivityState {
     const isRead = s.is_read === 1 || s.is_read === true || this.readIds.has(id);
     return {
       id,
+      // Carry the real PG row id so the per-row read endpoint matches (the
+      // synthetic `id` never does → badge stuck until "Mark all read").
+      serverId: s.id,
       sourceId: sourceId ?? undefined,
       eventType: this.normalizeEventType(s.event_type),
       // Resolve a human name: server-provided name first, then the member map
