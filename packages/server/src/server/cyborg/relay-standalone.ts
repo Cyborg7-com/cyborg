@@ -66,6 +66,7 @@ import {
 } from "./cross-daemon-initiated-by.js";
 import {
   offlineAgentRows,
+  filterLiveRowsForViewer,
   auditAgentRows,
   shouldGcOwnerBindings,
   canClearAgentBinding,
@@ -1304,19 +1305,66 @@ async function main() {
     if (!agg) return;
     agentListAggregations.delete(requestId);
     clearTimeout(agg.timer);
-    // Union in PG-mirrored sessions whose owning daemon is OFFLINE (its agentId is
-    // absent from the live fan-out), so the workspace's sessions survive a daemon
-    // restart. Live rows win the dedupe; a PG miss leaves just the live rows.
-    const offline = await offlineAgentRowsFromPg(
-      agg.workspaceId,
-      agg.guestEmail,
-      new Set(agg.agents.keys()),
-      agg.guestUserId,
-    );
-    if (offline) {
-      for (const row of offline) {
-        const id = row.agentId as string | undefined;
-        if (id && !agg.agents.has(id)) agg.agents.set(id, row);
+    // ONE PG-mirror read drives both (a) the LIVE re-filter that closes the
+    // live-list IDOR gap and (b) the OFFLINE union that keeps a restarted daemon's
+    // sessions visible. Live rows win the dedupe; a PG miss leaves just the live
+    // rows (re-filter skipped -- the daemon's own per-user scoping still applies).
+    if (pg) {
+      let mirrorBindings: Awaited<
+        ReturnType<NonNullable<typeof pg>["getAgentBindingsByWorkspace"]>
+      > | null;
+      try {
+        mirrorBindings = await pg.getAgentBindingsByWorkspace(agg.workspaceId);
+      } catch (err) {
+        relayLog.error(
+          { err, workspaceId: agg.workspaceId },
+          "getAgentBindingsByWorkspace failed -- live re-filter + offline union skipped this list",
+        );
+        mirrorBindings = null;
+      }
+      if (mirrorBindings) {
+        // (a) Drop any merged LIVE row the viewer must not see (an AUTONOMOUS
+        // session the daemon's local-id owner match let slip). Conservative --
+        // see filterLiveRowsForViewer (only mirrored-autonomous rows are dropped).
+        const mirror = new Map<
+          string,
+          {
+            channelId: string | null;
+            initiatedBy: string | null;
+            initiatedByEmail: string | null;
+            autonomous: boolean;
+          }
+        >();
+        for (const b of mirrorBindings) {
+          mirror.set(b.agentId, {
+            channelId: b.channelId,
+            initiatedBy: b.initiatedBy,
+            initiatedByEmail: b.initiatedByEmail,
+            autonomous: b.autonomous,
+          });
+        }
+        for (const id of Array.from(agg.agents.keys())) {
+          const row = agg.agents.get(id);
+          if (
+            row &&
+            filterLiveRowsForViewer([row], mirror, agg.guestEmail, agg.guestUserId).length === 0
+          ) {
+            agg.agents.delete(id);
+          }
+        }
+        // (b) Union the OFFLINE rows whose owning daemon is asleep (agentId absent
+        // from the now-filtered live set). Same offlineBindingVisible scoping, so a
+        // peer's private offline session never leaks here either.
+        const offline = offlineAgentRows(
+          mirrorBindings,
+          agg.guestEmail,
+          new Set(agg.agents.keys()),
+          agg.guestUserId,
+        );
+        for (const row of offline) {
+          const id = row.agentId as string | undefined;
+          if (id && !agg.agents.has(id)) agg.agents.set(id, row);
+        }
       }
     }
     const cmap = await cyboMapForWorkspace(agg.workspaceId);
@@ -9035,6 +9083,28 @@ async function main() {
           if (!reactRole || reactRole === "viewer") {
             respondError("you can't react in this workspace");
             break;
+          }
+          // Private-channel gate (mirrors cyborg:fetch_thread / fetch_messages): the
+          // reaction targets a client-supplied messageId after only a workspace-role
+          // check, so a member NOT in a private channel could toggle a reaction on
+          // (and thereby probe) its messages. Anchor the message to this workspace and
+          // require private-channel membership. DM messages (channelId null) are
+          // unaffected. Fail-closed.
+          const reactMsg = await pg.getMessageById(messageId);
+          if (!reactMsg || reactMsg.workspaceId !== workspaceId) {
+            respondError("message not found");
+            break;
+          }
+          if (reactMsg.channelId) {
+            const reactChannel = await pg.getChannel(reactMsg.channelId);
+            if (
+              !reactChannel ||
+              (reactChannel.is_private &&
+                !(await pg.getChannelMemberRole(reactMsg.channelId, guest.userId)))
+            ) {
+              respondError("message not found");
+              break;
+            }
           }
           const reactUser = await pg.getUserById(guest.userId);
           const reactName = reactUser?.name ?? reactUser?.email ?? "Unknown";

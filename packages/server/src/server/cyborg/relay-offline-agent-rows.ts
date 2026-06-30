@@ -152,6 +152,50 @@ export function offlineBindingVisible(
   );
 }
 
+// Re-filter the relay's MERGED LIVE list_agents rows for per-user visibility
+// (live-list IDOR gap). The daemon already scopes its OWN list (handleListAgents),
+// but it matches `initiated_by` (a daemon-LOCAL id) against the GLOBAL guestId, so
+// when the email->local-id bridge misses an AUTONOMOUS (cron/scheduled) live session
+// can slip through -- and the relay merges live rows VERBATIM. Cross-reference the
+// PG mirror (the SAME `autonomous` flag #1077 persists) and drop any autonomous row
+// the viewer doesn't own (by canonical email OR global account id). Intentionally
+// CONSERVATIVE: ONLY rows the mirror marks `autonomous` are re-checked, so a shared
+// channel agent -- or the viewer's own private session the daemon legitimately
+// included -- is NEVER wrongly hidden (no false-negative on the common path). Rows
+// absent from the mirror (a fresh live spawn not yet mirrored) are kept and left to
+// the daemon's own scoping. `mirror` maps agentId -> its owner-identity fields.
+export function filterLiveRowsForViewer(
+  rows: Record<string, unknown>[],
+  mirror: Map<
+    string,
+    {
+      channelId: string | null;
+      initiatedBy: string | null;
+      initiatedByEmail: string | null;
+      autonomous: boolean;
+    }
+  >,
+  guestEmail: string | null,
+  viewerGlobalId: string | null,
+): Record<string, unknown>[] {
+  return rows.filter((row) => {
+    const id = row.agentId as string | undefined;
+    const b = id ? mirror.get(id) : undefined;
+    // Not a mirrored autonomous session -> trust the daemon's own per-user scoping.
+    if (!b || !b.autonomous) return true;
+    return offlineBindingVisible(
+      {
+        channelId: b.channelId,
+        initiatedBy: b.initiatedBy,
+        initiatedByEmail: b.initiatedByEmail,
+        autonomous: true,
+      },
+      guestEmail,
+      viewerGlobalId,
+    );
+  });
+}
+
 // Daemon-owner AUDIT row from a mirrored binding (sessions-daemon-audit-visibility
 // / #993). Same projection as buildOfflineAgentRow PLUS the `ephemeral`/`internal`
 // badges. internal is always false offline (no live agent to read it from), and

@@ -4,6 +4,7 @@ import {
   buildOfflineAgentRow,
   offlineBindingVisible,
   offlineAgentRows,
+  filterLiveRowsForViewer,
   auditAgentRows,
   shouldGcOwnerBindings,
   canClearAgentBinding,
@@ -454,24 +455,109 @@ describe("relay-offline-agent-rows", () => {
       // The bug: clearing only PG let the still-online daemon re-advertise the live
       // agent on the next list_agents fan-out, so the archived row reappeared. The
       // archive must be handled by the owning daemon (SQLite teardown + agent kill).
-      expect(
-        resolveOwnerArchiveRoute({ owningDaemonId: "daemon-a", daemonReachable: true }),
-      ).toBe("daemon");
+      expect(resolveOwnerArchiveRoute({ owningDaemonId: "daemon-a", daemonReachable: true })).toBe(
+        "daemon",
+      );
     });
 
     it("OFFLINE owning daemon ⇒ 'pg-clear' (the offline fallback is correct)", () => {
-      expect(
-        resolveOwnerArchiveRoute({ owningDaemonId: "daemon-a", daemonReachable: false }),
-      ).toBe("pg-clear");
+      expect(resolveOwnerArchiveRoute({ owningDaemonId: "daemon-a", daemonReachable: false })).toBe(
+        "pg-clear",
+      );
     });
 
     it("no resolvable owning daemon ⇒ 'pg-clear' (cannot aim the live teardown)", () => {
+      expect(resolveOwnerArchiveRoute({ owningDaemonId: undefined, daemonReachable: true })).toBe(
+        "pg-clear",
+      );
+      expect(resolveOwnerArchiveRoute({ owningDaemonId: undefined, daemonReachable: false })).toBe(
+        "pg-clear",
+      );
+    });
+  });
+  // --- filterLiveRowsForViewer -- the LIVE-list IDOR re-filter ---
+  describe("filterLiveRowsForViewer (live-list re-filter)", () => {
+    type Mirror = Map<
+      string,
+      {
+        channelId: string | null;
+        initiatedBy: string | null;
+        initiatedByEmail: string | null;
+        autonomous: boolean;
+      }
+    >;
+    const row = (id: string): Record<string, unknown> => ({ agentId: id, provider: "claude" });
+
+    it("hides another member's AUTONOMOUS live session (the cron-leak vector)", () => {
+      const mirror: Mirror = new Map([
+        [
+          "cron-1",
+          {
+            channelId: "chan-briefs",
+            initiatedBy: "seb-local",
+            initiatedByEmail: "seb@test.dev",
+            autonomous: true,
+          },
+        ],
+      ]);
       expect(
-        resolveOwnerArchiveRoute({ owningDaemonId: undefined, daemonReachable: true }),
-      ).toBe("pg-clear");
+        filterLiveRowsForViewer([row("cron-1")], mirror, "rodrigo@test.dev", "rodrigo-global"),
+      ).toHaveLength(0);
+    });
+
+    it("keeps the OWNER's own autonomous session (matched by email, case-insensitive)", () => {
+      const mirror: Mirror = new Map([
+        [
+          "cron-1",
+          {
+            channelId: "chan-briefs",
+            initiatedBy: "seb-local",
+            initiatedByEmail: "seb@test.dev",
+            autonomous: true,
+          },
+        ],
+      ]);
       expect(
-        resolveOwnerArchiveRoute({ owningDaemonId: undefined, daemonReachable: false }),
-      ).toBe("pg-clear");
+        filterLiveRowsForViewer([row("cron-1")], mirror, "Seb@test.dev", "seb-global"),
+      ).toHaveLength(1);
+    });
+
+    it("keeps the OWNER's own autonomous session (matched by global id == initiated_by)", () => {
+      const mirror: Mirror = new Map([
+        [
+          "cron-1",
+          {
+            channelId: "chan-briefs",
+            initiatedBy: "seb-global",
+            initiatedByEmail: null,
+            autonomous: true,
+          },
+        ],
+      ]);
+      expect(filterLiveRowsForViewer([row("cron-1")], mirror, null, "seb-global")).toHaveLength(1);
+    });
+
+    it("never touches a SHARED (non-autonomous) channel agent -- trusts the daemon scoping", () => {
+      const mirror: Mirror = new Map([
+        [
+          "shared-1",
+          {
+            channelId: "chan-general",
+            initiatedBy: "seb-local",
+            initiatedByEmail: "seb@test.dev",
+            autonomous: false,
+          },
+        ],
+      ]);
+      expect(
+        filterLiveRowsForViewer([row("shared-1")], mirror, "rodrigo@test.dev", "rodrigo-global"),
+      ).toHaveLength(1);
+    });
+
+    it("keeps a live row absent from the mirror (fresh spawn) -- no false-negative", () => {
+      expect(
+        filterLiveRowsForViewer([row("fresh-1")], new Map(), "rodrigo@test.dev", "rodrigo-global"),
+      ).toHaveLength(1);
     });
   });
 });
