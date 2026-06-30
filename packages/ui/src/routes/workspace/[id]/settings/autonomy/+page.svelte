@@ -2,7 +2,12 @@
   import { untrack } from "svelte";
   import { workspaceState, client, cyboState, fetchCybos } from "$lib/state/app.svelte.js";
   import { Switch } from "$lib/components/ui/switch/index.js";
-  import { cn } from "$lib/utils.js";
+  import {
+    Tooltip,
+    TooltipContent,
+    TooltipProvider,
+    TooltipTrigger,
+  } from "$lib/components/ui/tooltip/index.js";
   import { toast } from "svelte-sonner";
 
   // Cybo Autonomy — Phase 1 (S2) UI: the per-cybo autonomy dial + the workspace
@@ -35,6 +40,15 @@
   let savingId = $state<string | null>(null);
 
   const cybos = $derived(cyboState.list);
+
+  // Per-cybo levels are only meaningful while the workspace master switch is ON:
+  // master off ⇒ every cybo is effectively mention-only regardless of its saved
+  // level, so the per-cybo dial is moot and we lock it. Derived (not an effect) so
+  // the controls flip the instant the master switch or role changes.
+  const controlsLive = $derived(canEdit && !masterLoading && masterOn);
+  // Show the "turn on autonomy" tooltip only for an admin who could edit if the
+  // master switch were on — viewers get the separate admins-only note instead.
+  const lockedByMaster = $derived(canEdit && !masterLoading && !masterOn);
 
   // Load (and reload on workspace switch) the master switch + cybo roster. Using
   // $effect over onMount so a workspace that resolves AFTER mount still triggers
@@ -121,7 +135,18 @@
   </section>
 
   <section class="flex flex-col gap-2">
-    <h2 class="text-[11px] font-semibold uppercase tracking-wide text-content-dim">Cybos</h2>
+    <div class="flex flex-col gap-1">
+      <h2 class="text-[11px] font-semibold uppercase tracking-wide text-content-dim">Cybos</h2>
+      <p class="text-[12px] text-content-dim">
+        {#if !masterLoading && !masterOn}
+          Workspace autonomy is off — every cybo stays mention-only here, whatever its saved
+          level. Turn it on to let each cybo act at its own level.
+        {:else}
+          Each cybo acts at its own level. A channel can cap it lower — the effective level is
+          the lower of the two.
+        {/if}
+      </p>
+    </div>
     {#if cybos.length === 0}
       <div class="rounded-xl border border-edge bg-surface-alt p-4 text-[13px] text-content-dim italic">
         No cybos in this workspace yet.
@@ -130,31 +155,28 @@
       <div class="flex flex-col gap-2">
         {#each cybos as cybo (cybo.id)}
           {@const current = levelOf(cybo)}
-          <div class="rounded-xl border border-edge bg-surface-alt p-3">
-            <div class="mb-2 flex items-center gap-2">
+          <div class="flex flex-col gap-2.5 rounded-xl border border-edge bg-surface-alt p-3">
+            <div class="flex items-center gap-2">
               <span class="truncate text-sm font-medium text-content">{cybo.name}</span>
-              {#if cybo.slug}<span class="text-[12px] text-content-dim">@{cybo.slug}</span>{/if}
-              {#if savingId === cybo.id}<span class="text-[11px] text-content-dim">saving…</span>{/if}
+              {#if cybo.slug}<span class="text-[12px] text-content-muted">@{cybo.slug}</span>{/if}
+              {#if savingId === cybo.id}
+                <span class="ml-auto text-[11px] text-content-dim">saving…</span>
+              {/if}
             </div>
-            <div class="flex flex-wrap gap-1.5">
-              {#each PRESETS as preset (preset.level)}
-                <button
-                  type="button"
-                  title={preset.hint}
-                  aria-pressed={current === preset.level}
-                  disabled={!canEdit || savingId === cybo.id}
-                  onclick={() => setLevel(cybo, preset.level)}
-                  class={cn(
-                    "rounded-lg border px-2.5 py-1 text-[12px] transition-colors disabled:opacity-50",
-                    current === preset.level
-                      ? "border-accent bg-accent/15 text-content"
-                      : "border-edge text-content-dim hover:text-content hover:border-content-muted",
-                  )}
-                >
-                  {preset.label}
-                </button>
-              {/each}
-            </div>
+            {#if lockedByMaster}
+              <TooltipProvider>
+                <Tooltip>
+                  <TooltipTrigger>
+                    {#snippet child({ props })}
+                      <div {...props} class="w-fit">{@render levelControl(cybo, current)}</div>
+                    {/snippet}
+                  </TooltipTrigger>
+                  <TooltipContent>Enable workspace autonomy to set per-cybo levels</TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+            {:else}
+              {@render levelControl(cybo, current)}
+            {/if}
           </div>
         {/each}
       </div>
@@ -164,3 +186,35 @@
     {/if}
   </section>
 </div>
+
+<!-- Segmented control for a single cybo's autonomy level. Greyed + non-interactive
+     when the controls aren't live (viewer, still loading, or master switch off). -->
+{#snippet levelControl(cybo: (typeof cybos)[number], current: string)}
+  <div
+    role="group"
+    aria-label="Autonomy level for {cybo.name}"
+    class={[
+      "inline-flex flex-wrap gap-0.5 rounded-lg border border-edge bg-surface p-0.5",
+      !controlsLive && "opacity-55",
+    ]}
+  >
+    {#each PRESETS as preset (preset.level)}
+      {@const selected = current === preset.level}
+      <button
+        type="button"
+        title={preset.hint}
+        aria-pressed={selected}
+        disabled={!controlsLive || savingId === cybo.id}
+        onclick={() => setLevel(cybo, preset.level)}
+        class={[
+          "rounded-md px-2.5 py-1 text-[12px] font-medium transition-colors disabled:pointer-events-none disabled:cursor-not-allowed",
+          selected
+            ? "bg-accent text-accent-foreground shadow-sm"
+            : "text-content-dim hover:text-content",
+        ]}
+      >
+        {preset.label}
+      </button>
+    {/each}
+  </div>
+{/snippet}
