@@ -29,6 +29,7 @@ export const PLATFORM_PERMISSION_OPTIONS: PlatformPermissionOption[] = [
   { id: "create_task", label: "Manage tasks", sub: "Create and update tasks" },
   { id: "manage_channels", label: "Manage channels", sub: "Create channels and edit membership" },
   { id: "spawn_agents", label: "Spawn agents", sub: "Delegate work to other agents" },
+  { id: "manage_self", label: "Edit own personality", sub: "Let this cybo rewrite its own soul" },
 ];
 
 export type PermissionPresetId = "observer" | "collaborator" | "operator";

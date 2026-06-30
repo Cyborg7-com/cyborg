@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   mergePgCybosIntoRoster,
+  pgStoredCyboToFetchResponse,
   resolveWorkspaceCybo,
   type PgCyboRow,
 } from "./cybo-roster-merge.js";
+import type { StoredCybo } from "./cybo-types.js";
 
 // The REAL prod row (verified in PG the day of the incident): apex exists,
 // correct workspace — yet EDIT answered "Cybo not found".
@@ -149,5 +151,61 @@ describe("gemini review hardening", () => {
       { ...APEX_PG, platform_permissions: '["send_message", 42, null, "react"]' },
     ]);
     expect(list[0].platformPermissions).toEqual(["send_message", "react"]);
+  });
+});
+
+// D1: the relay's single-cybo PG fallback. `cyborg:fetch_cybo` returns null when
+// the answering daemon doesn't have a cloud-only cybo locally; the relay then
+// resolves it from PG (tolerant id) and maps it — WITH soul — into the response.
+describe("pgStoredCyboToFetchResponse (relay PG fallback for fetch_cybo)", () => {
+  const PG_CYBO: StoredCybo = {
+    id: "cybo_d46b732d-df8c-4335-a406-d20427b13b4b",
+    workspace_id: "ws_1",
+    slug: "apex",
+    name: "Apex",
+    description: "Decisive operator",
+    avatar: null,
+    role: "Lead",
+    soul: "You are Apex, decisive and concise.",
+    provider: "claude",
+    model: "claude-opus-4-8",
+    mcp_servers: '{"stash":{"url":"http://localhost"}}',
+    llm_auth_mode: "cli",
+    behavior_mode: "responsive",
+    home_daemon_id: null,
+    autonomy_level: null,
+    monthly_spend_cap: null,
+    platform_permissions: '["send_message","react"]',
+    is_default: 0,
+    created_by: "user_1",
+    created_at: 1_780_000_000_000,
+    updated_at: 1_780_000_000_000,
+  };
+
+  it("a PG-only cybo resolved by a non-matching id maps with its soul (the bug)", () => {
+    // The client holds a pre-merge `local:<slug>` id; resolveWorkspaceCybo finds
+    // the PG row, and the mapper returns the full payload the editor needs.
+    const hit = resolveWorkspaceCybo([PG_CYBO], "local:apex");
+    expect(hit).toBeDefined();
+    const wire = pgStoredCyboToFetchResponse(hit!);
+    expect(wire.id).toBe(PG_CYBO.id);
+    expect(wire.slug).toBe("apex");
+    // The soul is the whole point — it is present, not null.
+    expect(wire.soul).toBe("You are Apex, decisive and concise.");
+    expect(wire.isLocal).toBe(false);
+    expect(wire.platformPermissions).toEqual(["send_message", "react"]);
+    expect(wire.mcpServers).toEqual({ stash: { url: "http://localhost" } });
+  });
+
+  it("malformed JSON columns degrade gracefully (no throw)", () => {
+    const wire = pgStoredCyboToFetchResponse({
+      ...PG_CYBO,
+      platform_permissions: "{not json",
+      mcp_servers: "also not json",
+    });
+    expect(wire.platformPermissions).toEqual([]);
+    expect(wire.mcpServers).toBeUndefined();
+    // Soul still round-trips.
+    expect(wire.soul).toBe(PG_CYBO.soul);
   });
 });

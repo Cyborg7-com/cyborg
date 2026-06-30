@@ -1450,6 +1450,7 @@ export class WorkspaceRelay {
   // Cybo task WRITES (daemon → relay → PG). Validates the writer (see
   // resolveCyboWriteActor), then mutates the SHARED tasks table — so a cybo- or
   // user-attributed task is the same row the UI sees.
+  // oxlint-disable-next-line eslint/complexity -- pre-existing over-budget cybo-write switch (40); this change only adds a single delegating branch for update_self (extracted to handleCyboUpdateSelf)
   private async handleCyboWrite(ws: WebSocket, msg: CyboWriteRequest): Promise<void> {
     const fail = (error: string): void => {
       const reply: CyboWriteResponse = {
@@ -1464,6 +1465,13 @@ export class WorkspaceRelay {
       fail("cybo writes need the shared workspace store (relay has no PG)");
       return;
     }
+    // update_self (a cybo edits its OWN soul) rides this path too — extracted to
+    // its own method to keep handleCyboWrite's branch count down.
+    if (msg.kind === "update_self") {
+      await this.handleCyboUpdateSelf(ws, msg, fail);
+      return;
+    }
+
     try {
       const resolved = await this.resolveCyboWriteActor(this.pg, msg);
       if (!resolved.ok) {
@@ -1685,6 +1693,56 @@ export class WorkspaceRelay {
   // handleCyboWrite so that method's branch count doesn't grow. IDOR guard (#920):
   // anchor to THIS workspace's tasks before deleting — a daemon must never delete
   // across workspaces — with the same project-visibility gate as the update path.
+  // STRICT self-scope: the write targets msg.cyboId and NOTHING else — there is no
+  // taskId/assignee surface to redirect it at another cybo. We still verify the
+  // cybo belongs to THIS workspace (IDOR guard, like the task path) and gate on the
+  // cybo's own `manage_self` grant before persisting + replying. Extracted from
+  // handleCyboWrite to keep that method's branch count down.
+  private async handleCyboUpdateSelf(
+    ws: WebSocket,
+    msg: CyboWriteRequest,
+    fail: (error: string) => void,
+  ): Promise<void> {
+    if (!this.pg) {
+      fail("cybo writes need the shared workspace store (relay has no PG)");
+      return;
+    }
+    const cyboId = msg.cyboId;
+    if (!cyboId) {
+      fail("update_self requires cyboId");
+      return;
+    }
+    if (typeof msg.soul !== "string" || msg.soul.trim().length === 0) {
+      fail("update_self requires a non-empty soul");
+      return;
+    }
+    const cybo = (await this.pg.getCybos(msg.workspaceId)).find((c) => c.id === cyboId);
+    if (!cybo) {
+      fail("cybo not found in this workspace");
+      return;
+    }
+    let grants: string[] = [];
+    try {
+      grants = cybo.platform_permissions ? JSON.parse(cybo.platform_permissions) : [];
+    } catch {
+      grants = [];
+    }
+    // Same gating semantics as the MCP `allows()` check: a non-empty grant list
+    // must include manage_self; an empty list stays fail-open (legacy default).
+    if (grants.length > 0 && !grants.includes("manage_self")) {
+      fail("this cybo doesn't have the manage_self permission");
+      return;
+    }
+    await this.pg.updateCybo(cyboId, { soul: msg.soul });
+    const reply: CyboWriteResponse = {
+      type: "cybo_write_response",
+      requestId: msg.requestId,
+      ok: true,
+      cybo: { id: cybo.id, slug: cybo.slug, soul: msg.soul },
+    };
+    this.send(ws, reply);
+  }
+
   private async handleCyboDeleteTask(
     ws: WebSocket,
     msg: CyboWriteRequest,

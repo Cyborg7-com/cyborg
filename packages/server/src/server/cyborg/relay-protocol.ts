@@ -253,7 +253,13 @@ export const CyboWriteRequestSchema = z.object({
   //  - "delete_task" hard-deletes a workspace-anchored task (pg.deleteTask).
   //  - archive/unarchive REUSE "update_task" with `archivedAt` (no new kind), so an
   //    old relay that lacks delete_task still archives via the update path.
-  kind: z.enum(["create_task", "update_task", "delete_task"]),
+  // "update_self" — a cybo edits its OWN soul/personality (scoped to msg.cyboId).
+  // Rides the cybo write path so a cloud cybo's self-edit reaches the SHARED
+  // workspace `cybos` table (the relay's PG) + broadcasts the roster, exactly like
+  // a UI update_cybo. Additive + backward compatible: an old relay that lacks the
+  // branch returns its generic "unknown kind" failure and the daemon falls back to
+  // its local SQLite write.
+  kind: z.enum(["create_task", "update_task", "delete_task", "update_self"]),
   // The acting agent (recorded as the task creator).
   agentId: z.string().optional(),
   // Owner override for a NON-cybo (user-owned) write: the spawning user's id. When
@@ -292,6 +298,9 @@ export const CyboWriteRequestSchema = z.object({
   // omits it; required on the wire schema or zod strips it before handleCyboWrite
   // sees it. The MCP cyborg7_archive_task tool sets this on an update_task write.
   archivedAt: z.number().nullish(),
+  // update_self — the new full soul to persist (already composed by the MCP tool
+  // from soul/append/traits). Only read on the "update_self" kind.
+  soul: z.string().optional(),
 });
 
 export const CyboWriteResponseSchema = z.object({
@@ -300,6 +309,9 @@ export const CyboWriteResponseSchema = z.object({
   ok: z.boolean(),
   error: z.string().optional(),
   task: z.object({ id: z.string(), title: z.string(), status: z.string() }).optional(),
+  // update_self — the persisted cybo (id + slug + the saved soul), so the daemon
+  // can confirm the round-trip landed.
+  cybo: z.object({ id: z.string(), slug: z.string(), soul: z.string() }).optional(),
 });
 
 // Agent-generated image upload over the relay (daemon → relay → S3). An agent

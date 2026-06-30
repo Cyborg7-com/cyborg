@@ -46,7 +46,11 @@ import { type TaskLogEvent, taskEventBroadcast } from "./task-event-log.js";
 import { type AuditEvent, auditEventBroadcast } from "./audit-event-log.js";
 import { createAuditSink } from "./audit-sink.js";
 import { getActionHandler, verifyAction } from "./signed-actions.js";
-import { mergePgCybosIntoRoster, resolveWorkspaceCybo } from "./cybo-roster-merge.js";
+import {
+  mergePgCybosIntoRoster,
+  pgStoredCyboToFetchResponse,
+  resolveWorkspaceCybo,
+} from "./cybo-roster-merge.js";
 import { applyHomeDaemonRouting } from "./cybo-home-daemon-routing.js";
 import {
   finalizeTerminalDirectory,
@@ -1410,6 +1414,36 @@ async function main() {
     });
   }
 
+  // ─── Single-cybo fetch PG fallback ─────────────────────
+  // `cyborg:fetch_cybo` (the editor's lazy soul-load) is a DAEMON_FORWARD with
+  // NO PG fallback: the answering daemon resolves by id/slug against ITS local
+  // SQLite + disk cybos, so a cloud (PG-only) workspace cybo NOT present on that
+  // daemon comes back `cybo: null` → "The daemon answered but didn't return this
+  // cybo", and the editor locks saving. Stash the requested {workspaceId, cyboId}
+  // by requestId; when the daemon's `fetch_cybo_response` flows back null, enrich
+  // it from PG (tolerant id resolution, same as the mutation handlers) so the
+  // soul still loads. Mirrors the fetch_cybos roster PG-merge.
+  interface PendingCyboFetch {
+    workspaceId: string;
+    cyboId: string;
+    timer: ReturnType<typeof setTimeout>;
+  }
+  const pendingCyboFetches = new Map<string, PendingCyboFetch>();
+
+  function stashCyboFetch(workspaceId: string, inner: Record<string, unknown>): void {
+    const requestId = inner.requestId as string | undefined;
+    const cyboId = inner.cyboId as string | undefined;
+    if (!requestId || !cyboId) return;
+    const existing = pendingCyboFetches.get(requestId);
+    if (existing) clearTimeout(existing.timer);
+    pendingCyboFetches.set(requestId, {
+      workspaceId,
+      cyboId,
+      // A daemon that never answers must not leak the stash forever.
+      timer: setTimeout(() => pendingCyboFetches.delete(requestId), 60_000),
+    });
+  }
+
   async function mirrorCyboMutationToPg(
     pending: PendingCyboMutation,
     payload: Record<string, unknown> | undefined,
@@ -2248,6 +2282,11 @@ async function main() {
         type === "cyborg:delete_cybo"
       ) {
         stashCyboMutation(type, targetWorkspace, guest.userId, inner);
+      }
+      // Stash single-cybo fetches so the response handler can fall back to PG
+      // when the answering daemon doesn't have this (cloud-only) cybo locally.
+      if (type === "cyborg:fetch_cybo") {
+        stashCyboFetch(targetWorkspace, inner);
       }
       // `let` (not `const`): the spawn_cybo home-daemon routing below may PIN this
       // to the cybo's home daemon (when online + accessible) so the existing
@@ -9793,6 +9832,41 @@ async function main() {
           mirrorCyboMutationToPg(pending, p).catch((err) => {
             relayLog.error({ err, type: pending.type }, "cybo-pg-mirror mirror failed");
           });
+        }
+      }
+      // Single-cybo fetch PG fallback: when the answering daemon couldn't resolve
+      // this cybo locally (`cybo: null`), enrich the response from the workspace
+      // PG `cybos` table so a cloud-only cybo still loads in the editor — soul and
+      // all. Tolerant id resolution (exact id, `local:<slug>`, raw slug) mirrors
+      // the mutation handlers, so a client holding a pre-merge roster id resolves.
+      if (pg && m.type === "cyborg:fetch_cybo_response") {
+        const p = m.payload as Record<string, unknown> | undefined;
+        const requestId = p?.requestId as string | undefined;
+        const pending = requestId ? pendingCyboFetches.get(requestId) : undefined;
+        if (requestId && pending) {
+          pendingCyboFetches.delete(requestId);
+          clearTimeout(pending.timer);
+        }
+        // Only fall back when the daemon returned nothing; a daemon that DID
+        // resolve the cybo owns the (possibly fresher, disk-backed) soul.
+        if (p && p.cybo == null && pending) {
+          const pgRef = pg;
+          const { workspaceId: pendWs, cyboId } = pending;
+          void pgRef
+            .getCybos(pendWs)
+            .then((pgCybos) => {
+              const hit = resolveWorkspaceCybo(pgCybos, cyboId);
+              if (hit) {
+                // Enrich the response from PG (soul + all), so a cloud-only cybo
+                // still loads in the editor even when the answering daemon never
+                // had it locally.
+                p.cybo = pgStoredCyboToFetchResponse(hit);
+              }
+              broadcastToGuests(workspaceId, message, fromDaemonId, seq);
+              return undefined;
+            })
+            .catch(() => broadcastToGuests(workspaceId, message, fromDaemonId, seq));
+          return;
         }
       }
       // Workspace-level cybo roster: the daemon's fetch_cybos response only

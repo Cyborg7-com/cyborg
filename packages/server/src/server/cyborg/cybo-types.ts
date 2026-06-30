@@ -100,6 +100,13 @@ export const PLATFORM_PERMISSIONS = [
   "create_task",
   "manage_channels",
   "spawn_agents",
+  // Self-management: lets a cybo edit its OWN soul/personality via the
+  // cyborg7_update_my_personality MCP tool (scoped strictly to ctx.cyboId — a
+  // cybo can never touch another cybo). Gated like every other write grant: when
+  // a cybo carries a non-empty grants list the tool is registered only if this is
+  // present; an empty list stays fail-open (legacy default), so this is opt-in via
+  // the role presets / Customize, not granted to everyone by accident.
+  "manage_self",
   // DEPRECATED (Phase 2 / #270): the channel read/interact tools
   // (cyborg7_read_channel / _react / _search) are now gated by CHANNEL MEMBERSHIP,
   // not by these grants — a cybo added to a channel can read/react/respond there.

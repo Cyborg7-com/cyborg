@@ -21,6 +21,8 @@
 //      exact id, else a `local:<slug>` id matches by slug, else the raw value
 //      matches a slug. Covers clients holding a pre-fix roster.
 
+import type { StoredCybo } from "./cybo-types.js";
+
 export interface PgCyboRow {
   id: string;
   slug: string;
@@ -139,4 +141,51 @@ export function resolveWorkspaceCybo<T extends { id: string; slug: string }>(
   if (byId) return byId;
   const slug = cyboId.startsWith("local:") ? cyboId.slice("local:".length) : cyboId;
   return cybos.find((c) => c.slug === slug);
+}
+
+// Map a PG (workspace) StoredCybo into the `cyborg:fetch_cybo_response` wire
+// shape — INCLUDING the full soul, which the roster (fetch_cybos) omits. Used by
+// the relay's single-cybo PG fallback: when the answering daemon doesn't have a
+// (cloud-only) cybo locally and returns `cybo: null`, the relay enriches the
+// response from PG so the personality editor still loads the soul. Permissions
+// and mcpServers are JSON-text columns parsed defensively (a malformed value
+// degrades to []/undefined rather than throwing or polluting the typed payload).
+export function pgStoredCyboToFetchResponse(c: StoredCybo): Record<string, unknown> {
+  let platformPermissions: string[] = [];
+  try {
+    const parsed: unknown = c.platform_permissions ? JSON.parse(c.platform_permissions) : null;
+    if (Array.isArray(parsed)) {
+      platformPermissions = parsed.filter((v): v is string => typeof v === "string");
+    }
+  } catch {
+    platformPermissions = [];
+  }
+  let mcpServers: Record<string, unknown> | undefined;
+  try {
+    mcpServers = c.mcp_servers ? (JSON.parse(c.mcp_servers) as Record<string, unknown>) : undefined;
+  } catch {
+    mcpServers = undefined;
+  }
+  return {
+    id: c.id,
+    slug: c.slug,
+    name: c.name,
+    description: c.description,
+    avatar: c.avatar,
+    role: c.role,
+    provider: c.provider,
+    model: c.model,
+    soul: c.soul,
+    mcpServers,
+    llmAuthMode: c.llm_auth_mode,
+    behaviorMode: c.behavior_mode,
+    homeDaemonId: c.home_daemon_id,
+    autonomyLevel: c.autonomy_level,
+    monthlySpendCap: c.monthly_spend_cap,
+    platformPermissions,
+    // A PG workspace cybo is never a disk-local cybo.
+    isLocal: false,
+    isDefault: c.is_default === 1,
+    createdAt: c.created_at,
+  };
 }

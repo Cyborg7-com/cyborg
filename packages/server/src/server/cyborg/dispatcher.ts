@@ -6477,16 +6477,45 @@ export class CyborgDispatcher {
     return undefined;
   }
 
-  // Single cybo WITH soul (the editor's lazy-load). DB row first, then a local
-  // (disk) cybo by id/slug — soul is read off disk by resolveLocalCybo.
+  // Single cybo WITH soul (the editor's lazy-load). TOLERANT resolution: exact
+  // id, then a workspace cybo by slug (covers a `local:<slug>` or bare-slug id
+  // the client holds from a pre-merge roster), then a local (disk) cybo by
+  // id/slug — soul is read off disk by resolveLocalCybo. A STRICT id lookup
+  // returned `cybo: null` whenever the roster id didn't match the answering
+  // daemon's local id (PG `cybo_…` vs `local:<slug>` vs not-on-this-daemon),
+  // which surfaced as "The daemon answered but didn't return this cybo" in the
+  // personality editor. Mirrors resolveCybo, the tolerant resolver the mutation
+  // handlers already use. (PG-only cybos absent on this daemon are enriched by
+  // the relay's fetch_cybo_response PG fallback.)
   private async handleFetchCybo(
     msg: CyborgMsg,
     _auth: CyborgAuthContext,
     emit: EmitFn,
   ): Promise<void> {
     const parsed = CyborgFetchCyboRequestSchema.parse(msg);
-    const dbCybo = this.storage.getCybo(parsed.cyboId);
-    const cybo = dbCybo ?? (await resolveLocalCybo(parsed.cyboId));
+    // TOLERANT resolution (mirrors resolveWorkspaceCybo, used by the mutation
+    // handlers): exact id, then a workspace cybo by slug — STRIPPING a `local:`
+    // prefix first so a `local:<slug>` roster id resolves to the `cybo_…` row —
+    // then a disk cybo by id/slug. The strict id lookup returned `cybo: null`
+    // whenever the roster id didn't match the answering daemon's local id (PG
+    // `cybo_…` vs `local:<slug>` vs not-on-this-daemon).
+    const lookupSlug = parsed.cyboId.startsWith("local:")
+      ? parsed.cyboId.slice("local:".length)
+      : parsed.cyboId;
+    const cybo =
+      this.storage.getCybo(parsed.cyboId) ??
+      this.storage.getCyboBySlug(parsed.workspaceId, lookupSlug) ??
+      // intentional: a disk-read failure = "no local cybo by this id"; the editor then shows not-found (or the relay PG fallback fills it in)
+      (await resolveLocalCybo(parsed.cyboId).catch(() => undefined));
+    // isLocal = a disk (`local:`) cybo with no workspace-DB row. A workspace cybo
+    // resolves out of storage (by id or slug); a disk cybo only resolves via the
+    // local fallback and carries a `local:` id.
+    const isDbCybo =
+      !!cybo &&
+      !cybo.id.startsWith("local:") &&
+      !!(
+        this.storage.getCybo(cybo.id) ?? this.storage.getCyboBySlug(parsed.workspaceId, cybo.slug)
+      );
     emit({
       type: "cyborg:fetch_cybo_response",
       payload: {
@@ -6511,7 +6540,7 @@ export class CyborgDispatcher {
               autonomyLevel: cybo.autonomy_level,
               monthlySpendCap: cybo.monthly_spend_cap,
               platformPermissions: parseStringArray(cybo.platform_permissions),
-              isLocal: !dbCybo,
+              isLocal: !isDbCybo,
               isDefault: cybo.is_default === 1,
               createdAt: cybo.created_at,
             }

@@ -157,7 +157,7 @@ export interface Cyborg7McpDeps {
     // the relay validates that user as a workspace member and records the task
     // under them. A cybo write still sends cyboId (unchanged).
     cyboId?: string;
-    kind: "create_task" | "update_task" | "delete_task";
+    kind: "create_task" | "update_task" | "delete_task" | "update_self";
     agentId?: string;
     // Owner override for a NON-cybo (user-owned) write: the spawning user's id. When
     // present (and cyboId is absent) the relay attributes the task to this user. A
@@ -192,10 +192,15 @@ export interface Cyborg7McpDeps {
     labels?: string[];
     cycleId?: string | null;
     moduleIds?: string[];
+    // update_self — the full soul the cybo wants to persist (already composed from
+    // soul/append/traits by cyborg7_update_my_personality).
+    soul?: string;
   }) => Promise<{
     ok: boolean;
     error?: string;
     task?: { id: string; title: string; status: string };
+    // update_self — the persisted cybo (id + slug + saved soul).
+    cybo?: { id: string; slug: string; soul: string };
   } | null>;
   // Cross-session context (cybo recall) — OWNER-SCOPED. Lets a cybo review the
   // OWNER's OTHER sessions with the SAME cybo (list by recency, read one session's
@@ -272,6 +277,66 @@ export function buildTasksProjectList(
       isInbox: p.chat_project_id == null,
       chatProjectId: p.chat_project_id,
     }));
+}
+
+// The cyborg7_update_my_personality trait vocabulary — mirrors the UI wizard's
+// VOICE_OPTIONS (agent/new/+page.svelte) so a soul written by the tool round-trips
+// into the editor's trait chips (it parses "- <Label> — <sub>" lines).
+export const CYBO_VOICE_TRAITS: Record<string, { label: string; sub: string }> = {
+  warm: { label: "Warm", sub: "a real person on a good day" },
+  brief: { label: "Brief", sub: "says the thing, then stops" },
+  thorough: { label: "Thorough", sub: "shows their work, every time" },
+  direct: { label: "Direct", sub: "no hedging" },
+  playful: { label: "Playful", sub: "a touch of humor" },
+  formal: { label: "Formal", sub: "reads like a memo" },
+};
+
+// Pure soul-composition for cyborg7_update_my_personality. `soul` (full replace)
+// wins as the base, else the current soul; `traits` rewrites the "Personality:"
+// section (stripping any existing one so re-applying never stacks blocks); `append`
+// adds a trailing paragraph last. Kept pure (no IO) so it is directly unit-testable.
+export function composeCyboSoul(
+  currentSoul: string,
+  edit: { soul?: string; append?: string; traits?: string[] },
+): string {
+  let next = edit.soul !== undefined ? edit.soul : currentSoul;
+
+  if (edit.traits !== undefined) {
+    const out: string[] = [];
+    let skipping = false;
+    for (const line of next.split("\n")) {
+      if (line.trim() === "Personality:") {
+        skipping = true;
+        continue;
+      }
+      if (skipping) {
+        // The block is the heading plus contiguous "- " bullet lines.
+        if (line.startsWith("- ") || line.trim() === "") continue;
+        skipping = false;
+      }
+      out.push(line);
+    }
+    const rebuilt = out
+      .join("\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+    const block =
+      edit.traits.length > 0
+        ? [
+            "Personality:",
+            ...edit.traits.map(
+              (t) => `- ${CYBO_VOICE_TRAITS[t].label} — ${CYBO_VOICE_TRAITS[t].sub}`,
+            ),
+          ].join("\n")
+        : "";
+    next = block ? `${rebuilt}\n\n${block}` : rebuilt;
+  }
+
+  if (edit.append !== undefined && edit.append.trim().length > 0) {
+    next = `${next.trimEnd()}\n\n${edit.append.trim()}`;
+  }
+
+  return next.trim();
 }
 
 export function createCyborg7McpServer(deps: Cyborg7McpDeps, ctx: Cyborg7McpContext): McpServer {
@@ -1909,6 +1974,106 @@ export function createCyborg7McpServer(deps: Cyborg7McpDeps, ctx: Cyborg7McpCont
         }
         storage.deleteSchedule(scheduleId);
         return { content: [{ type: "text" as const, text: `Schedule deleted: ${scheduleId}` }] };
+      },
+    );
+  }
+
+  // ── Self-personality editor (cybo-only) ──────────────
+  // Lets a cybo edit its OWN soul/personality — the "openclaw-like" self-edit. It
+  // is STRICTLY scoped to the calling cybo (ctx.cyboId): there is no cyboId param,
+  // so a cybo can NEVER target another. Registered only for a real cybo (a non-cybo
+  // agent has no ctx.cyboId) that holds the `manage_self` grant (or, legacy, an
+  // empty grant list under the fail-open default). Persistence takes the SAME path
+  // as a UI update_cybo: the relay round-trip (cyboWrite "update_self") writes the
+  // SHARED PG `cybos` row, and the daemon-local SQLite is updated too so solo mode
+  // and this daemon's cache stay in sync. Changes apply to the NEXT launch/turn —
+  // an in-flight session keeps the persona it was spawned with (the system prompt
+  // is baked at spawn via buildCyboPrompt), exactly like the editor's "applies to
+  // new launches" behavior.
+  if (ctx.cyboId && allows("manage_self")) {
+    const selfCyboId = ctx.cyboId;
+
+    server.tool(
+      "cyborg7_update_my_personality",
+      "Edit YOUR OWN personality/soul (and nothing else — you can only ever change " +
+        "yourself). Provide at least one of: `soul` (replace your entire soul text), " +
+        "`append` (add a paragraph to the end of your current soul), or `traits` (up to " +
+        "3 personality traits, encoded the same way the workspace UI does). Changes are " +
+        "saved to the workspace and take effect on your NEXT launch — your current " +
+        "conversation keeps the personality it started with.",
+      {
+        soul: z
+          .string()
+          .optional()
+          .describe("Replace your ENTIRE soul/personality text with this."),
+        append: z
+          .string()
+          .optional()
+          .describe("Append this paragraph to the end of your current soul."),
+        traits: z
+          .array(z.enum(["warm", "brief", "thorough", "direct", "playful", "formal"]))
+          .max(3)
+          .optional()
+          .describe(
+            "Up to 3 personality traits to (re)apply. Rewrites the 'Personality:' " +
+              "section of your soul; other text is preserved.",
+          ),
+      },
+      async ({ soul, append, traits }) => {
+        if (soul === undefined && append === undefined && traits === undefined) {
+          return mcpText(
+            "Error: provide at least one of soul, append, or traits to change your personality.",
+          );
+        }
+        // Read the cybo's CURRENT soul (daemon-local SQLite) as the base for
+        // append/traits edits. A self-edit can only run for a cybo this daemon
+        // spawned, so the row is local.
+        const current = storage.getCybo(selfCyboId);
+        if (!current) {
+          return mcpText("Error: couldn't load your own cybo record to edit.");
+        }
+
+        // Build the next soul (pure helper, unit-tested) and refuse an empty result.
+        const next = composeCyboSoul(current.soul, { soul, append, traits });
+        if (next.length === 0) {
+          return mcpText("Error: the resulting soul would be empty — nothing was saved.");
+        }
+
+        // Persist via the SAME path as update_cybo: relay round-trip → shared PG
+        // (cloud), and the daemon-local SQLite (solo + this daemon's cache). The
+        // relay write is the authoritative one for a cloud workspace; the local
+        // write keeps a PG-less / solo daemon consistent and updates the cache so
+        // a subsequent fetch_cybo here reflects the change immediately.
+        let persisted = false;
+        if (cyboWrite) {
+          const res = await cyboWrite({
+            workspaceId: ctx.workspaceId,
+            cyboId: selfCyboId,
+            kind: "update_self",
+            agentId: ctx.agentId,
+            soul: next,
+          });
+          // res === null: old relay / disconnected → fall through to the local
+          // write (today's behavior for the task path). res.ok === false: the
+          // relay rejected it (e.g. missing grant) — surface that, do NOT silently
+          // local-write a change the workspace refused.
+          if (res && !res.ok) {
+            return mcpText(`Error: couldn't save your personality — ${res.error ?? "rejected"}.`);
+          }
+          if (res?.ok) persisted = true;
+        }
+        // Local SQLite (idempotent with the PG write under the same id). Returns
+        // undefined when the row isn't on this daemon — the relay write above may
+        // already have persisted it, so only the combined "neither path wrote"
+        // case below is an error.
+        if (storage.updateCybo(selfCyboId, { soul: next })) persisted = true;
+        if (!persisted) {
+          return mcpText("Error: couldn't save your personality (no writable store reachable).");
+        }
+        return mcpText(
+          "Saved. Your updated personality takes effect the next time you launch — " +
+            "this conversation keeps the personality it started with.",
+        );
       },
     );
   }
