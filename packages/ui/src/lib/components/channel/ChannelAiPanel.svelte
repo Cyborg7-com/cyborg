@@ -18,6 +18,7 @@
     applyChannelAutoTasks,
   } from "$lib/state/app.svelte.js";
   import type { Channel } from "$lib/core/types.js";
+  import { cn } from "$lib/utils.js";
 
   let { channel }: { channel: Channel } = $props();
 
@@ -118,13 +119,35 @@
     }
   }
 
-  // ── Workspace-level (read-only) ──
-  const wsDaemonLabel = $derived(
-    daemonState.defaultSlashDaemonId
-      ? (daemonState.byId(daemonState.defaultSlashDaemonId)?.label ?? "Unknown daemon")
-      : null,
-  );
-  const wsModel = $derived(daemonState.slashCommandModel?.model ?? null);
+  // ── Effective AI for this channel (read-only) ──
+  // The DAEMON is always the workspace sponsor daemon — channels have no daemon
+  // override, only a model override — so it's always inherited from the workspace.
+  type EffectiveDaemon =
+    | { kind: "none" }
+    | { kind: "sponsor"; label: string; online: boolean };
+  const effectiveDaemon = $derived.by<EffectiveDaemon>(() => {
+    const id = daemonState.defaultSlashDaemonId;
+    if (!id) return { kind: "none" };
+    return {
+      kind: "sponsor",
+      label: daemonState.byId(id)?.label ?? "Unknown daemon",
+      online: daemonState.isOnline(id),
+    };
+  });
+
+  // The MODEL is the channel override when set, else the workspace default, else
+  // auto-resolved. `source` distinguishes a per-channel custom pick from the
+  // inherited workspace default so the summary never hides which one wins.
+  type EffectiveModel =
+    | { kind: "pinned"; source: "custom" | "inherited"; provider: string; model: string }
+    | { kind: "auto" };
+  const effectiveModel = $derived.by<EffectiveModel>(() => {
+    const override = channel.slashCommandModel;
+    if (override) return { kind: "pinned", source: "custom", ...override };
+    const wsModel = daemonState.slashCommandModel;
+    if (wsModel) return { kind: "pinned", source: "inherited", ...wsModel };
+    return { kind: "auto" };
+  });
 </script>
 
 <div class="space-y-6">
@@ -179,16 +202,45 @@
   </section>
 
   <section class="border-t border-edge pt-5">
-    <div class={sectionHeader}>Workspace default</div>
-    {#if wsDaemonLabel}
-      <p class="text-sm text-content">
-        {wsDaemonLabel}
-        <span class="text-content-muted">· {wsModel ?? "auto"}</span>
-      </p>
-      <p class="text-xs text-content-dim">Used whenever this channel has no override of its own.</p>
-    {:else}
-      <p class="text-sm text-content-dim">No workspace slash daemon is set yet.</p>
-    {/if}
+    <div class={sectionHeader}>Effective AI</div>
+    <p class="mb-2 text-xs text-content-dim">
+      What actually runs this channel's slash commands right now.
+    </p>
+
+    <!-- Daemon: always the workspace sponsor (channels have no daemon override) -->
+    <div class="flex items-center gap-2 text-sm">
+      {#if effectiveDaemon.kind === "sponsor"}
+        <span
+          class={cn(
+            "h-2 w-2 shrink-0 rounded-full",
+            effectiveDaemon.online ? "bg-online" : "bg-content-dim",
+          )}
+          aria-hidden="true"
+        ></span>
+        <span class="font-medium text-content">{effectiveDaemon.label}</span>
+        <span class="text-[11px] text-content-muted">
+          sponsor daemon · {effectiveDaemon.online ? "online" : "offline"}
+        </span>
+      {:else}
+        <span class="text-content-dim">No sponsor daemon set yet.</span>
+      {/if}
+    </div>
+
+    <!-- Model: channel custom override → workspace default → auto -->
+    <div class="mt-1.5 flex items-center gap-2 text-sm">
+      {#if effectiveModel.kind === "pinned"}
+        <span class="font-medium text-content">{effectiveModel.model}</span>
+        <span class="text-[11px] text-content-muted">
+          {effectiveModel.provider} · {effectiveModel.source === "custom"
+            ? "custom override (this channel)"
+            : "workspace default"}
+        </span>
+      {:else}
+        <span class="font-medium text-content">Auto</span>
+        <span class="text-[11px] text-content-muted">best available, auto-resolved</span>
+      {/if}
+    </div>
+
     <Button
       class="mt-2"
       variant="outline"

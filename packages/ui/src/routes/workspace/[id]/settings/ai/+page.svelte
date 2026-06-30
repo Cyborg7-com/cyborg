@@ -129,6 +129,25 @@
     selectableDaemons.filter((d) => d.id !== defaultDaemonId && !fallbackDaemonIds.includes(d.id)),
   );
 
+  // ── Sponsor daemon: the highlighted, plain-language view of the chosen default
+  // daemon — the single daemon that powers this workspace's slash-command AI.
+  // Discriminated so the card renders exactly one of "unset" / "a named daemon
+  // with a definite online state". Derived from the LOCAL edit value, so the card
+  // tracks the picker live (before Save).
+  type SponsorView =
+    | { kind: "none" }
+    | { kind: "set"; label: string; online: boolean; location: string | null };
+  const sponsor = $derived.by<SponsorView>(() => {
+    if (!defaultDaemonId) return { kind: "none" };
+    const d = daemons.find((x) => x.id === defaultDaemonId);
+    return {
+      kind: "set",
+      label: d?.label ?? defaultDaemonId,
+      online: daemonState.isOnline(defaultDaemonId),
+      location: d ? daemonState.locationLabel(d.meta) : null,
+    };
+  });
+
   function setDefaultDaemon(id: string): void {
     if (!canEdit || !daemonState.canAccess(id, authState.user?.id)) return;
     defaultDaemonId = id;
@@ -325,6 +344,50 @@
       <p class="mb-3 mt-0.5 text-[12px] text-content-muted">
         Slash commands run on this daemon. There is only one default per workspace.
       </p>
+
+      <!-- Sponsor daemon — the primary daemon powering this workspace's AI -->
+      {#if sponsor.kind === "set"}
+        <div class="mb-3 rounded-lg border border-accent/40 bg-accent/10 p-3">
+          <span class="text-[10px] font-semibold uppercase tracking-wider text-accent">
+            Sponsor daemon
+          </span>
+          <div class="mt-1.5 flex items-center gap-2">
+            <span
+              class={cn(
+                "h-2.5 w-2.5 shrink-0 rounded-full",
+                sponsor.online ? "bg-online" : "bg-content-dim",
+              )}
+              aria-hidden="true"
+            ></span>
+            <span class="min-w-0 flex-1 truncate text-sm font-semibold text-content">
+              {sponsor.label}
+            </span>
+            <span
+              class={cn(
+                "shrink-0 text-[12px] font-medium",
+                sponsor.online ? "text-online" : "text-content-muted",
+              )}
+            >
+              {sponsor.online ? "online" : "offline"}
+            </span>
+          </div>
+          <p class="mt-1.5 text-[11px] text-content-muted">
+            {#if sponsor.location}<span class="text-content-dim">{sponsor.location} · </span>{/if}Powers
+            this workspace's slash-command AI ({"/summarize"}, {"/ask"}, …).
+          </p>
+        </div>
+      {:else}
+        <div class="mb-3 rounded-lg border border-dashed border-edge bg-surface-alt p-3">
+          <span class="text-[10px] font-semibold uppercase tracking-wider text-content-muted">
+            Sponsor daemon
+          </span>
+          <p class="mt-1 text-[13px] text-content">No sponsor daemon set yet.</p>
+          <p class="mt-0.5 text-[11px] text-content-muted">
+            Pick a daemon below to power this workspace's slash-command AI.
+          </p>
+        </div>
+      {/if}
+
       <Select.Root
         type="single"
         value={defaultDaemonId ?? undefined}
