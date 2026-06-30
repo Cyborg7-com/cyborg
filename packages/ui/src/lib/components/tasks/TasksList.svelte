@@ -68,6 +68,7 @@
     listRowPeeked,
     listRowId,
     checkBoxBase,
+    checkBoxChecked,
     priorityDot,
   } from "$lib/tasks/ui.js";
   import {
@@ -76,7 +77,16 @@
     DropdownMenuItem,
     DropdownMenuTrigger,
   } from "$lib/components/ui/dropdown-menu/index.js";
+  import {
+    deselectMany,
+    isSelected,
+    selectMany,
+    selectRange,
+    taskSelection,
+    toggleSelected,
+  } from "$lib/tasks/selection.svelte.js";
   import Trash2Icon from "@lucide/svelte/icons/trash-2";
+  import CheckIcon from "@lucide/svelte/icons/check";
 
   // The Plane create-issue modal's prefill shape, shared with the board's
   // per-column quick-add: a group's "New work item" row passes its group value
@@ -141,6 +151,13 @@
   let pendingIds = $state<Set<string>>(new Set());
   // Collapsed group keys (Plane list-group collapse) — local view state only.
   let collapsed = $state<Set<string>>(new Set());
+
+  // A flat, render-order list of every VISIBLE task id across all groups (a
+  // collapsed group contributes none). It is the coordinate space shift-click
+  // ranges resolve against, so a range spans exactly what the user sees.
+  const orderedIds = $derived(
+    groups.flatMap((g) => (collapsed.has(g.key) ? [] : g.tasks.map((t) => t.id))),
+  );
 
   function toggleCollapse(key: string): void {
     const next = new Set(collapsed);
@@ -306,6 +323,8 @@
        (groupByState always yields one per project state, empty included). -->
   {#each groups as group (group.key)}
     {@const isCollapsed = collapsed.has(group.key)}
+    {@const groupIds = group.tasks.map((t) => t.id)}
+    {@const allSelected = groupIds.length > 0 && groupIds.every((id) => isSelected(id))}
     <section>
         <!-- Plane list group header (headers/group-by-card.tsx): a plain row, NO
              leading chevron — the header row ITSELF toggles collapse on click
@@ -330,6 +349,26 @@
           aria-expanded={!isCollapsed}
           aria-label={isCollapsed ? `Expand ${group.label}` : `Collapse ${group.label}`}
         >
+          <!-- Group SELECT-ALL: toggles every visible task id in this group on/off.
+               stopPropagation so it never toggles the header's collapse. Disabled
+               for an empty group (nothing to select). Reads checkbox · icon · label
+               · count once it sits ahead of the icon/label below. -->
+          <button
+            type="button"
+            role="checkbox"
+            aria-checked={allSelected}
+            aria-label={allSelected ? `Deselect all in ${group.label}` : `Select all in ${group.label}`}
+            disabled={groupIds.length === 0}
+            class={cn(checkBoxBase, allSelected && checkBoxChecked, "disabled:opacity-40")}
+            onclick={(e) => {
+              e.stopPropagation();
+              if (allSelected) deselectMany(groupIds);
+              else selectMany(groupIds);
+            }}
+            onkeydown={(e) => e.stopPropagation()}
+          >
+            {#if allSelected}<CheckIcon class="size-2.5" />{/if}
+          </button>
           {#if groupBy === "assignee"}
             <AssigneeAvatar assignee={group.assigneeId == null ? null : resolveAssignee(group.assigneeId, pools)} size={18} />
             <span class="truncate">{group.label}</span>
@@ -380,6 +419,7 @@
                   class={cn(
                     listRow,
                     "cursor-pointer",
+                    isSelected(task.id) && listRowSelected,
                     taskDetail.openId === task.id && cn(listRowSelected, listRowPeeked),
                     pendingIds.has(task.id) && "opacity-60",
                   )}
@@ -392,20 +432,32 @@
                       <!-- block.tsx:212 — the leading indent + icon group: the
                            hover-revealed multi-select checkbox slot + the KEY. -->
                       <div class={listRowLead}>
-                        <!-- block.tsx:214-224 — the hover-revealed multi-select
-                             checkbox, pinned `absolute left-1`, revealed via
-                             group/list-block. Decorative here (no bulk-select yet);
-                             stopPropagation so toggling never opens the peek. -->
-                        <!-- svelte-ignore a11y_click_events_have_key_events -->
-                        <!-- svelte-ignore a11y_no_static_element_interactions -->
-                        <span
-                          class={listRowSelect}
-                          role="presentation"
-                          onclick={(e) => e.stopPropagation()}
+                        <!-- block.tsx:214-224 — the multi-select checkbox, pinned
+                             `absolute left-1`, hover-revealed via group/list-block
+                             but forced visible once this row IS selected or ANY
+                             selection is active (so the active set stays legible).
+                             stopPropagation so toggling never opens the peek; shift
+                             extends a range from the anchor across the visible rows. -->
+                        <button
+                          type="button"
+                          role="checkbox"
+                          aria-checked={isSelected(task.id)}
+                          aria-label="Select work item"
+                          class={cn(
+                            listRowSelect,
+                            (isSelected(task.id) || taskSelection.ids.size > 0) && "opacity-100",
+                          )}
+                          onclick={(e) => {
+                            e.stopPropagation();
+                            if (e.shiftKey) selectRange(orderedIds, task.id);
+                            else toggleSelected(task.id);
+                          }}
                           onkeydown={(e) => e.stopPropagation()}
                         >
-                          <span class={checkBoxBase} aria-hidden="true"></span>
-                        </span>
+                          <span class={cn(checkBoxBase, isSelected(task.id) && checkBoxChecked)}>
+                            {#if isSelected(task.id)}<CheckIcon class="size-2.5" />{/if}
+                          </span>
+                        </button>
                         <!-- block.tsx:241-253 — the work-item KEY, display-gated,
                              fixed min-width so titles line up (Plane keyMinWidth). -->
                         {#if showId}

@@ -2035,6 +2035,29 @@ export class SlackClient<EventMap extends SlackEventMap = SlackEventMap> {
     return mapRawTask(resp.task);
   }
 
+  // Bulk-edit many tasks in one round-trip (multi-select → e.g. "Move to status").
+  // The relay reads `updates` NESTED (not spread like update_task), applies each
+  // allowed field (status / priority / assigneeId / dueAt / archivedAt) per task it
+  // can see, and echoes back the updated rows (+ a tasks_changed broadcast each).
+  async bulkUpdateTasks(
+    workspaceId: string,
+    taskIds: string[],
+    updates: {
+      status?: string;
+      priority?: TaskPriority | string | null;
+      assigneeId?: string | null;
+      dueAt?: number | null;
+      archivedAt?: number | null;
+    },
+  ): Promise<Task[]> {
+    const resp = await this.request<{ tasks: RawTask[] }>("cyborg:bulk_update_tasks", {
+      workspaceId,
+      taskIds,
+      updates,
+    });
+    return resp.tasks.map(mapRawTask);
+  }
+
   async deleteTask(workspaceId: string, taskId: string): Promise<void> {
     await this.request("cyborg:delete_task", { workspaceId, taskId });
   }

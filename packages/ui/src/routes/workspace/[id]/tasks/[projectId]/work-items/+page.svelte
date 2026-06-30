@@ -47,6 +47,8 @@
   import { INBOX_IDENTIFIER, isInboxProjectId, tasksForProject } from "$lib/tasks/constants.js";
   import { preferencesState } from "$lib/state/preferences.svelte.js";
   import type { TaskState, TaskLabel, Cycle, Module } from "$lib/core/types.js";
+  import BulkActionToolbar from "$lib/components/tasks/BulkActionToolbar.svelte";
+  import { clearSelection } from "$lib/tasks/selection.svelte.js";
 
   const wsId = $derived(page.params.id ?? "");
   const projectId = $derived(page.params.projectId ?? "");
@@ -221,6 +223,15 @@
       return false;
     }
   }
+
+  // Bulk selection is a LIST-layout affordance and is project-scoped: drop it when
+  // the project changes or when the user leaves the list layout, so a stale toolbar
+  // never floats over the board/calendar or carries another project's ids.
+  $effect(() => {
+    void projectId; // tracked dep: re-run (→ cleanup clears) on project change
+    if (layout !== "list") clearSelection();
+    return () => clearSelection();
+  });
 </script>
 
 <div class="flex h-full w-full flex-col overflow-hidden">
@@ -330,6 +341,11 @@
       />
     {/if}
   </div>
+
+  <!-- Sticky-bottom BULK action bar — renders only while ≥1 list row is selected
+       (the selection store gates it). Last child of the root column so it pins to
+       the view foot, below the content area. -->
+  <BulkActionToolbar workspaceId={wsId} />
 </div>
 
 <CreateTaskDialog
