@@ -18,6 +18,7 @@
     DropdownMenuTrigger,
   } from "$lib/components/ui/dropdown-menu/index.js";
   import PriorityIcon from "$lib/components/tasks/PriorityIcon.svelte";
+  import { haptic } from "$lib/mobile/haptics.js";
   import { PRIORITIES } from "$lib/tasks/constants.js";
   import type { Priority } from "$lib/tasks/priority.js";
   import {
@@ -48,8 +49,10 @@
     onChange: (next: Priority) => void;
     // Trigger hint when value is "none" in `row` variant.
     placeholder?: string;
-    // "chip" = compact card affordance; "row" = full-width detail-panel editor.
-    variant?: "chip" | "row";
+    // "chip" = compact card affordance; "row" = full-width detail-panel editor;
+    // "inline" = the option list rendered directly (no trigger/popover) for the
+    // mobile picker sheet.
+    variant?: "chip" | "row" | "inline";
     class?: string;
   } = $props();
 
@@ -71,7 +74,30 @@
   );
 </script>
 
-<DropdownMenu>
+{#if variant === "inline"}
+  <!-- Inline option list for the mobile picker sheet: same rows as the popover
+       (PriorityIcon + label, selected row tinted), no trigger/popover. One tap
+       fires onChange — the sheet persists + closes. -->
+  <div class={cn("flex flex-col", className)}>
+    {#each items as p (p.key)}
+      <button
+        type="button"
+        {disabled}
+        aria-label={`Priority: ${p.label}`}
+        aria-pressed={value === p.key}
+        class={cn(filterOption, "cursor-pointer", value === p.key && menuItemRowActive)}
+        onclick={() => {
+          haptic("selection");
+          onChange(p.key);
+        }}
+      >
+        <PriorityIcon priority={p.key} size={16} />
+        <span class="truncate">{p.label}</span>
+      </button>
+    {/each}
+  </div>
+{:else}
+  <DropdownMenu>
   <DropdownMenuTrigger
     {disabled}
     title={meta.label}
@@ -96,4 +122,5 @@
       </DropdownMenuItem>
     {/each}
   </DropdownMenuContent>
-</DropdownMenu>
+  </DropdownMenu>
+{/if}

@@ -67,7 +67,14 @@
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6" /></svg>
           </button>
         {/if}
-        <span class="justify-self-center truncate text-[17px] font-semibold text-content">{mobileTitle}</span>
+        <!-- Pin the title to the MIDDLE column. The back button is conditional
+             (absent on the Daemons tab — isDaemonTab), so without an explicit
+             column the title auto-places into the empty 48px column 1 and
+             justify-self-center then centers it at the left screen edge, clipping
+             it off-screen ("Daemon" → "aemon"). col-start-2 keeps it centered
+             across the full bar whether or not the chevron renders — matching
+             MobileTasksHeader and every other settings sub-page. -->
+        <span class="col-start-2 justify-self-center truncate text-[17px] font-semibold text-content">{mobileTitle}</span>
       </div>
     {/if}
     <div class="flex-1 min-w-0 overflow-y-auto">

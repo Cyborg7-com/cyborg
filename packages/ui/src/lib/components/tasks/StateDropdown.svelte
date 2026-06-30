@@ -19,6 +19,7 @@
     DropdownMenuTrigger,
   } from "$lib/components/ui/dropdown-menu/index.js";
   import StateGroupIcon from "$lib/components/tasks/StateGroupIcon.svelte";
+  import { haptic } from "$lib/mobile/haptics.js";
   import { STATE_GROUPS, type StateGroupKey } from "$lib/tasks/constants.js";
   import {
     workChipPill,
@@ -60,7 +61,9 @@
     onChange: (next: string) => void;
     // Trigger hint when no state is selected (row variant).
     placeholder?: string;
-    variant?: "chip" | "row";
+    // chip / row = trigger that opens a popover; inline = the grouped option list
+    // rendered directly (no trigger, no popover) for the mobile picker sheet.
+    variant?: "chip" | "row" | "inline";
     // Force the trigger to render the state name alongside the icon even in the
     // `chip` variant — the board card's clean state "pill" (icon + name), matching
     // Plane's block. The `row` variant always shows the name regardless.
@@ -83,7 +86,35 @@
   );
 </script>
 
-<DropdownMenu>
+{#if variant === "inline"}
+  <!-- Inline grouped option list for the mobile picker sheet: the same rows the
+       popover shows (StateGroupIcon + color dot + name, grouped, selected row
+       tinted via menuItemRowActive), but no trigger and no popover wrapper. One
+       tap fires onChange — the sheet persists + closes. -->
+  <div class={cn("flex flex-col", className)}>
+    {#each sections as section (section.group.key)}
+      <span class={menuSectionLabel}>{section.group.label}</span>
+      {#each section.states as state (state.id)}
+        <button
+          type="button"
+          {disabled}
+          aria-label={`State: ${state.name}`}
+          aria-pressed={value === state.id}
+          class={cn(filterOption, "cursor-pointer", value === state.id && menuItemRowActive)}
+          onclick={() => {
+            haptic("selection");
+            onChange(state.id);
+          }}
+        >
+          <StateGroupIcon group={state.group} color={state.color} size={16} />
+          <span class={cn(priorityDot)} style={`background:${state.color}`}></span>
+          <span class="truncate">{state.name}</span>
+        </button>
+      {/each}
+    {/each}
+  </div>
+{:else}
+  <DropdownMenu>
   <DropdownMenuTrigger
     {disabled}
     title={selected?.name ?? placeholder}
@@ -116,4 +147,5 @@
       {/each}
     {/each}
   </DropdownMenuContent>
-</DropdownMenu>
+  </DropdownMenu>
+{/if}

@@ -36,6 +36,7 @@
     checkBoxBase,
     checkBoxChecked,
   } from "$lib/tasks/ui.js";
+  import { haptic } from "$lib/mobile/haptics.js";
   import { cn } from "$lib/utils.js";
 
   // One selectable label. `color` keys the app.css --label-* palette (a
@@ -72,7 +73,10 @@
     onCreate?: (name: string) => void;
     // Trigger hint when no label is selected (row variant).
     placeholder?: string;
-    variant?: "chip" | "row";
+    // chip / row = trigger + popover; inline = the filter + checkbox list rendered
+    // directly (no trigger/popover) for the mobile picker sheet. Multi-select:
+    // tapping a row toggles it and the sheet stays open.
+    variant?: "chip" | "row" | "inline";
     class?: string;
   } = $props();
 
@@ -119,7 +123,72 @@
   }
 </script>
 
-<DropdownMenu>
+{#if variant === "inline"}
+  <!-- Inline filter + checkbox list for the mobile picker sheet: same filter /
+       create-by-name input and checkbox rows as the popover, checked rows tinted,
+       but no trigger/popover. Multi-select: each tap toggles and the sheet stays
+       open. -->
+  <div class={cn("flex flex-col", className)}>
+    <input
+      type="text"
+      bind:value={query}
+      placeholder="Filter or create…"
+      onkeydown={(e) => {
+        if (e.key === "Enter" && canCreate) {
+          e.preventDefault();
+          create();
+        }
+      }}
+      class="mb-1 h-7 w-full rounded-[4px] border border-edge bg-surface-alt px-2 text-[12px] text-content outline-none focus:border-accent"
+    />
+
+    {#each filtered as l (l.id)}
+      {@const checked = value.includes(l.id)}
+      <button
+        type="button"
+        {disabled}
+        aria-label={l.name}
+        aria-pressed={checked}
+        class={cn(filterOption, "cursor-pointer", checked && menuItemRowActive)}
+        onclick={() => {
+          haptic("selection");
+          toggle(l.id);
+        }}
+      >
+        <span class={cn(checkBoxBase, checked && checkBoxChecked)}>
+          {#if checked}
+            <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="m5 12 5 5 9-11" />
+            </svg>
+          {/if}
+        </span>
+        <span class={cn(labelChipDot, dotFill(l.color))}></span>
+        <span class="truncate">{l.name}</span>
+      </button>
+    {/each}
+
+    {#if canCreate}
+      <button
+        type="button"
+        class={cn(filterOption, "cursor-pointer text-accent")}
+        onclick={() => {
+          haptic("selection");
+          create();
+        }}
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M12 5v14M5 12h14" />
+        </svg>
+        <span class="truncate">Create “{query.trim()}”</span>
+      </button>
+    {/if}
+
+    {#if filtered.length === 0 && !canCreate}
+      <span class="block px-2 py-2 text-[12px] text-content-muted">No labels</span>
+    {/if}
+  </div>
+{:else}
+  <DropdownMenu>
   <DropdownMenuTrigger
     {disabled}
     title={selected.length ? selected.map((l) => l.name).join(", ") : placeholder}
@@ -199,4 +268,5 @@
       <span class="block px-2 py-2 text-[12px] text-content-muted">No labels</span>
     {/if}
   </DropdownMenuContent>
-</DropdownMenu>
+  </DropdownMenu>
+{/if}

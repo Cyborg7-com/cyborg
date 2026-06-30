@@ -55,6 +55,15 @@
   import type { TaskState, TaskLabel, Cycle, Module } from "$lib/core/types.js";
   import BulkActionToolbar from "$lib/components/tasks/BulkActionToolbar.svelte";
   import { clearSelection } from "$lib/tasks/selection.svelte.js";
+  // ── Mobile (WS0 foundation): the one isMobile switch + mobile chrome ─────────
+  import { viewportState } from "$lib/state/viewport.svelte.js";
+  import { openCreateTask } from "$lib/tasks/openCreate.svelte.js";
+  import TasksViewSwitcher from "$lib/components/tasks/mobile/TasksViewSwitcher.svelte";
+  import TasksFab from "$lib/components/tasks/mobile/TasksFab.svelte";
+  import TasksListMobile from "$lib/components/tasks/mobile/TasksListMobile.svelte";
+  import MobileTasksBoard from "$lib/components/tasks/mobile/MobileTasksBoard.svelte";
+  import MobileTasksAgenda from "$lib/components/tasks/mobile/MobileTasksAgenda.svelte";
+  import MobileTasksTimeline from "$lib/components/tasks/mobile/MobileTasksTimeline.svelte";
 
   const wsId = $derived(page.params.id ?? "");
   const projectId = $derived(page.params.projectId ?? "");
@@ -79,7 +88,9 @@
   // restored value to the new key, never the previous project's value.
   $effect(() => {
     const saved = readProjectView(wsId, projectId);
-    layout = saved.layout ?? DEFAULT_LAYOUT;
+    // Device-aware default: List on mobile (the designed phone default), the
+    // shared DEFAULT_LAYOUT on desktop — only when nothing is persisted yet.
+    layout = saved.layout ?? (viewportState.isMobile ? "list" : DEFAULT_LAYOUT);
     groupBy = saved.groupBy ?? DEFAULT_GROUP_BY;
   });
 
@@ -258,39 +269,77 @@
     if (layout !== "list") clearSelection();
     return () => clearSelection();
   });
+
+  // ── WS0 foundation hooks ────────────────────────────────────────────────────
+  // The single onGroupByChange callback the mobile surfaces (WS1 Display sheet,
+  // board/list) call to change the page-local groupBy. Desktop changes it via
+  // WorkItemsHeader's bind:groupBy.
+  function onGroupByChange(next: GroupBy): void {
+    groupBy = next;
+  }
+
+  // Mobile create routing: the desktop CreateTaskDialog is gated off on mobile, so
+  // every mobile create entry point (the FAB, the empty-state CTA, a per-group add)
+  // opens the shared CreateTaskSheet via openCreateTask instead — seeded with this
+  // project so the new work item is filed here.
+  function mobileCreate(init?: {
+    status?: string;
+    assigneeId?: string | null;
+    priority?: string;
+    dueAt?: number | null;
+    stateId?: string;
+  }): void {
+    openCreateTask({
+      projectId: projectId || undefined,
+      status: init?.status,
+      stateId: init?.stateId,
+      assigneeId: init?.assigneeId ?? undefined,
+      priority: init?.priority,
+      dueAt: init?.dueAt,
+    });
+  }
 </script>
 
 <div class="flex h-full w-full flex-col overflow-hidden">
-  <!-- Plane work-items header: layout switch + Display popover + Filters toggle +
-       count chip + New work item. Data-driven group-by/filters read the catalog. -->
-  <WorkItemsHeader
-    bind:layout
-    bind:groupBy
-    bind:filtersOpen
-    {filters}
-    count={filteredTasks.length}
-    onnew={() => {
-      taskInitialValues = undefined;
-      taskDialogOpen = true;
-    }}
-  />
-
-  <!-- Workspace-wide task search (title + description, enriched results). Lives in
-       the board header region; matches span ALL projects and a result navigates to
-       that task wherever it lives. Localized to the header — rows are untouched. -->
-  <div class="flex items-center border-b border-edge px-4 py-1.5">
-    <TaskSearch workspaceId={wsId} />
-  </div>
-
-  <!-- Rich filter pill row (shown when the header's Filters toggle is on). -->
-  {#if filtersOpen}
-    <WorkItemFiltersRow
-      bind:filters
-      pools={assigneePools}
-      labels={projectLabels}
-      cycles={projectCycles}
-      modules={projectModules}
+  {#if viewportState.isMobile}
+    <!-- Mobile tier-3: the layout switcher (List · Board · Calendar · Gantt). The
+         tier-1 project header + tier-2 section strip live in the tasks +layout;
+         the Display / Filter sheets (WS1) attach later via onGroupByChange. -->
+    <div class="shrink-0 px-3 py-2">
+      <TasksViewSwitcher bind:layout />
+    </div>
+  {:else}
+    <!-- Plane work-items header: layout switch + Display popover + Filters toggle +
+         count chip + New work item. Data-driven group-by/filters read the catalog. -->
+    <WorkItemsHeader
+      bind:layout
+      bind:groupBy
+      bind:filtersOpen
+      {filters}
+      count={filteredTasks.length}
+      onnew={() => {
+        taskInitialValues = undefined;
+        taskDialogOpen = true;
+      }}
     />
+
+    <!-- Workspace-wide task search (title + description, enriched results). Lives in
+         the board header region; matches span ALL projects and a result navigates to
+         that task wherever it lives. Localized to the header — rows are untouched. -->
+    <div class="flex items-center border-b border-edge px-4 py-1.5">
+      <TaskSearch workspaceId={wsId} />
+    </div>
+
+    <!-- Rich filter pill row (shown when the header's Filters toggle is on). -->
+    {#if filtersOpen}
+      <WorkItemFiltersRow
+        bind:filters
+        pools={assigneePools}
+        labels={projectLabels}
+        cycles={projectCycles}
+        modules={projectModules}
+      />
+    {/if}
   {/if}
 
   <!-- Content area: fills the full width + height of the view. The board/list are
@@ -309,8 +358,12 @@
         description="Work items are the issues, tasks, and bugs your team tracks. Capture work, set priorities and due dates, and move it across your project's workflow."
         ctaLabel="Create work item"
         onCta={() => {
-          taskInitialValues = undefined;
-          taskDialogOpen = true;
+          if (viewportState.isMobile) {
+            mobileCreate();
+          } else {
+            taskInitialValues = undefined;
+            taskDialogOpen = true;
+          }
         }}
       />
     {:else if filteredTasks.length === 0}
@@ -323,6 +376,56 @@
         ctaLabel="Clear filters"
         onCta={() => (filters = emptyFilters())}
       />
+    {:else if viewportState.isMobile}
+      <!-- The ONE mobile layout switch (WS0): board→Board, calendar→Agenda,
+           gantt→Timeline, list/spreadsheet→List (Spreadsheet maps to List on a
+           phone — LOCKED DECISION). groupBy/layout stay page-local. -->
+      {#if layout === "board"}
+        <MobileTasksBoard
+          workspaceId={wsId}
+          tasks={filteredTasks}
+          pools={assigneePools}
+          states={projectStates}
+          labels={projectLabels}
+          cycles={projectCycles}
+          modules={projectModules}
+          {projectIdentifier}
+          {groupBy}
+          oncreate={mobileCreate}
+          onquickcreate={createWorkItem}
+          {onGroupByChange}
+        />
+      {:else if layout === "calendar"}
+        <MobileTasksAgenda
+          workspaceId={wsId}
+          tasks={filteredTasks}
+          pools={assigneePools}
+          oncreate={mobileCreate}
+        />
+      {:else if layout === "gantt"}
+        <MobileTasksTimeline
+          workspaceId={wsId}
+          tasks={filteredTasks}
+          pools={assigneePools}
+          oncreate={mobileCreate}
+        />
+      {:else}
+        <TasksListMobile
+          workspaceId={wsId}
+          tasks={filteredTasks}
+          pools={assigneePools}
+          states={projectStates}
+          labels={projectLabels}
+          cycles={projectCycles}
+          modules={projectModules}
+          {projectIdentifier}
+          {groupBy}
+          oncreate={mobileCreate}
+          onquickcreate={createWorkItem}
+          {onGroupByChange}
+          bind:filters
+        />
+      {/if}
     {:else if layout === "list"}
       <TasksList
         workspaceId={wsId}
@@ -374,12 +477,20 @@
   <BulkActionToolbar workspaceId={wsId} />
 </div>
 
-<CreateTaskDialog
-  bind:open={taskDialogOpen}
-  workspaceId={wsId}
-  initialValues={taskInitialValues}
-  {projectId}
-  states={projectStates}
-/>
-<!-- The in-board "peek" modal for the editable task detail card. -->
-<TaskDetailDialog workspaceId={wsId} />
+{#if viewportState.isMobile}
+  <!-- Mobile create = the shared CreateTaskSheet (mounted once in the tasks
+       +layout) opened via the FAB → openCreateTask. The desktop CreateTaskDialog
+       and the in-board TaskDetailDialog peek are gated OFF on mobile; mobile detail
+       is the pushed /tasks/item/<id> route. -->
+  <TasksFab onclick={() => mobileCreate()} ariaLabel="New work item" />
+{:else}
+  <CreateTaskDialog
+    bind:open={taskDialogOpen}
+    workspaceId={wsId}
+    initialValues={taskInitialValues}
+    {projectId}
+    states={projectStates}
+  />
+  <!-- The in-board "peek" modal for the editable task detail card. -->
+  <TaskDetailDialog workspaceId={wsId} />
+{/if}

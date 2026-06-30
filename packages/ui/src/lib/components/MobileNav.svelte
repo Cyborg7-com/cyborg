@@ -7,7 +7,8 @@
     daemonAccessRequestsState,
     authState,
   } from "$lib/state/app.svelte.js";
-  import { shellConfig } from "$lib/core/plugin.svelte.js";
+  import { shellConfig, RAIL_ICONS } from "$lib/core/plugin.svelte.js";
+  import { preferencesState } from "$lib/state/preferences.svelte.js";
   import { viewportState } from "$lib/state/viewport.svelte.js";
   import { haptic } from "$lib/mobile/haptics";
   import { cn } from "$lib/utils.js";
@@ -67,11 +68,21 @@
   // "Daemons" tab — a server rack (machines). Outline + filled variants.
   const DAEMONS_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="6" rx="1.5"/><rect x="3" y="14" width="18" height="6" rx="1.5"/><line x1="7" y1="7" x2="7.01" y2="7"/><line x1="7" y1="17" x2="7.01" y2="17"/></svg>`;
   const DAEMONS_ICON_FILLED = `<svg viewBox="0 0 24 24" fill="currentColor"><rect x="3" y="4" width="18" height="6" rx="1.5"/><rect x="3" y="14" width="18" height="6" rx="1.5"/></svg>`;
+  // Tasks tab badge — HARD 0 for now (no Tasks unread source wired yet). WARNING:
+  // do NOT fold a real Tasks unread count into teamBadge's
+  // `getWorkspaceTotal − channelBadge` subtraction above — Team would then
+  // under-count by the Tasks unreads. When Tasks gets a real badge, subtract it
+  // from teamBadge too (or source it independently), then update this 0.
+  const tasksBadge = 0;
   const tabs = $derived(
     [
       { ...findItem("chat"), id: "chat", label: "Projects", icon: CHAT_ICON, activeIcon: CHAT_ICON_FILLED, path: "/chats", pathMatch: ["/chats", "/channel", "/threads", "/saved"], badge: channelBadge, position: "nav", order: 1 },
       { id: "dms", label: "Team", icon: SPARKLES_ICON, activeIcon: SPARKLES_ICON, path: "/dms", pathMatch: ["/dms", "/dm/", "/agent", "/agents"], badge: teamBadge, position: "nav", order: 2 },
-      { id: "daemons", label: "Daemons", icon: DAEMONS_ICON, activeIcon: DAEMONS_ICON_FILLED, path: "/settings/daemon", pathMatch: ["/settings/daemon"], badge: daemonRequestBadge, position: "nav", order: 3 },
+      // Tasks (3) — preference-gated on preferencesState.showTasksTab (default ON).
+      ...(preferencesState.showTasksTab
+        ? [{ id: "tasks", label: "Tasks", icon: RAIL_ICONS.tasksOutline, activeIcon: RAIL_ICONS.tasksFilled, path: "/tasks", pathMatch: ["/tasks"], badge: tasksBadge, position: "nav", order: 3 }]
+        : []),
+      { id: "daemons", label: "Daemons", icon: DAEMONS_ICON, activeIcon: DAEMONS_ICON_FILLED, path: "/settings/daemon", pathMatch: ["/settings/daemon"], badge: daemonRequestBadge, position: "nav", order: 4 },
     ].filter((i): i is NonNullable<typeof i> => Boolean(i?.icon)),
   );
 
@@ -133,7 +144,7 @@
             {/key}
           {/if}
         </span>
-        <span class="text-[10.5px] font-medium leading-none">{item.label}</span>
+        <span class="whitespace-nowrap text-[10.5px] font-medium leading-none">{item.label}</span>
       </button>
     {/each}
   </div>

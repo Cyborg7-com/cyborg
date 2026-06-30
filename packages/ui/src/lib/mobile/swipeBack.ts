@@ -34,6 +34,7 @@ import { threadState, closeThread } from "$lib/state/app.svelte";
 import { haptic } from "./haptics";
 import { setNativeVisibility } from "./nativeComposer";
 import { peekNavOrigin } from "./navOrigin";
+import { isBoardDragging } from "./touchBoardDnd";
 import {
   bumpCaptureCount,
   getLastPageNode,
@@ -273,6 +274,37 @@ function sectionBackTarget(section: string, rest: string[], wsRoot: string, qs: 
     // when that points inside this workspace, falling back to the workspace root.
     case "terminal":
       return rest.length >= 1 ? conversationBackTarget(wsRoot + qs, wsRoot) : "";
+
+    // Tasks is a project-scoped module with a 3-tier IA, so its hierarchical back
+    // is explicit (C2/C3): the bottom-nav /tasks root stays TERMINAL, and we NEVER
+    // hand back ${wsRoot}/tasks for a project-re-entering route (the /tasks index
+    // redirects into a default project's work-items, so that would ping-pong).
+    case "tasks": {
+      // /workspace/<ws>/tasks — the bottom-nav root. Terminal (like chats/dms).
+      if (rest.length === 0) return "";
+      // Task detail (/tasks/item/<taskId>) → the project work-items list it was
+      // opened from. The URL carries no projectId, so prefer the recorded nav
+      // origin (set by openTaskDetailMobileAware at the list→detail entry); with no
+      // origin (deep-link / reload) fall back to history.back ("") rather than the
+      // ping-ponging index.
+      if (rest[0] === "item") {
+        const origin = peekNavOrigin();
+        return origin && origin.startsWith(wsRoot) ? origin : "";
+      }
+      // Drill-down detail inside a project pops to its SECTION list:
+      //   /tasks/<projectId>/pages/<pageId>     → /tasks/<projectId>/pages
+      //   /tasks/<projectId>/cycles/<cycleId>   → /tasks/<projectId>/cycles
+      //   /tasks/<projectId>/modules/<moduleId> → /tasks/<projectId>/modules
+      if (rest.length >= 3 && (rest[1] === "pages" || rest[1] === "cycles" || rest[1] === "modules")) {
+        return `${wsRoot}/tasks/${rest[0]}/${rest[1]}${qs}`;
+      }
+      // A project SECTION ROOT (/tasks/<projectId>/work-items|pages|cycles|modules|
+      // overview|views — no further detail segment) is the tier-2 landing reached
+      // via the section strip; its header hides the back chevron and it has no
+      // in-tasks hierarchical parent. Terminal (never ${wsRoot}/tasks): the gesture
+      // falls back to history.back, not the index redirect.
+      return "";
+    }
 
     // NOTE: `chats` and `dms` are deliberately NOT special-cased. They are root
     // tabs (defined in MobileNav.svelte) and must be TERMINAL for the gesture —
@@ -759,6 +791,13 @@ export function installSwipeBack(): () => void {
   const onTouchStart = (e: TouchEvent) => {
     swipeActive = false;
     const t = e.touches[0];
+    // A board card drag owns the pointer — suppress edge-back so a long-press
+    // pickup that begins near the left edge is never mistaken for a back swipe.
+    // (WS2 drives touchBoardDnd.setBoardDragging; WS0 wires the honor here.)
+    if (isBoardDragging()) {
+      edgeStartX = -1;
+      return;
+    }
     if (!isOnDetailPage()) {
       edgeStartX = -1;
       return;

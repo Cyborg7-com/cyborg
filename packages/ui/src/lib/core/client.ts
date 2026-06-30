@@ -2091,6 +2091,29 @@ export class SlackClient<EventMap extends SlackEventMap = SlackEventMap> {
     await this.request("cyborg:delete_task", { workspaceId, taskId });
   }
 
+  // Drag-reorder a task within its (workspace) lane. The caller names the
+  // neighbours the task was dropped BETWEEN — `beforeId` is its new upper
+  // neighbour (the task it now sits AFTER) and `afterId` its lower neighbour
+  // (the task it now sits BEFORE); either, both, or neither (lane edges) may be
+  // set. The relay computes a fractional sort_order between them
+  // (computeReorderSort / task-ordering.ts) and broadcasts cyborg:tasks_changed.
+  // Mirrors the create/update task RPC shape exactly (request → response payload
+  // { task } → mapRawTask). No client path bypasses workspace/visibility: the
+  // relay re-asserts the caller's role + project visibility before mutating.
+  async reorderTask(
+    workspaceId: string,
+    taskId: string,
+    anchors: { beforeId?: string; afterId?: string },
+  ): Promise<Task> {
+    const resp = await this.request<{ task: RawTask }>("cyborg:reorder_task", {
+      workspaceId,
+      taskId,
+      beforeId: anchors.beforeId,
+      afterId: anchors.afterId,
+    });
+    return mapRawTask(resp.task);
+  }
+
   async fetchTasks(
     workspaceId: string,
     opts?: { status?: string; assigneeId?: string },

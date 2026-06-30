@@ -58,6 +58,19 @@
   import BetweenHorizontalEndIcon from "@lucide/svelte/icons/between-horizontal-end";
   import Trash2Icon from "@lucide/svelte/icons/trash-2";
   import type { Component } from "svelte";
+  // ── Mobile (WS5) — keyboard-tracking bottom toolbar + bottom-sheet slash/table
+  // menus, gated on viewportState.isMobile. The desktop render paths below are
+  // untouched (branched, not replaced). ───────────────────────────────────────
+  import { viewportState } from "$lib/state/viewport.svelte.js";
+  import MobileSheet from "$lib/components/MobileSheet.svelte";
+  import { subscribe as subscribeKeyboard } from "$lib/mobile/keyboard-state.js";
+  import BoldIcon from "@lucide/svelte/icons/bold";
+  import ItalicIcon from "@lucide/svelte/icons/italic";
+  import UnderlineIcon from "@lucide/svelte/icons/underline";
+  import StrikethroughIcon from "@lucide/svelte/icons/strikethrough";
+  import LinkIcon from "@lucide/svelte/icons/link";
+  import PlusIcon from "@lucide/svelte/icons/plus";
+  import CheckIcon from "@lucide/svelte/icons/check";
 
   let { wsId, projectId, pageId }: { wsId: string; projectId: string; pageId: string } =
     $props();
@@ -85,6 +98,32 @@
   let slashLeft = $state(0);
   // The suggestion's `command` callback for the open menu (runs the picked item).
   let slashSelect: ((item: SlashItem) => void) | null = null;
+
+  // ── Mobile editor state ─────────────────────────────────────────────────────
+  // The bottom toolbar shows while the editor is being edited (focused) or the
+  // soft keyboard is up — the editor flex-column is bounded by the keyboard-shrunk
+  // --app-vh shell, so a shrink-0 toolbar at its foot rides ABOVE the keyboard and
+  // tracks it. keyboard-state.ts is the HMR-safe keyboard signal (Caveat #8).
+  let keyboardOpen = $state(false);
+  let editorFocused = $state(false);
+  $effect(() => subscribeKeyboard((v) => (keyboardOpen = v)));
+  const showMobileToolbar = $derived(
+    viewportState.isMobile && (keyboardOpen || editorFocused),
+  );
+  // Advanced tools (block type / align / insert / table ops) live behind the "+"
+  // overflow; the slash + table menus are bottom sheets, never caret popovers.
+  let moreSheetOpen = $state(false);
+  let tableSheetOpen = $state(false);
+
+  // Run an editor command from a toolbar button WITHOUT stealing focus from the
+  // editor — preventDefault on pointerdown keeps the caret + soft keyboard in
+  // place (so the bottom toolbar doesn't blink away mid-tap), then the command's
+  // own .focus() applies it at the live selection. Mirrors the slash menu's
+  // onmousedown-preventDefault trick.
+  function toolPress(e: PointerEvent, run: () => void): void {
+    e.preventDefault();
+    run();
+  }
 
   const SLASH_ICONS: Record<string, Component> = {
     text: TypeIcon,
@@ -400,6 +439,14 @@
         onTransaction: () => {
           selVersion++;
         },
+        // Drives the mobile bottom toolbar's keyboard-tracking visibility. Toolbar
+        // buttons preventDefault on pointerdown, so tapping one never blurs here.
+        onFocus: () => {
+          editorFocused = true;
+        },
+        onBlur: () => {
+          editorFocused = false;
+        },
         editorProps: {
           attributes: {
             class: "tiptap-doc focus:outline-none",
@@ -525,10 +572,20 @@
   const toolBtnActive = "bg-dropdown-selected text-content";
   const tableBtn =
     "grid size-7 place-items-center rounded text-content-dim transition-colors hover:bg-hover-gray hover:text-content";
+  // Mobile toolbar buttons: 40px touch targets, active-tint feedback (no hover on
+  // touch). Active mark uses the same dropdown-selected token as the desktop bar.
+  const mToolBtn =
+    "grid size-10 shrink-0 place-items-center rounded-[var(--radius-md)] text-content-dim transition-colors active:bg-hover-gray focus-ring";
+  const mToolBtnActive = "bg-dropdown-selected text-content";
+  // A full-width row in the advanced "+" sheet (color added per row).
+  const mSheetRow =
+    "touch-target-row pressable-row flex w-full items-center gap-3 rounded-[var(--radius-md)] px-2 py-3 text-left";
 </script>
 
 <div class="flex h-full w-full flex-col overflow-hidden bg-surface">
-  <!-- Toolbar -->
+  <!-- Toolbar (desktop). On mobile the formatting toolbar is pinned to the bottom
+       above the keyboard; the header back chevron is owned by MobileTasksHeader. -->
+  {#if !viewportState.isMobile}
   <div class="flex h-11 shrink-0 items-center gap-1 overflow-x-auto border-b border-edge px-3">
     <button
       type="button"
@@ -624,6 +681,14 @@
       {saveState === "saving" ? "Saving…" : saveState === "saved" ? "Saved" : ""}
     </span>
   </div>
+  {:else}
+  <!-- Mobile top strip: just the autosave indicator (back lives in the header). -->
+  <div class="material-bar hairline-b flex h-8 shrink-0 items-center justify-end px-3">
+    <span class="text-xs text-content-muted">
+      {saveState === "saving" ? "Saving…" : saveState === "saved" ? "Saved" : ""}
+    </span>
+  </div>
+  {/if}
 
   <!-- Document -->
   <div class="min-h-0 flex-1 overflow-y-auto">
@@ -718,6 +783,82 @@
       {/if}
     </div>
   </div>
+
+  <!-- Mobile primary toolbar: pinned to the foot of the editor column, which is
+       bounded by the keyboard-shrunk --app-vh shell, so it rides ABOVE the
+       keyboard. Buttons preventDefault (toolPress) so the caret never blurs.
+       Advanced tools live behind the "+" overflow sheet. -->
+  {#if showMobileToolbar && editor}
+    <div class="material-bar hairline-t flex shrink-0 items-center gap-1 px-2 py-1.5">
+      <div class="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
+        <button
+          type="button"
+          class={cn(mToolBtn, active.bold && mToolBtnActive)}
+          onpointerdown={(e) => toolPress(e, () => editor?.chain().focus().toggleBold().run())}
+          aria-label="Bold"
+          aria-pressed={active.bold}
+        >
+          <BoldIcon class="size-5" />
+        </button>
+        <button
+          type="button"
+          class={cn(mToolBtn, active.italic && mToolBtnActive)}
+          onpointerdown={(e) => toolPress(e, () => editor?.chain().focus().toggleItalic().run())}
+          aria-label="Italic"
+          aria-pressed={active.italic}
+        >
+          <ItalicIcon class="size-5" />
+        </button>
+        <button
+          type="button"
+          class={cn(mToolBtn, active.underline && mToolBtnActive)}
+          onpointerdown={(e) => toolPress(e, () => editor?.chain().focus().toggleUnderline().run())}
+          aria-label="Underline"
+          aria-pressed={active.underline}
+        >
+          <UnderlineIcon class="size-5" />
+        </button>
+        <button
+          type="button"
+          class={cn(mToolBtn, active.bullet && mToolBtnActive)}
+          onpointerdown={(e) => toolPress(e, () => editor?.chain().focus().toggleBulletList().run())}
+          aria-label="Bulleted list"
+          aria-pressed={active.bullet}
+        >
+          <ListIcon class="size-5" />
+        </button>
+        <button
+          type="button"
+          class={cn(mToolBtn, active.ordered && mToolBtnActive)}
+          onpointerdown={(e) => toolPress(e, () => editor?.chain().focus().toggleOrderedList().run())}
+          aria-label="Numbered list"
+          aria-pressed={active.ordered}
+        >
+          <ListOrderedIcon class="size-5" />
+        </button>
+        <button
+          type="button"
+          class={cn(mToolBtn, active.link && mToolBtnActive)}
+          onpointerdown={(e) => toolPress(e, setLink)}
+          aria-label="Link"
+          aria-pressed={active.link}
+        >
+          <LinkIcon class="size-5" />
+        </button>
+      </div>
+      <span class="mx-0.5 h-6 w-px shrink-0 bg-edge"></span>
+      <!-- Overflow "+": opening the sheet steals DOM focus, so DON'T preventDefault
+           here — we want the keyboard to settle while the sheet is up. -->
+      <button
+        type="button"
+        class={cn(mToolBtn, "text-content")}
+        onclick={() => (moreSheetOpen = true)}
+        aria-label="More formatting"
+      >
+        <PlusIcon class="size-5" />
+      </button>
+    </div>
+  {/if}
 </div>
 
 <!-- Hidden file input for image inserts (toolbar + slash command). -->
@@ -729,8 +870,9 @@
   onchange={(e) => void onImageChosen(e)}
 />
 
-<!-- Slash-command menu (positioned at the "/" caret; tokens only). -->
-{#if slashOpen && slashItems.length > 0}
+<!-- Slash-command menu (DESKTOP — positioned at the "/" caret; tokens only). The
+     mobile form is a bottom sheet below (sits above the keyboard). -->
+{#if !viewportState.isMobile && slashOpen && slashItems.length > 0}
   <div
     class="fixed z-50 max-h-[320px] w-64 overflow-y-auto rounded-lg border border-edge bg-surface-alt p-1 shadow-lg"
     style="top: {slashTop}px; left: {slashLeft}px;"
@@ -769,8 +911,10 @@
   </div>
 {/if}
 
-<!-- Floating table controls (shown when the caret is inside a table; tokens only). -->
-{#if inTable}
+<!-- Floating table controls (DESKTOP — shown when the caret is inside a table).
+     The mobile form is the "Table options" entry in the "+" sheet → a bottom
+     sheet of the same controls. -->
+{#if !viewportState.isMobile && inTable}
   <div
     class="fixed z-40 flex items-center gap-0.5 rounded-md border border-edge bg-surface-alt p-0.5 shadow-lg"
     style="top: {tableTop}px; left: {tableLeft}px; transform: translateY(calc(-100% - 6px));"
@@ -801,6 +945,168 @@
       <Trash2Icon size={15} />
     </button>
   </div>
+{/if}
+
+<!-- ── Mobile slash menu (bottom sheet, sits above the keyboard) ──────────────
+     Rows are NON-FOCUSABLE (role=option, tabindex=-1) + pointerdown-preventDefault
+     so MobileSheet's auto-focus finds nothing to focus and the editor keeps the
+     caret — the TipTap suggestion range stays live, so the picked command applies
+     at the right spot (mirrors the desktop popup's onmousedown-preventDefault). -->
+{#if viewportState.isMobile}
+  <MobileSheet bind:open={slashOpen} title="Insert" ariaLabel="Slash commands" onclose={() => (slashOpen = false)}>
+    <div class="flex flex-col pb-2" role="listbox" aria-label="Slash commands">
+      {#each slashItems as item (item.key)}
+        {@const Icon = SLASH_ICONS[item.iconKey]}
+        <div
+          role="option"
+          tabindex={-1}
+          aria-selected="false"
+          onpointerdown={(e) => {
+            e.preventDefault();
+            runSlash(item);
+          }}
+          class="touch-target-row pressable-row flex w-full cursor-pointer items-center gap-3 rounded-[var(--radius-md)] px-2 py-2.5 text-left"
+        >
+          <span class="grid size-9 shrink-0 place-items-center rounded-[var(--radius-md)] border border-edge bg-surface text-content-dim">
+            <Icon size={18} />
+          </span>
+          <span class="min-w-0 flex-1">
+            <span class="block truncate text-sm font-medium text-content">{item.title}</span>
+            <span class="block truncate text-xs text-content-muted">{item.description}</span>
+          </span>
+        </div>
+      {/each}
+    </div>
+  </MobileSheet>
+
+  <!-- ── Mobile "+" overflow: advanced tools (block type / format / align / insert) -->
+  <MobileSheet bind:open={moreSheetOpen} title="Format" ariaLabel="More formatting">
+    <div class="flex flex-col gap-4 pb-2">
+      <!-- Text style -->
+      <section class="flex flex-col gap-1">
+        <span class="px-1 text-xs font-medium uppercase tracking-wide text-content-muted">Text style</span>
+        <button type="button" class={cn(mSheetRow, "text-content")} onclick={() => { setBlock("p"); moreSheetOpen = false; }}>
+          <TypeIcon class="size-4 shrink-0 text-content-muted" />
+          <span class="min-w-0 flex-1 text-sm font-medium">Text</span>
+          {#if !active.h1 && !active.h2 && !active.h3}<CheckIcon class="size-4 shrink-0 text-accent" />{/if}
+        </button>
+        <button type="button" class={cn(mSheetRow, "text-content")} onclick={() => { setBlock("h1"); moreSheetOpen = false; }}>
+          <Heading1Icon class="size-4 shrink-0 text-content-muted" />
+          <span class="min-w-0 flex-1 text-sm font-medium">Heading 1</span>
+          {#if active.h1}<CheckIcon class="size-4 shrink-0 text-accent" />{/if}
+        </button>
+        <button type="button" class={cn(mSheetRow, "text-content")} onclick={() => { setBlock("h2"); moreSheetOpen = false; }}>
+          <Heading2Icon class="size-4 shrink-0 text-content-muted" />
+          <span class="min-w-0 flex-1 text-sm font-medium">Heading 2</span>
+          {#if active.h2}<CheckIcon class="size-4 shrink-0 text-accent" />{/if}
+        </button>
+        <button type="button" class={cn(mSheetRow, "text-content")} onclick={() => { setBlock("h3"); moreSheetOpen = false; }}>
+          <Heading3Icon class="size-4 shrink-0 text-content-muted" />
+          <span class="min-w-0 flex-1 text-sm font-medium">Heading 3</span>
+          {#if active.h3}<CheckIcon class="size-4 shrink-0 text-accent" />{/if}
+        </button>
+      </section>
+
+      <!-- Formatting -->
+      <section class="flex flex-col gap-1">
+        <span class="px-1 text-xs font-medium uppercase tracking-wide text-content-muted">Format</span>
+        <button type="button" class={cn(mSheetRow, "text-content")} onclick={() => { editor?.chain().focus().toggleStrike().run(); moreSheetOpen = false; }}>
+          <StrikethroughIcon class="size-4 shrink-0 text-content-muted" />
+          <span class="min-w-0 flex-1 text-sm font-medium">Strikethrough</span>
+          {#if active.strike}<CheckIcon class="size-4 shrink-0 text-accent" />{/if}
+        </button>
+        <button type="button" class={cn(mSheetRow, "text-content")} onclick={() => { editor?.chain().focus().toggleBlockquote().run(); moreSheetOpen = false; }}>
+          <TextQuoteIcon class="size-4 shrink-0 text-content-muted" />
+          <span class="min-w-0 flex-1 text-sm font-medium">Quote</span>
+          {#if active.quote}<CheckIcon class="size-4 shrink-0 text-accent" />{/if}
+        </button>
+        <button type="button" class={cn(mSheetRow, "text-content")} onclick={() => { editor?.chain().focus().toggleCodeBlock().run(); moreSheetOpen = false; }}>
+          <CodeIcon class="size-4 shrink-0 text-content-muted" />
+          <span class="min-w-0 flex-1 text-sm font-medium">Code block</span>
+          {#if active.code}<CheckIcon class="size-4 shrink-0 text-accent" />{/if}
+        </button>
+        <button type="button" class={cn(mSheetRow, "text-content")} onclick={() => { editor?.chain().focus().setHorizontalRule().run(); moreSheetOpen = false; }}>
+          <MinusIcon class="size-4 shrink-0 text-content-muted" />
+          <span class="min-w-0 flex-1 text-sm font-medium">Divider</span>
+        </button>
+      </section>
+
+      <!-- Align -->
+      <section class="flex flex-col gap-1">
+        <span class="px-1 text-xs font-medium uppercase tracking-wide text-content-muted">Align</span>
+        <button type="button" class={cn(mSheetRow, "text-content")} onclick={() => { setAlign("left"); moreSheetOpen = false; }}>
+          <AlignLeftIcon class="size-4 shrink-0 text-content-muted" />
+          <span class="min-w-0 flex-1 text-sm font-medium">Left</span>
+          {#if active.alignLeft}<CheckIcon class="size-4 shrink-0 text-accent" />{/if}
+        </button>
+        <button type="button" class={cn(mSheetRow, "text-content")} onclick={() => { setAlign("center"); moreSheetOpen = false; }}>
+          <AlignCenterIcon class="size-4 shrink-0 text-content-muted" />
+          <span class="min-w-0 flex-1 text-sm font-medium">Center</span>
+          {#if active.alignCenter}<CheckIcon class="size-4 shrink-0 text-accent" />{/if}
+        </button>
+        <button type="button" class={cn(mSheetRow, "text-content")} onclick={() => { setAlign("right"); moreSheetOpen = false; }}>
+          <AlignRightIcon class="size-4 shrink-0 text-content-muted" />
+          <span class="min-w-0 flex-1 text-sm font-medium">Right</span>
+          {#if active.alignRight}<CheckIcon class="size-4 shrink-0 text-accent" />{/if}
+        </button>
+      </section>
+
+      <!-- Insert -->
+      <section class="flex flex-col gap-1">
+        <span class="px-1 text-xs font-medium uppercase tracking-wide text-content-muted">Insert</span>
+        <button type="button" class={cn(mSheetRow, "text-content")} onclick={() => { moreSheetOpen = false; pickImage(); }}>
+          <ImageIcon class="size-4 shrink-0 text-content-muted" />
+          <span class="min-w-0 flex-1 text-sm font-medium">Image</span>
+        </button>
+        <button type="button" class={cn(mSheetRow, "text-content")} onclick={() => { insertTable(); moreSheetOpen = false; }}>
+          <TableIcon class="size-4 shrink-0 text-content-muted" />
+          <span class="min-w-0 flex-1 text-sm font-medium">Table</span>
+        </button>
+        {#if inTable}
+          <button type="button" class={cn(mSheetRow, "text-content")} onclick={() => { moreSheetOpen = false; tableSheetOpen = true; }}>
+            <TableIcon class="size-4 shrink-0 text-content-muted" />
+            <span class="min-w-0 flex-1 text-sm font-medium">Table options…</span>
+          </button>
+        {/if}
+      </section>
+    </div>
+  </MobileSheet>
+
+  <!-- ── Mobile table controls (bottom sheet form of the desktop floating bar) -->
+  <MobileSheet bind:open={tableSheetOpen} title="Table" ariaLabel="Table options">
+    <div class="flex flex-col pb-2">
+      <button type="button" class={cn(mSheetRow, "text-content")} onclick={addColumnBefore}>
+        <BetweenVerticalStartIcon class="size-4 shrink-0 text-content-muted" />
+        <span class="min-w-0 flex-1 text-sm font-medium">Insert column before</span>
+      </button>
+      <button type="button" class={cn(mSheetRow, "text-content")} onclick={addColumnAfter}>
+        <BetweenVerticalEndIcon class="size-4 shrink-0 text-content-muted" />
+        <span class="min-w-0 flex-1 text-sm font-medium">Insert column after</span>
+      </button>
+      <button type="button" class={cn(mSheetRow, "text-content")} onclick={deleteColumn}>
+        <XIcon class="size-4 shrink-0 text-content-muted" />
+        <span class="min-w-0 flex-1 text-sm font-medium">Delete column</span>
+      </button>
+      <div class="my-1 hairline-t"></div>
+      <button type="button" class={cn(mSheetRow, "text-content")} onclick={addRowBefore}>
+        <BetweenHorizontalStartIcon class="size-4 shrink-0 text-content-muted" />
+        <span class="min-w-0 flex-1 text-sm font-medium">Insert row above</span>
+      </button>
+      <button type="button" class={cn(mSheetRow, "text-content")} onclick={addRowAfter}>
+        <BetweenHorizontalEndIcon class="size-4 shrink-0 text-content-muted" />
+        <span class="min-w-0 flex-1 text-sm font-medium">Insert row below</span>
+      </button>
+      <button type="button" class={cn(mSheetRow, "text-content")} onclick={deleteRow}>
+        <XIcon class="size-4 shrink-0 text-content-muted" />
+        <span class="min-w-0 flex-1 text-sm font-medium">Delete row</span>
+      </button>
+      <div class="my-1 hairline-t"></div>
+      <button type="button" class={cn(mSheetRow, "text-error")} onclick={() => { deleteTable(); tableSheetOpen = false; }}>
+        <Trash2Icon class="size-4 shrink-0" />
+        <span class="min-w-0 flex-1 text-sm font-medium">Delete table</span>
+      </button>
+    </div>
+  </MobileSheet>
 {/if}
 
 <style>

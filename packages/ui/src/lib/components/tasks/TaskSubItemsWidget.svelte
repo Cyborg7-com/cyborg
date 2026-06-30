@@ -13,7 +13,7 @@
   // (lib/tasks/ui.ts), so dark + light both resolve with zero raw colors.
   import { client } from "$lib/state/client.js";
   import { workspaceState } from "$lib/state/app.svelte.js";
-  import { openTaskDetail } from "$lib/tasks/detailStore.svelte.js";
+  import { openTaskDetailMobileAware } from "$lib/tasks/openDetail.js";
   import { toast } from "svelte-sonner";
   import Collapsible from "$lib/components/tasks/Collapsible.svelte";
   import StateGroupIcon from "$lib/components/tasks/StateGroupIcon.svelte";
@@ -109,7 +109,7 @@
         {#each subItems as child (child.id)}
           <button
             type="button"
-            onclick={() => openTaskDetail(child.id)}
+            onclick={() => openTaskDetailMobileAware(child.id)}
             class={cn(subItemRow, "w-full text-left")}
           >
             <StateGroupIcon group={stateGroupForStatus(child.status)} size={14} />

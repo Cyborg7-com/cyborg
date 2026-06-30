@@ -381,7 +381,11 @@
               <span class="min-w-0 truncate text-[13px] font-semibold text-content-dim">{agentName}</span>
             </button>
           {/if}
-          <div class={cn("text-[16px] leading-[24px] text-content", grouped ? "mt-2" : "mt-1.5")}>
+          <!-- select-text-ios: re-enable native iOS long-press select-to-copy on the
+               agent's rendered message body (text + markdown + code blocks). The
+               global html.tauri-ios rule disables selection app-wide; this opts the
+               agent prose back in. Scoped to the body only (not chrome/avatars). -->
+          <div class={cn("select-text-ios text-[16px] leading-[24px] text-content", grouped ? "mt-2" : "mt-1.5")}>
             <MessageRenderer text={entry.content} />
           </div>
         {:else}
@@ -426,7 +430,9 @@
                 <span class="role-badge">Agent</span>
               </div>
             {/if}
-            <div class="text-[15px] mt-0.5">
+            <!-- select-text-ios: native iOS select-to-copy on the agent message body
+                 (see the mobile branch above); iOS-gated in app.css, desktop unaffected. -->
+            <div class="select-text-ios text-[15px] mt-0.5">
               <MessageRenderer text={entry.content} />
             </div>
           </div>

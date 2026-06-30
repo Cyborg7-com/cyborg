@@ -1642,6 +1642,19 @@ html.tauri-ios [contenteditable="true"] {
   user-select: text;
 }
 
+/* Agent / cybo SESSION message bodies stay selectable on iOS so the user can
+   long-press → select → Copy the assistant's rendered text + code blocks (the
+   AgentStreamView text bubbles carry .select-text-ios). The descendant `*`
+   re-enables selection on the markdown children (spans, code, pre). More
+   specific than the html.tauri-ios none rule above, so it wins. Channel chat
+   messages keep their long-press "Copy text" action sheet and are NOT marked. */
+html.tauri-ios .select-text-ios,
+html.tauri-ios .select-text-ios * {
+  -webkit-user-select: text;
+  user-select: text;
+  -webkit-touch-callout: default;
+}
+
 html.tauri-ios,
 html.tauri-ios body {
   position: fixed;

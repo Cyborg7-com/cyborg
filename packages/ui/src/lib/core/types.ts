@@ -342,6 +342,10 @@ export interface Task {
   labelIds?: string[];
   // Module ids this task belongs to (denormalized; empty when none).
   moduleIds?: string[];
+  // Manual board rank within a column (fractional; lower sorts higher). The relay's
+  // reorder_task writes it and mapTask emits it on every task payload; the mobile
+  // board sorts each column by it. null/absent = unranked (sorts last). Additive.
+  sortOrder?: number | null;
   // Per-task scheduling — a READ-ONLY summary of the schedule bound to this task
   // (its cron/timezone/enabled/nextRunAt), denormalized by the relay so the board
   // /detail can render a cadence chip without a second round-trip. null/absent when

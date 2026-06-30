@@ -25,6 +25,26 @@
   import Emoji from "$lib/components/Emoji.svelte";
   import FileTextIcon from "@lucide/svelte/icons/file-text";
   import ChevronRightIcon from "@lucide/svelte/icons/chevron-right";
+  // ── Mobile (WS5) — the trimmed Pages tree, gated on viewportState.isMobile.
+  // The desktop render path below is untouched (branched, not replaced). ───────
+  import { viewportState } from "$lib/state/viewport.svelte.js";
+  import MobileSheet from "$lib/components/MobileSheet.svelte";
+  import PullToRefresh from "$lib/components/PullToRefresh.svelte";
+  import SegmentedControl from "$lib/components/ui/SegmentedControl.svelte";
+  import TasksFab from "$lib/components/tasks/mobile/TasksFab.svelte";
+  import MobilePageRow from "$lib/components/tasks/mobile/MobilePageRow.svelte";
+  import SearchIcon from "@lucide/svelte/icons/search";
+  import ArrowDownUpIcon from "@lucide/svelte/icons/arrow-down-up";
+  import CheckIcon from "@lucide/svelte/icons/check";
+  import ExternalLinkIcon from "@lucide/svelte/icons/external-link";
+  import FilePlusIcon from "@lucide/svelte/icons/file-plus";
+  import CornerUpLeftIcon from "@lucide/svelte/icons/corner-up-left";
+  import MoveIcon from "@lucide/svelte/icons/move";
+  import GlobeIcon from "@lucide/svelte/icons/globe";
+  import LockIcon from "@lucide/svelte/icons/lock";
+  import ArchiveIcon from "@lucide/svelte/icons/archive";
+  import ArchiveRestoreIcon from "@lucide/svelte/icons/archive-restore";
+  import Trash2Icon from "@lucide/svelte/icons/trash-2";
 
   let { wsId, projectId }: { wsId: string; projectId: string } = $props();
 
@@ -281,8 +301,231 @@
   function ownerImage(p: Page): string | null {
     return p.ownedBy ? authState.getMemberImage(p.ownedBy) : null;
   }
+
+  // ── Mobile-only state ───────────────────────────────────────────────────────
+  // The visibility strip (the desktop underline tabs become a segmented strip).
+  const TAB_OPTIONS = TABS.map((t) => ({ value: t.key as string, label: t.label }));
+  // Sort is a bottom sheet on mobile (the desktop dropdown menu has no touch room).
+  let sortSheetOpen = $state(false);
+  // The ⋯ action sheet target (held while the sheet is open; cleared on close).
+  let actionTarget = $state<Page | null>(null);
+  let actionOpen = $state(false);
+
+  function openActions(p: Page): void {
+    actionTarget = p;
+    actionOpen = true;
+  }
+
+  // Close the action sheet, then run the chosen page mutation. Closing first
+  // keeps the sheet from lingering over an addSubpage/openPage navigation.
+  function runAction(fn: () => void | Promise<void>): void {
+    actionOpen = false;
+    actionTarget = null;
+    void fn();
+  }
 </script>
 
+{#if viewportState.isMobile}
+  <!-- ── Mobile Pages tree ───────────────────────────────────────────────────
+       The tier-1 project header + tier-2 section strip (which already shows
+       "Pages") live in the tasks +layout; this renders only the visibility strip
+       + inline search + sort trigger, then the trimmed tree. Add page = the FAB;
+       drag-to-nest is CUT (the ⋯ sheet's "Move to root" covers re-parenting). -->
+  <div class="flex h-full min-h-0 flex-col bg-surface">
+    {#if error}
+      <div class="hairline-b bg-error/10 px-4 py-2 text-sm text-error" role="alert">
+        {error}
+      </div>
+    {/if}
+
+    <div class="flex shrink-0 flex-col gap-2 px-3 py-2">
+      <SegmentedControl
+        options={TAB_OPTIONS}
+        value={tab}
+        onChange={(v) => (tab = v as Tab)}
+        ariaLabel="Page visibility"
+      />
+      <div class="flex items-center gap-2">
+        <div class="relative min-w-0 flex-1">
+          <SearchIcon
+            class="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-content-muted"
+          />
+          <input
+            type="text"
+            bind:value={query}
+            placeholder="Search pages…"
+            class="h-9 w-full rounded-[var(--radius-md)] border border-edge bg-surface-alt pl-8 pr-2 text-sm text-content placeholder:text-content-muted focus:border-edge-light focus:outline-none"
+          />
+        </div>
+        <button
+          type="button"
+          onclick={() => (sortSheetOpen = true)}
+          class="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-[var(--radius-md)] border border-edge px-3 text-sm text-content-dim transition-colors hover:bg-hover-gray hover:text-content focus-ring"
+          aria-label="Sort pages"
+        >
+          <ArrowDownUpIcon class="size-4" />
+          <span class="whitespace-nowrap">{SORT_LABELS[sortKey]}</span>
+        </button>
+      </div>
+    </div>
+
+    <PullToRefresh onRefresh={load} scrollClass="min-h-0 flex-1 overflow-y-auto overscroll-contain">
+      {#if loading}
+        <div class="flex flex-col gap-px px-3 py-3">
+          {#each Array.from({ length: 5 }) as _, i (i)}
+            <div class="flex items-center gap-3 py-3">
+              <span class="size-4 shrink-0 animate-pulse rounded bg-deeper"></span>
+              <span class="h-3.5 w-48 animate-pulse rounded bg-deeper"></span>
+            </div>
+          {/each}
+        </div>
+      {:else if filtered.length === 0}
+        <div class="flex h-full flex-col items-center justify-center gap-3 px-8 text-center">
+          <span class="grid size-12 place-items-center rounded-xl bg-surface-alt">
+            <FileTextIcon class="size-6 text-content-muted" strokeWidth={1.5} />
+          </span>
+          <div>
+            <p class="text-sm font-semibold text-content">
+              {tab === "archived" ? "No archived pages" : "No pages yet"}
+            </p>
+            <p class="mt-1 text-sm text-content-muted">
+              {tab === "archived"
+                ? "Archived pages will show up here."
+                : "Tap + to capture notes, docs, and PRDs."}
+            </p>
+          </div>
+        </div>
+      {:else}
+        <div class="px-2 py-1.5">
+          {#each tree as node (node.page.id)}
+            <MobilePageRow
+              {node}
+              depth={0}
+              {collapsed}
+              onopen={openPage}
+              ontoggle={toggleCollapsed}
+              onactions={openActions}
+            />
+          {/each}
+        </div>
+      {/if}
+    </PullToRefresh>
+  </div>
+
+  <TasksFab onclick={addPage} ariaLabel="Add page" hidden={sortSheetOpen || actionOpen} />
+
+  <!-- Sort sheet (the desktop sort dropdown, phone form). -->
+  <MobileSheet bind:open={sortSheetOpen} title="Sort by" ariaLabel="Sort pages">
+    <div class="flex flex-col pb-2">
+      {#each Object.entries(SORT_LABELS) as [key, label] (key)}
+        <button
+          type="button"
+          onclick={() => {
+            sortKey = key as SortKey;
+            sortSheetOpen = false;
+          }}
+          class="touch-target-row pressable-row flex w-full items-center gap-3 rounded-[var(--radius-md)] px-2 py-3 text-left"
+        >
+          <span class="grid size-5 shrink-0 place-items-center text-accent">
+            {#if key === sortKey}<CheckIcon class="size-4" />{/if}
+          </span>
+          <span class="min-w-0 flex-1 truncate text-sm text-content">{label}</span>
+        </button>
+      {/each}
+    </div>
+  </MobileSheet>
+
+  <!-- ⋯ page action sheet. "Move under…" is a noted fast-follow → disabled here. -->
+  {#if actionTarget}
+    {@const a = actionTarget}
+    <MobileSheet
+      bind:open={actionOpen}
+      ariaLabel="Page actions"
+      onclose={() => (actionTarget = null)}
+    >
+      <div class="pb-1">
+        <div class="px-1 pb-2 text-center">
+          <div class="truncate text-sm font-semibold text-content">{a.title || "Untitled"}</div>
+        </div>
+
+        <button
+          type="button"
+          onclick={() => runAction(() => openPage(a.id))}
+          class="touch-target-row pressable-row flex w-full items-center gap-3 rounded-[var(--radius-md)] px-2 py-3 text-left text-content"
+        >
+          <ExternalLinkIcon class="size-4 shrink-0 text-content-muted" />
+          <span class="text-sm font-medium">Open</span>
+        </button>
+        <button
+          type="button"
+          onclick={() => runAction(() => addSubpage(a))}
+          class="touch-target-row pressable-row flex w-full items-center gap-3 rounded-[var(--radius-md)] px-2 py-3 text-left text-content"
+        >
+          <FilePlusIcon class="size-4 shrink-0 text-content-muted" />
+          <span class="text-sm font-medium">Add subpage</span>
+        </button>
+        {#if a.parentId != null}
+          <button
+            type="button"
+            onclick={() => runAction(() => reparent(a.id, null))}
+            class="touch-target-row pressable-row flex w-full items-center gap-3 rounded-[var(--radius-md)] px-2 py-3 text-left text-content"
+          >
+            <CornerUpLeftIcon class="size-4 shrink-0 text-content-muted" />
+            <span class="text-sm font-medium">Move to root</span>
+          </button>
+        {/if}
+        <div
+          class="touch-target-row flex w-full items-center gap-3 rounded-[var(--radius-md)] px-2 py-3 text-left opacity-50"
+          aria-disabled="true"
+        >
+          <MoveIcon class="size-4 shrink-0 text-content-muted" />
+          <span class="text-sm font-medium text-content">Move under…</span>
+          <span class="ml-auto text-xs text-content-muted">Soon</span>
+        </div>
+
+        <div class="my-1 hairline-t"></div>
+
+        <button
+          type="button"
+          onclick={() => runAction(() => toggleVisibility(a))}
+          class="touch-target-row pressable-row flex w-full items-center gap-3 rounded-[var(--radius-md)] px-2 py-3 text-left text-content"
+        >
+          {#if a.visibility === "public"}
+            <LockIcon class="size-4 shrink-0 text-content-muted" />
+            <span class="text-sm font-medium">Make private</span>
+          {:else}
+            <GlobeIcon class="size-4 shrink-0 text-content-muted" />
+            <span class="text-sm font-medium">Make public</span>
+          {/if}
+        </button>
+        <button
+          type="button"
+          onclick={() => runAction(() => toggleArchived(a))}
+          class="touch-target-row pressable-row flex w-full items-center gap-3 rounded-[var(--radius-md)] px-2 py-3 text-left text-content"
+        >
+          {#if a.archivedAt == null}
+            <ArchiveIcon class="size-4 shrink-0 text-content-muted" />
+            <span class="text-sm font-medium">Archive</span>
+          {:else}
+            <ArchiveRestoreIcon class="size-4 shrink-0 text-content-muted" />
+            <span class="text-sm font-medium">Unarchive</span>
+          {/if}
+        </button>
+
+        <div class="my-1 hairline-t"></div>
+
+        <button
+          type="button"
+          onclick={() => runAction(() => removePage(a))}
+          class="touch-target-row pressable-row flex w-full items-center gap-3 rounded-[var(--radius-md)] px-2 py-3 text-left text-error"
+        >
+          <Trash2Icon class="size-4 shrink-0" />
+          <span class="text-sm font-medium">Delete</span>
+        </button>
+      </div>
+    </MobileSheet>
+  {/if}
+{:else}
 <div class="flex h-full w-full flex-col overflow-hidden bg-surface">
   <!-- Header: title + Add page -->
   <header class="flex items-center justify-between gap-3 border-b border-edge px-6 py-3">
@@ -404,6 +647,7 @@
     {/if}
   </div>
 </div>
+{/if}
 
 <!-- A single page row plus its (expanded) descendants. Recursive: indents by
      `depth`, carries a disclosure chevron when it has children, and is a native

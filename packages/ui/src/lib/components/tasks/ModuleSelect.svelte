@@ -28,6 +28,7 @@
     checkBoxBase,
     checkBoxChecked,
   } from "$lib/tasks/ui.js";
+  import { haptic } from "$lib/mobile/haptics.js";
   import { cn } from "$lib/utils.js";
 
   // One selectable module (a grouping of work toward a deliverable). Id + name.
@@ -53,7 +54,10 @@
     // Fired with the FULL next id array on every toggle.
     onChange: (next: string[]) => void;
     placeholder?: string;
-    variant?: "chip" | "row";
+    // chip / row = trigger + popover; inline = the checkbox list rendered directly
+    // (no trigger/popover) for the mobile picker sheet. Multi-select: tapping a
+    // row toggles it and the sheet stays open.
+    variant?: "chip" | "row" | "inline";
     class?: string;
   } = $props();
 
@@ -95,7 +99,49 @@
   </svg>
 {/snippet}
 
-<DropdownMenu>
+{#if variant === "inline"}
+  <!-- Inline checkbox list for the mobile picker sheet: same filter input +
+       checkbox rows as the popover, checked rows tinted, but no trigger/popover.
+       Multi-select: each tap toggles and the sheet stays open. -->
+  <div class={cn("flex flex-col", className)}>
+    <input
+      type="text"
+      bind:value={query}
+      placeholder="Filter modules…"
+      class="mb-1 h-7 w-full rounded-[4px] border border-edge bg-surface-alt px-2 text-[12px] text-content outline-none focus:border-accent"
+    />
+
+    {#each filtered as m (m.id)}
+      {@const checked = value.includes(m.id)}
+      <button
+        type="button"
+        {disabled}
+        aria-label={m.name}
+        aria-pressed={checked}
+        class={cn(filterOption, "cursor-pointer", checked && menuItemRowActive)}
+        onclick={() => {
+          haptic("selection");
+          toggle(m.id);
+        }}
+      >
+        <span class={cn(checkBoxBase, checked && checkBoxChecked)}>
+          {#if checked}
+            <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="m5 12 5 5 9-11" />
+            </svg>
+          {/if}
+        </span>
+        {@render moduleGlyph(16)}
+        <span class="truncate">{m.name}</span>
+      </button>
+    {/each}
+
+    {#if filtered.length === 0}
+      <span class="block px-2 py-2 text-[12px] text-content-muted">No modules</span>
+    {/if}
+  </div>
+{:else}
+  <DropdownMenu>
   <DropdownMenuTrigger
     {disabled}
     title={selected.length ? selected.map((m) => m.name).join(", ") : placeholder}
@@ -145,4 +191,5 @@
       <span class="block px-2 py-2 text-[12px] text-content-muted">No modules</span>
     {/if}
   </DropdownMenuContent>
-</DropdownMenu>
+  </DropdownMenu>
+{/if}

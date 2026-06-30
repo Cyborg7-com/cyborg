@@ -23,6 +23,7 @@
     filterOption,
     menuItemRowActive,
   } from "$lib/tasks/ui.js";
+  import { haptic } from "$lib/mobile/haptics.js";
   import { cn } from "$lib/utils.js";
 
   // One selectable cycle (a time-boxed iteration). Id + display name only.
@@ -48,7 +49,9 @@
     // Fired with the chosen cycle id (or null for "No cycle") on every selection.
     onChange: (next: string | null) => void;
     placeholder?: string;
-    variant?: "chip" | "row";
+    // chip / row = trigger + popover; inline = the option list rendered directly
+    // (no trigger/popover) for the mobile picker sheet.
+    variant?: "chip" | "row" | "inline";
     class?: string;
   } = $props();
 
@@ -76,7 +79,49 @@
   </svg>
 {/snippet}
 
-<DropdownMenu>
+{#if variant === "inline"}
+  <!-- Inline option list for the mobile picker sheet: "No cycle" + the cycles
+       exactly as the popover, selected row tinted, but no trigger/popover. One
+       tap fires onChange — the sheet persists + closes. -->
+  <div class={cn("flex flex-col", className)}>
+    <button
+      type="button"
+      {disabled}
+      aria-label="No cycle"
+      aria-pressed={value == null}
+      class={cn(filterOption, "cursor-pointer", value == null && menuItemRowActive)}
+      onclick={() => {
+        haptic("selection");
+        onChange(null);
+      }}
+    >
+      {@render cycleGlyph(16)}
+      <span class="truncate text-content-muted">No cycle</span>
+    </button>
+
+    {#each options as c (c.id)}
+      <button
+        type="button"
+        {disabled}
+        aria-label={`Cycle: ${c.name}`}
+        aria-pressed={value === c.id}
+        class={cn(filterOption, "cursor-pointer", value === c.id && menuItemRowActive)}
+        onclick={() => {
+          haptic("selection");
+          onChange(c.id);
+        }}
+      >
+        {@render cycleGlyph(16)}
+        <span class="truncate">{c.name}</span>
+      </button>
+    {/each}
+
+    {#if options.length === 0}
+      <span class="block px-2 py-2 text-[12px] text-content-muted">No cycles</span>
+    {/if}
+  </div>
+{:else}
+  <DropdownMenu>
   <DropdownMenuTrigger
     {disabled}
     title={selected?.name ?? placeholder}
@@ -115,4 +160,5 @@
       <span class="block px-2 py-2 text-[12px] text-content-muted">No cycles</span>
     {/if}
   </DropdownMenuContent>
-</DropdownMenu>
+  </DropdownMenu>
+{/if}
