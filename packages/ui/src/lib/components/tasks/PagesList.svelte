@@ -20,6 +20,7 @@
   import { cn } from "$lib/utils.js";
   import type { Page } from "$lib/core/types.js";
   import { buildPageTree, canNestUnder, type PageNode } from "$lib/tasks/page-tree.js";
+  import { readPagesCollapsed, writePagesCollapsed } from "$lib/tasks/local-prefs.js";
   import { SvelteSet } from "svelte/reactivity";
   import Emoji from "$lib/components/Emoji.svelte";
   import FileTextIcon from "@lucide/svelte/icons/file-text";
@@ -92,11 +93,30 @@
   // child whose parent is filtered out is promoted to a root by buildPageTree.
   const tree = $derived(buildPageTree(filtered, compare));
 
-  // Locally-persisted disclosure state: collapsed page ids (default = expanded).
+  // Locally-persisted disclosure state: collapsed page ids (default = expanded),
+  // keyed per workspace+project so different projects keep independent state.
   const collapsed = new SvelteSet<string>();
+
+  // Hydrate the collapsed set from localStorage whenever the workspace/project
+  // changes (and on mount). We refill the SAME reactive instance the rows read
+  // from rather than reassigning, so the disclosure chevrons re-render in place.
+  // Escape-hatch $effect: syncing a reactive Set to an external (localStorage)
+  // store — it depends only on wsId/projectId and never reads `collapsed`, so it
+  // can't self-trigger on a later toggle.
+  $effect(() => {
+    const ids = readPagesCollapsed(wsId, projectId);
+    collapsed.clear();
+    for (const id of ids) collapsed.add(id);
+  });
+
+  function persistCollapsed(): void {
+    writePagesCollapsed(wsId, projectId, collapsed);
+  }
+
   function toggleCollapsed(id: string): void {
     if (collapsed.has(id)) collapsed.delete(id);
     else collapsed.add(id);
+    persistCollapsed();
   }
 
   // ─── Drag-to-nest ────────────────────────────────────────────────
@@ -167,7 +187,10 @@
     if (!canNestUnder(pages, id, parentId)) return;
     try {
       error = null;
-      if (parentId != null) collapsed.delete(parentId); // reveal the new child
+      if (parentId != null) {
+        collapsed.delete(parentId); // reveal the new child
+        persistCollapsed();
+      }
       await client.updatePage(id, { parentId });
       await load();
     } catch (e) {
@@ -181,6 +204,7 @@
       error = null;
       const created = await client.createPage(projectId, { parentId: parent.id });
       collapsed.delete(parent.id); // reveal the new child
+      persistCollapsed();
       await load();
       openPage(created.id);
     } catch (e) {

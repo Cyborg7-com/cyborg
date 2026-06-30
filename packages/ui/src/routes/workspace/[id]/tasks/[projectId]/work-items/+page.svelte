@@ -43,6 +43,12 @@
     type Layout,
     type TaskFilters,
   } from "$lib/tasks/view.js";
+  import {
+    DEFAULT_GROUP_BY,
+    DEFAULT_LAYOUT,
+    readProjectView,
+    writeProjectView,
+  } from "$lib/tasks/local-prefs.js";
   import { projectKeyPrefix } from "$lib/tasks/detail.js";
   import { INBOX_IDENTIFIER, isInboxProjectId, tasksForProject } from "$lib/tasks/constants.js";
   import { preferencesState } from "$lib/state/preferences.svelte.js";
@@ -53,15 +59,35 @@
   const wsId = $derived(page.params.id ?? "");
   const projectId = $derived(page.params.projectId ?? "");
 
-  // Per-view toolbar state. Local (not persisted) — Plane keeps the layout /
-  // group-by / filters per project-view, and the per-[projectId] remount gives
-  // each project its own starting set.
-  let layout = $state<Layout>("board");
-  let groupBy = $state<GroupBy>("status");
+  // Per-view toolbar state. layout + group-by are the "favorite display" — they
+  // are persisted per (workspace, project) to localStorage so reopening a project
+  // restores the view the user last chose (see the hydrate/persist effects
+  // below). filters stay transient: they're a per-session search action, not a
+  // saved display, so a reload should never silently hide tasks behind a filter.
+  let layout = $state<Layout>(DEFAULT_LAYOUT);
+  let groupBy = $state<GroupBy>(DEFAULT_GROUP_BY);
   let filters = $state<TaskFilters>(emptyFilters());
   // Whether the rich-filter pill row is shown (Plane's Filters toggle). Local per-
   // view state; the per-[projectId] remount resets it with the rest of the toolbar.
   let filtersOpen = $state(false);
+
+  // Restore the saved layout + group-by for this workspace/project. Escape-hatch
+  // $effect (syncing reactive state to an external localStorage store): it depends
+  // ONLY on wsId/projectId, so switching projects re-hydrates without the persist
+  // effect below ever feeding back into it. Declared BEFORE the persist effect so
+  // on a project switch hydration runs first and persistence writes the freshly
+  // restored value to the new key, never the previous project's value.
+  $effect(() => {
+    const saved = readProjectView(wsId, projectId);
+    layout = saved.layout ?? DEFAULT_LAYOUT;
+    groupBy = saved.groupBy ?? DEFAULT_GROUP_BY;
+  });
+
+  // Persist the user's chosen display whenever it changes (and write-through the
+  // restored value on mount, an idempotent no-op). Keyed per (workspace, project).
+  $effect(() => {
+    writeProjectView(wsId, projectId, { layout, groupBy });
+  });
 
   let taskDialogOpen = $state(false);
 
