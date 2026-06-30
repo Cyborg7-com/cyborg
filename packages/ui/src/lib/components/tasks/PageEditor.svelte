@@ -183,9 +183,13 @@
 
   // Create a new page nested under THIS page and open it. The server persists
   // parent_id directly; the {#key pageId} route wrapper remounts the editor on
-  // the new id, loading the fresh child.
+  // the new id, loading the fresh child. Flush any pending (debounced) edits of
+  // the CURRENT page first — navigating away tears this editor down, so an
+  // unflushed title/content keystroke would otherwise be dropped (same guard
+  // backToPages() uses).
   async function addSubpage(): Promise<void> {
     try {
+      await flushSaves();
       const created = await client.createPage(projectId, { parentId: pageId });
       goto(`/workspace/${wsId}/tasks/${projectId}/pages/${created.id}`);
     } catch (err) {
