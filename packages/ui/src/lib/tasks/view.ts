@@ -79,6 +79,14 @@ function labelsOf(task: Task): string[] {
   const m = task as MaybeAssociated;
   return m.labels ?? m.labelIds ?? [];
 }
+// True when a task carries a bound schedule — the recurring/scheduled signal the
+// "Recurring" filter facet keys off. `schedule` is a canonical Task field
+// (core/types.ts), denormalized read-only by the relay; null/absent when no
+// schedule is bound (or an older relay omits it). Read defensively so a row that
+// predates the field reads as non-recurring rather than throwing.
+function isRecurring(task: Task): boolean {
+  return (task.schedule ?? null) != null;
+}
 // Map a task's column to its canonical Plane state-group key (board column →
 // state group). Keeps the state-group grouping/filtering honest against the four
 // board columns we actually have (board.ts): todo → unstarted, in_progress →
@@ -252,6 +260,12 @@ export interface TaskFilters {
   cycles?: string[];
   modules?: string[];
   stateGroups?: StateGroupKey[];
+  // RECURRING facet (boolean, not an id-array): when true, keep ONLY tasks that
+  // carry a bound schedule (task.schedule != null — the live per-task recurrence
+  // mechanism). Absent/false = no constraint (we do NOT offer a "non-recurring
+  // only" mode). Composes (ANDs) with every other facet, so "Recurring + Agents"
+  // shows recurring agent tasks.
+  recurring?: boolean;
 }
 
 export function emptyFilters(): TaskFilters {
@@ -281,7 +295,8 @@ export function isOverall(f: TaskFilters): boolean {
     (f.labels?.length ?? 0) === 0 &&
     (f.cycles?.length ?? 0) === 0 &&
     (f.modules?.length ?? 0) === 0 &&
-    (f.stateGroups?.length ?? 0) === 0
+    (f.stateGroups?.length ?? 0) === 0 &&
+    !f.recurring
   );
 }
 
@@ -298,7 +313,8 @@ export function activeFilterCount(f: TaskFilters): number {
     (f.labels?.length ?? 0) +
     (f.cycles?.length ?? 0) +
     (f.modules?.length ?? 0) +
-    (f.stateGroups?.length ?? 0)
+    (f.stateGroups?.length ?? 0) +
+    (f.recurring ? 1 : 0)
   );
 }
 
@@ -332,6 +348,8 @@ export function matchesFilters(task: Task, f: TaskFilters, pools: AssigneePools)
   }
   const stateGroups = f.stateGroups ?? [];
   if (stateGroups.length > 0 && !stateGroups.includes(stateGroupOf(task))) return false;
+
+  if (f.recurring && !isRecurring(task)) return false;
 
   if (f.kinds.length > 0 || f.assigneeIds.length > 0) {
     const a = resolveAssignee(task.assigneeId, pools);

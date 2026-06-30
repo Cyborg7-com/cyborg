@@ -192,6 +192,45 @@ describe("matchesFilters / filterTasks", () => {
   });
 });
 
+describe("recurring facet", () => {
+  const sched = { cronExpr: "0 9 * * *", timezone: "UTC", enabled: true, nextRunAt: 123 };
+
+  it("recurring:true keeps only tasks with a bound schedule", () => {
+    const ts = [
+      task({ id: "rec", schedule: sched }),
+      task({ id: "plain", schedule: null }),
+      task({ id: "absent" }),
+    ];
+    const out = filterTasks(ts, { ...emptyFilters(), recurring: true }, pools);
+    expect(out.map((t) => t.id)).toEqual(["rec"]);
+  });
+
+  it("recurring absent/false applies no constraint", () => {
+    const ts = [task({ id: "rec", schedule: sched }), task({ id: "plain" })];
+    expect(filterTasks(ts, emptyFilters(), pools).map((t) => t.id)).toEqual(["rec", "plain"]);
+    expect(
+      filterTasks(ts, { ...emptyFilters(), recurring: false }, pools).map((t) => t.id),
+    ).toEqual(["rec", "plain"]);
+  });
+
+  it("ANDs with the Agents kind facet → recurring agent tasks", () => {
+    const ts = [
+      task({ id: "rec-agent", assigneeId: "agent-1", schedule: sched }),
+      task({ id: "rec-human", assigneeId: "u1", schedule: sched }),
+      task({ id: "plain-agent", assigneeId: "agent-1" }),
+    ];
+    const out = filterTasks(ts, { ...emptyFilters(), recurring: true, kinds: ["agent"] }, pools);
+    expect(out.map((t) => t.id)).toEqual(["rec-agent"]);
+  });
+
+  it("counts toward activeFilterCount and leaves Overall", () => {
+    const f = { ...emptyFilters(), recurring: true };
+    expect(isOverall(f)).toBe(false);
+    expect(activeFilterCount(f)).toBe(1);
+    expect(isOverall(emptyFilters())).toBe(true);
+  });
+});
+
 describe("sortTasks", () => {
   it("does not mutate the input", () => {
     const input = [task({ id: "b", title: "Bravo" }), task({ id: "a", title: "Alpha" })];

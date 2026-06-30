@@ -115,6 +115,11 @@
   function toggleModule(id: string) {
     filters = { ...filters, modules: toggle(filters.modules, id) };
   }
+  function toggleRecurring() {
+    // Boolean facet: ON keeps only scheduled tasks; toggling OFF clears it
+    // (undefined = no constraint), so removing the pill drops the facet entirely.
+    filters = { ...filters, recurring: filters.recurring ? undefined : true };
+  }
 
   function clearAll() {
     filters = emptyFilters();
@@ -266,6 +271,16 @@
           </DropdownMenuSubContent>
         </DropdownMenuSub>
       {/if}
+
+      <DropdownMenuSeparator />
+      <DropdownMenuCheckboxItem
+        checked={filters.recurring === true}
+        onCheckedChange={() => toggleRecurring()}
+        closeOnSelect={false}
+        class="cursor-pointer"
+      >
+        Recurring only
+      </DropdownMenuCheckboxItem>
     </DropdownMenuContent>
   </DropdownMenu>
 
@@ -309,6 +324,11 @@
       <span class="text-content-muted">Module:</span> {moduleName(id)} <span aria-hidden="true">×</span>
     </button>
   {/each}
+  {#if filters.recurring}
+    <button type="button" onclick={() => toggleRecurring()} class={cn(filterChip, "hover:bg-hover-gray")}>
+      Recurring <span aria-hidden="true">×</span>
+    </button>
+  {/if}
 
   {#if !overall}
     <button type="button" onclick={clearAll} class={cn(clearAllClass, "ml-1")}>Clear all</button>
