@@ -307,11 +307,14 @@
       "idx": 43,
       "version": "7",
       "when": 1783000021000,
-<<<<<<< HEAD
-      "tag": "0044_installed_recipes",
-=======
       "tag": "0044_invites_open_channels",
->>>>>>> origin/cyborg7
+      "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "7",
+      "when": 1783000022000,
+      "tag": "0044_installed_recipes",
       "breakpoints": true
     }
   ]
