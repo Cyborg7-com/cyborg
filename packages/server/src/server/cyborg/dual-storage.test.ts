@@ -699,6 +699,100 @@ describe.skipIf(!hasPg)("DualStorage — connected mode (requires DATABASE_URL)"
     expect(row!.initiatedByEmail).toBe("binding-owner@test.dev");
   });
 
+  it("createAgentBinding prefers the caller's REAL email and NULLs a @remote.local resolution (#810)", async () => {
+    const real = await createUserAndSettle("canonical@cyborg7.com", "Canonical");
+    // A cloud-guest-shaped local row whose only email is the synthetic placeholder
+    // (ensureUser stamps "<id>@remote.local"); created here as a real PG user so the
+    // binding's initiated_by FK resolves.
+    const ghost = await createUserAndSettle("ghost-guest@remote.local", "Ghost Guest");
+    const ws = await createWorkspaceAndSettle("Email WS", real.id);
+
+    // (a) the caller-supplied REAL email wins over the local-id lookup.
+    storage.createAgentBinding({
+      agentId: "agent-prefers-caller",
+      workspaceId: ws.id,
+      provider: "claude",
+      daemonId: "daemon-X",
+      initiatedBy: ghost.id, // local lookup would yield the @remote.local placeholder…
+      initiatedByEmail: "canonical@cyborg7.com", // …but the caller's real email is preferred.
+    });
+    // (b) with NO caller email, a resolved @remote.local placeholder is stored NULL
+    //     (never persist a known-fake email the offline filter could never match).
+    storage.createAgentBinding({
+      agentId: "agent-nulls-fake",
+      workspaceId: ws.id,
+      provider: "claude",
+      daemonId: "daemon-X",
+      initiatedBy: ghost.id,
+    });
+    await settle();
+
+    const rows = await pgFor(storage).getAgentBindingsByWorkspace(ws.id);
+    expect(rows.find((r) => r.agentId === "agent-prefers-caller")!.initiatedByEmail).toBe(
+      "canonical@cyborg7.com",
+    );
+    expect(rows.find((r) => r.agentId === "agent-nulls-fake")!.initiatedByEmail).toBeNull();
+  });
+
+  it("deleteStaleAgentBindingsForOwner: prunes the owner's stale bindings, KEEPS live + peers, NO-OP on empty (#810)", async () => {
+    const gcOwner = await createUserAndSettle("gc-owner@cyborg7.com", "GC Owner");
+    const peer = await createUserAndSettle("gc-peer@cyborg7.com", "GC Peer");
+    const ws = await createWorkspaceAndSettle("GC WS", gcOwner.id);
+    const daemonId = "daemon-GC";
+
+    // Owner: one LIVE + one STALE binding. Peer: one binding (must NEVER be touched).
+    storage.createAgentBinding({
+      agentId: "owner-live",
+      workspaceId: ws.id,
+      provider: "claude",
+      daemonId,
+      initiatedBy: gcOwner.id,
+      initiatedByEmail: "gc-owner@cyborg7.com",
+    });
+    storage.createAgentBinding({
+      agentId: "owner-stale",
+      workspaceId: ws.id,
+      provider: "claude",
+      daemonId,
+      initiatedBy: gcOwner.id,
+      initiatedByEmail: "gc-owner@cyborg7.com",
+    });
+    storage.createAgentBinding({
+      agentId: "peer-live",
+      workspaceId: ws.id,
+      provider: "claude",
+      daemonId,
+      initiatedBy: peer.id,
+      initiatedByEmail: "gc-peer@cyborg7.com",
+    });
+    await settle();
+
+    const pg = pgFor(storage);
+
+    // EMPTY live set → NO-OP (never delete-all): returns 0, nothing removed.
+    const noop = await pg.deleteStaleAgentBindingsForOwner({
+      daemonId,
+      workspaceId: ws.id,
+      liveAgentIds: [],
+      ownerGlobalId: gcOwner.id,
+      ownerEmail: "gc-owner@cyborg7.com",
+    });
+    expect(noop).toBe(0);
+    expect((await pg.getAgentBindingsByWorkspace(ws.id)).length).toBe(3);
+
+    // Live set = [owner-live] → prunes ONLY owner-stale; keeps owner-live + peer-live.
+    const deleted = await pg.deleteStaleAgentBindingsForOwner({
+      daemonId,
+      workspaceId: ws.id,
+      liveAgentIds: ["owner-live"],
+      ownerGlobalId: gcOwner.id,
+      ownerEmail: "gc-owner@cyborg7.com",
+    });
+    expect(deleted).toBe(1);
+    const remaining = (await pg.getAgentBindingsByWorkspace(ws.id)).map((r) => r.agentId).sort();
+    expect(remaining).toEqual(["owner-live", "peer-live"]);
+  });
+
   it("createAgentBinding does NOT mirror an EPHEMERAL summon to PG", async () => {
     const user = await createUserAndSettle("eph-owner@test.dev", "Eph Owner");
     const ws = await createWorkspaceAndSettle("Eph WS", user.id);

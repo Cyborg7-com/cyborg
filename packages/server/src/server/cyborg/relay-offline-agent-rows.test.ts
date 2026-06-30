@@ -4,6 +4,7 @@ import {
   offlineBindingVisible,
   offlineAgentRows,
   auditAgentRows,
+  shouldGcOwnerBindings,
   type OfflineAgentBinding,
 } from "./relay-offline-agent-rows.js";
 
@@ -50,14 +51,16 @@ describe("relay-offline-agent-rows", () => {
     expect(row.availableModes).toEqual([]);
   });
 
-  it("offlineBindingVisible: channel-bound sessions are visible to anyone", () => {
+  it("offlineBindingVisible: channel-bound (non-ephemeral) sessions are visible to anyone", () => {
     const b = {
       channelId: "chan-1",
       initiatedBy: "local-user-1",
       initiatedByEmail: "owner@test.dev",
     };
-    expect(offlineBindingVisible(b, "someone-else@test.dev")).toBe(true);
-    expect(offlineBindingVisible(b, null)).toBe(true);
+    // A NON-initiator (different email, no matching global id) still sees a shared
+    // (non-ephemeral) channel agent.
+    expect(offlineBindingVisible(b, "someone-else@test.dev", "viewer-global-9")).toBe(true);
+    expect(offlineBindingVisible(b, null, null)).toBe(true);
   });
 
   it("offlineBindingVisible: a channel-bound EPHEMERAL session is owner-scoped (NOT shared)", () => {
@@ -70,22 +73,50 @@ describe("relay-offline-agent-rows", () => {
       initiatedByEmail: "owner@test.dev",
       ephemeral: true,
     };
-    expect(offlineBindingVisible(b, "owner@test.dev")).toBe(true); // the owner sees it
-    expect(offlineBindingVisible(b, "someone-else@test.dev")).toBe(false); // others do NOT
-    expect(offlineBindingVisible(b, null)).toBe(false);
+    expect(offlineBindingVisible(b, "owner@test.dev", null)).toBe(true); // the owner sees it
+    expect(offlineBindingVisible(b, "someone-else@test.dev", "viewer-9")).toBe(false); // others do NOT
+    expect(offlineBindingVisible(b, null, null)).toBe(false);
   });
 
   it("offlineBindingVisible: a session with no initiator is visible", () => {
     const b = { channelId: null, initiatedBy: null, initiatedByEmail: null };
-    expect(offlineBindingVisible(b, "anyone@test.dev")).toBe(true);
+    expect(offlineBindingVisible(b, "anyone@test.dev", "anyone-global")).toBe(true);
   });
 
-  it("offlineBindingVisible: a PRIVATE session shows only to its initiator (case-insensitive)", () => {
+  it("offlineBindingVisible: a PRIVATE session shows only to its initiator (case-insensitive email match)", () => {
     const b = { channelId: null, initiatedBy: "local-1", initiatedByEmail: "Owner@Test.dev" };
-    expect(offlineBindingVisible(b, "owner@test.dev")).toBe(true);
-    expect(offlineBindingVisible(b, "intruder@test.dev")).toBe(false);
+    expect(offlineBindingVisible(b, "owner@test.dev", null)).toBe(true);
+    expect(offlineBindingVisible(b, "intruder@test.dev", "intruder-global")).toBe(false);
     // No identity to compare against → not visible (never leak a private session).
-    expect(offlineBindingVisible(b, null)).toBe(false);
+    expect(offlineBindingVisible(b, null, null)).toBe(false);
+  });
+
+  it("offlineBindingVisible: a PRIVATE session matches its owner by GLOBAL id when the email is the synthetic @remote.local placeholder (#810)", () => {
+    // OLD cross-daemon row: the mirror only ever stored the fake placeholder email,
+    // but initiated_by carries the cloud GLOBAL account id (bootstrap stamps it on
+    // the forward path). The owner is re-attributed by id, not the unmatchable email.
+    const b = {
+      channelId: null,
+      initiatedBy: "global-acct-4871b232",
+      initiatedByEmail: "global-acct-4871b232@remote.local",
+    };
+    // The owner (their global id == initiated_by) sees their own private session…
+    expect(offlineBindingVisible(b, "owner@cyborg7.com", "global-acct-4871b232")).toBe(true);
+    // …but a different account (different global id, fake email never matches) does NOT.
+    expect(offlineBindingVisible(b, "intruder@cyborg7.com", "global-acct-9999")).toBe(false);
+    expect(offlineBindingVisible(b, null, null)).toBe(false);
+  });
+
+  it("offlineBindingVisible: a PRIVATE session matches its owner by REAL email even when the global id differs (own-daemon row)", () => {
+    // Own-daemon session: initiated_by is a LOCAL SQLite id (≠ the viewer's global
+    // id), but the mirror now stores the REAL email — so the email path admits it.
+    const b = {
+      channelId: null,
+      initiatedBy: "local-sqlite-7d83",
+      initiatedByEmail: "owner@cyborg7.com",
+    };
+    expect(offlineBindingVisible(b, "owner@cyborg7.com", "global-acct-4871b232")).toBe(true);
+    expect(offlineBindingVisible(b, "intruder@cyborg7.com", "global-acct-9999")).toBe(false);
   });
 
   it("lists a workspace's sessions from PG when the owning daemon is offline (no live agent)", () => {
@@ -95,11 +126,34 @@ describe("relay-offline-agent-rows", () => {
       binding({ agentId: "a-other", channelId: null, initiatedByEmail: "other@test.dev" }),
     ];
     // No live daemon answered (empty live set) — the relay falls back entirely to PG.
-    const rows = offlineAgentRows(bindings, "owner@test.dev", new Set());
+    const rows = offlineAgentRows(bindings, "owner@test.dev", new Set(), "owner-global");
     const ids = rows.map((r) => r.agentId);
     expect(ids).toContain("a-own"); // own private session
     expect(ids).toContain("a-channel"); // channel-bound, everyone sees it
     expect(ids).not.toContain("a-other"); // someone else's private session stays hidden
+  });
+
+  it("lists an OLD @remote.local private row to its owner by GLOBAL id, but hides a peer's (#810)", () => {
+    const bindings = [
+      // Owner's own DM session, mirrored before the real-email fix → fake email only.
+      binding({
+        agentId: "a-mine",
+        channelId: null,
+        initiatedBy: "global-me",
+        initiatedByEmail: "global-me@remote.local",
+      }),
+      // A peer's private DM session, likewise only a fake email.
+      binding({
+        agentId: "a-peer",
+        channelId: null,
+        initiatedBy: "global-peer",
+        initiatedByEmail: "global-peer@remote.local",
+      }),
+    ];
+    const rows = offlineAgentRows(bindings, "me@cyborg7.com", new Set(), "global-me");
+    const ids = rows.map((r) => r.agentId);
+    expect(ids).toContain("a-mine"); // re-attributed to me by global id
+    expect(ids).not.toContain("a-peer"); // peer's private session does NOT leak
   });
 
   it("dedupes against the live fan-out — a live agent's daemon row wins", () => {
@@ -107,7 +161,7 @@ describe("relay-offline-agent-rows", () => {
       binding({ agentId: "a-live", initiatedByEmail: "owner@test.dev" }),
       binding({ agentId: "a-offline", initiatedByEmail: "owner@test.dev" }),
     ];
-    const rows = offlineAgentRows(bindings, "owner@test.dev", new Set(["a-live"]));
+    const rows = offlineAgentRows(bindings, "owner@test.dev", new Set(["a-live"]), "owner-global");
     const ids = rows.map((r) => r.agentId);
     expect(ids).toEqual(["a-offline"]);
   });
@@ -142,5 +196,22 @@ describe("relay-offline-agent-rows", () => {
     const rows = auditAgentRows(bindings, "daemon-A");
     const ids = rows.map((r) => r.agentId);
     expect(ids).toEqual(["on-A"]);
+  });
+
+  // ─── Stale-binding GC eligibility (#810 hardening) ───────────────────
+  it("shouldGcOwnerBindings: runs ONLY on an UNFILTERED, NON-EMPTY list", () => {
+    expect(shouldGcOwnerBindings({ requestFiltered: false, liveAgentCount: 2 })).toBe(true);
+    expect(shouldGcOwnerBindings({ requestFiltered: false, liveAgentCount: 1 })).toBe(true);
+  });
+
+  it("shouldGcOwnerBindings: SKIPS a FILTERED (cyboId) list — it's a subset, not the complete set", () => {
+    // The dangerous case the review caught: a cyboId-scoped list_agents would
+    // otherwise prune the owner's OTHER live cybo bindings.
+    expect(shouldGcOwnerBindings({ requestFiltered: true, liveAgentCount: 2 })).toBe(false);
+    expect(shouldGcOwnerBindings({ requestFiltered: true, liveAgentCount: 0 })).toBe(false);
+  });
+
+  it("shouldGcOwnerBindings: SKIPS an EMPTY response (ambiguous/transient — never delete-all)", () => {
+    expect(shouldGcOwnerBindings({ requestFiltered: false, liveAgentCount: 0 })).toBe(false);
   });
 });

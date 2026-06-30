@@ -13,6 +13,7 @@ import {
   isNotNull,
   exists,
   inArray,
+  notInArray,
   ilike,
 } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
@@ -5341,6 +5342,103 @@ export class PgSync {
 
   async deleteAgentBinding(agentId: string): Promise<void> {
     await this.db.delete(schema.agentBindings).where(eq(schema.agentBindings.agentId, agentId));
+  }
+
+  // GC the REQUESTING owner's stale bindings on a now-online daemon (#810 dup
+  // sessions). The relay's list_agents fan-out is answered by the daemon with a
+  // PER-USER filtered list (dispatcher.handleListAgents applies the
+  // agentBindingVisibleCore rule), so `liveAgentIds` is NOT the daemon's complete
+  // live set — it is the complete set of THIS user's VISIBLE live agents on that
+  // daemon. Pruning daemon-wide would therefore delete a PEER's live PRIVATE
+  // binding (which is, by design, absent from this user's list); pruning SCOPED to
+  // the requesting owner is restart-safe — every row we touch is one this same
+  // user can see live in the very response that drives the prune, so a binding NOT
+  // in `liveAgentIds` is genuinely a dead/orphaned session of theirs (e.g. a PG
+  // mirror row left behind by a SQLite-cache reset or a failed delete sync).
+  //
+  // Ownership is matched the SAME way the offline visibility filter matches it:
+  // the GLOBAL account id (a cloud-forwarded session stamps initiated_by = the
+  // global id) OR the real initiated_by_email (a session created on the owner's
+  // own daemon). An EMPTY liveAgentIds is a NO-OP (returns 0): an empty response
+  // is ambiguous/transient and must never delete-all (the caller also skips the GC
+  // for an empty list — see shouldGcOwnerBindings). Returns the rows deleted.
+  async deleteStaleAgentBindingsForOwner(opts: {
+    daemonId: string;
+    workspaceId: string;
+    liveAgentIds: string[];
+    ownerGlobalId: string | null;
+    ownerEmail: string | null;
+  }): Promise<number> {
+    // Defense-in-depth: an EMPTY live set must NEVER trigger a "delete every
+    // binding of this owner on the daemon" — an empty list_agents response is
+    // ambiguous (transient daemon error / cold start), and the caller is supposed
+    // to skip the GC entirely in that case (shouldGcOwnerBindings). Refuse here too
+    // so the dangerous delete-all branch can never fire.
+    if (opts.liveAgentIds.length === 0) return 0;
+    const ownerPreds = [];
+    if (opts.ownerGlobalId) {
+      ownerPreds.push(eq(schema.agentBindings.initiatedBy, opts.ownerGlobalId));
+    }
+    if (opts.ownerEmail) {
+      ownerPreds.push(
+        sql`lower(${schema.agentBindings.initiatedByEmail}) = ${opts.ownerEmail.toLowerCase()}`,
+      );
+    }
+    // No owner identity to scope by → NEVER prune (refuse to touch anything we
+    // can't attribute to the requester — the restart-safety invariant).
+    if (ownerPreds.length === 0) return 0;
+    const result = await this.db
+      .delete(schema.agentBindings)
+      .where(
+        and(
+          eq(schema.agentBindings.daemonId, opts.daemonId),
+          eq(schema.agentBindings.workspaceId, opts.workspaceId),
+          notInArray(schema.agentBindings.agentId, opts.liveAgentIds),
+          or(...ownerPreds),
+        ),
+      );
+    return result.rowCount ?? 0;
+  }
+
+  // Single mirrored binding by agentId. Used by the relay's OFFLINE archive path
+  // (#810): when the owning daemon is asleep the relay can't forward the archive,
+  // so it reads the binding here to authorize the caller (owner/admin or the
+  // session initiator) and then clears the row itself. Returns null when absent.
+  async getAgentBinding(agentId: string): Promise<{
+    agentId: string;
+    workspaceId: string;
+    channelId: string | null;
+    provider: string;
+    model: string | null;
+    systemPrompt: string | null;
+    daemonId: string | null;
+    cyboId: string | null;
+    initiatedBy: string | null;
+    initiatedByEmail: string | null;
+    cwd: string | null;
+    providerSessionId: string | null;
+  } | null> {
+    const rows = await this.db
+      .select()
+      .from(schema.agentBindings)
+      .where(eq(schema.agentBindings.agentId, agentId))
+      .limit(1);
+    const r = rows[0];
+    if (!r) return null;
+    return {
+      agentId: r.agentId,
+      workspaceId: r.workspaceId,
+      channelId: r.channelId,
+      provider: r.provider,
+      model: r.model,
+      systemPrompt: r.systemPrompt,
+      daemonId: r.daemonId,
+      cyboId: r.cyboId,
+      initiatedBy: r.initiatedBy,
+      initiatedByEmail: r.initiatedByEmail,
+      cwd: r.cwd,
+      providerSessionId: r.providerSessionId,
+    };
   }
 
   // Offline fallback for the relay's list_agents fan-out: every mirrored binding

@@ -57,7 +57,11 @@ import {
   collectInitiatedByEmails,
   resolveInitiatedByGlobalIds,
 } from "./cross-daemon-initiated-by.js";
-import { offlineAgentRows, auditAgentRows } from "./relay-offline-agent-rows.js";
+import {
+  offlineAgentRows,
+  auditAgentRows,
+  shouldGcOwnerBindings,
+} from "./relay-offline-agent-rows.js";
 import {
   computeCyboReadiness,
   readinessDaemonsFrom,
@@ -1002,6 +1006,18 @@ async function main() {
     // so a member only sees their own private sessions when the owning daemon is
     // asleep (the live rows are already filtered by the daemon).
     guestEmail: string | null;
+    // The requesting guest's GLOBAL account id. Used together with guestEmail to
+    // scope the stale-binding GC (Part 1, #810) to the requester's OWN sessions,
+    // matching the same ownership rule the offline visibility filter uses (cloud
+    // sessions carry the global id as initiated_by; own-daemon sessions match by
+    // real email).
+    guestUserId: string;
+    // True when the originating list_agents request carried a NARROWING filter
+    // (e.g. cyboId) — the daemon then answers with a SUBSET of the user's live
+    // agents, so the stale-binding GC must be SKIPPED (a binding absent from a
+    // filtered list may still be a live agent of the user). Only an UNFILTERED
+    // list is the complete live set the GC requires.
+    filtered: boolean;
     agents: Map<string, Record<string, unknown>>;
     pendingDaemons: Set<string>;
     timer: ReturnType<typeof setTimeout>;
@@ -1018,11 +1034,12 @@ async function main() {
     workspaceId: string,
     guestEmail: string | null,
     liveAgentIds: ReadonlySet<string>,
+    viewerGlobalId: string | null,
   ): Promise<Record<string, unknown>[] | null> {
     if (!pg) return null;
     try {
       const bindings = await pg.getAgentBindingsByWorkspace(workspaceId);
-      return offlineAgentRows(bindings, guestEmail, liveAgentIds);
+      return offlineAgentRows(bindings, guestEmail, liveAgentIds, viewerGlobalId);
     } catch (err) {
       relayLog.error(
         { err, workspaceId },
@@ -1042,8 +1059,14 @@ async function main() {
     requestId: string,
     workspaceId: string,
     guestEmail: string | null,
+    viewerGlobalId: string | null,
   ): Promise<boolean> {
-    const offline = await offlineAgentRowsFromPg(workspaceId, guestEmail, new Set());
+    const offline = await offlineAgentRowsFromPg(
+      workspaceId,
+      guestEmail,
+      new Set(),
+      viewerGlobalId,
+    );
     if (!offline) return false;
     const cmap = await cyboMapForWorkspace(workspaceId);
     for (const row of offline) enrichCyboFields(row, cmap);
@@ -1237,6 +1260,7 @@ async function main() {
       agg.workspaceId,
       agg.guestEmail,
       new Set(agg.agents.keys()),
+      agg.guestUserId,
     );
     if (offline) {
       for (const row of offline) {
@@ -2527,7 +2551,7 @@ async function main() {
           // error so behaviour is unchanged where there's nothing to fall back on.
           if (
             listReqId &&
-            (await sendOfflineAgentList(ws, listReqId, targetWorkspace, guest.email))
+            (await sendOfflineAgentList(ws, listReqId, targetWorkspace, guest.email, guest.userId))
           ) {
             return;
           }
@@ -2541,6 +2565,10 @@ async function main() {
             guestWs: ws,
             workspaceId: targetWorkspace,
             guestEmail: guest.email,
+            guestUserId: guest.userId,
+            // A cyboId-scoped request narrows the daemon's answer to that cybo's
+            // agents only → not the complete live set → GC must skip it.
+            filtered: inner.cyboId != null,
             agents: new Map(),
             pendingDaemons: new Set(reached),
             // Fallback flush so a slow/dead daemon can't hang the request forever.
@@ -2738,6 +2766,69 @@ async function main() {
               };
             }),
           });
+          return;
+        }
+        // Offline CLEAR of an agent session whose owning daemon is asleep (#810).
+        // archive normally forwards to the daemon, which errors here ("isn't
+        // connected right now") so a dead session's offline row is un-clearable.
+        // Authorize + clear the PG mirror directly so the user can get rid of it.
+        if (type === "cyborg:archive_agent") {
+          const agentId = inner.agentId as string | undefined;
+          if (!agentId) {
+            respondError("agentId required");
+            return;
+          }
+          const binding = await pg.getAgentBinding(agentId);
+          if (!binding) {
+            respondError("agent not found");
+            return;
+          }
+          // SAME rule as the daemon's handleArchiveAgent: a SHARED channel agent
+          // (channel-bound; the PG mirror only ever holds NON-ephemeral bindings,
+          // so channelId ⇒ shared) is clearable by any member. Otherwise PRIVATE:
+          // the INITIATOR (real email OR the GLOBAL account id — a cloud-forwarded
+          // session stamps initiated_by = the global id, even on old rows whose
+          // mirrored email is the synthetic <id>@remote.local placeholder) OR a
+          // workspace OWNER/ADMIN. Conditions computed flat (role looked up only
+          // for a private session) to keep one combined guard.
+          const isSharedChannelAgent = !!binding.channelId;
+          const archiverRole = isSharedChannelAgent
+            ? null
+            : await pg.getMemberRole(targetWorkspace, guest.userId);
+          const isAdmin = archiverRole === "owner" || archiverRole === "admin";
+          const isInitiator =
+            (!!binding.initiatedByEmail &&
+              !!guest.email &&
+              binding.initiatedByEmail.toLowerCase() === guest.email.toLowerCase()) ||
+            (!!binding.initiatedBy && binding.initiatedBy === guest.userId);
+          if (!isSharedChannelAgent && !isAdmin && !isInitiator) {
+            respondError(
+              "only workspace admins or the session initiator can clear an offline agent",
+            );
+            return;
+          }
+          await pg.deleteAgentBinding(agentId);
+          // Mirror the teardown into agent_sessions so the Home stats stop accruing
+          // (best-effort; PG-only) — same as the daemon's "removed" agent_status.
+          await pg
+            .archiveAgentSession(agentId)
+            .catch((err) =>
+              relayLog.error({ err, agentId }, "archiveAgentSession failed clearing offline agent"),
+            );
+          // Broadcast the removal so other connected clients drop the row, mirroring
+          // the daemon's removal agent_status shape.
+          broadcastToGuests(targetWorkspace, {
+            type: "cyborg:agent_status",
+            payload: {
+              agentId,
+              lifecycle: "removed",
+              provider: binding.provider,
+              workspaceId: targetWorkspace,
+            },
+          });
+          // The client's archiveAgent expects a sessionId; an offline clear has no
+          // archived_sessions row (it's a clear, not a full archive), so null.
+          respond("cyborg:archive_agent_response", { sessionId: null });
           return;
         }
         respondError(
@@ -9550,8 +9641,10 @@ async function main() {
         const agg = requestId ? agentListAggregations.get(requestId) : undefined;
         if (requestId && agg) {
           const agents = (p?.agents as Record<string, unknown>[]) ?? [];
+          const liveAgentIds: string[] = [];
           for (const a of agents) {
             const id = a.agentId as string | undefined;
+            if (id) liveAgentIds.push(id);
             if (id && !agg.agents.has(id)) agg.agents.set(id, a);
             // Backfill the agent↔daemon binding from each daemon's own list —
             // the authoritative "who owns what" source. Covers agents spawned
@@ -9570,6 +9663,47 @@ async function main() {
                 ),
               );
             }
+          }
+          // GC the REQUESTER's stale offline bindings on this now-online daemon
+          // (#810). This per-daemon response is the COMPLETE set of THIS user's
+          // visible live agents on the daemon (handleListAgents filters per-user),
+          // so any of the user's OWN bindings on this daemon that are absent from
+          // it are dead/orphaned sessions (e.g. left behind by a SQLite-cache reset
+          // or a failed delete sync) — prune them so duplicate offline rows stop
+          // piling up. SCOPED to the requester (global id OR real email) so a
+          // peer's live PRIVATE binding — by design never in this filtered list —
+          // is never touched: restart-safe (a merely-disconnected daemon, which
+          // sends no response, is never pruned). SKIPPED for a FILTERED request
+          // (a cyboId list is a subset, not the complete set) and for an EMPTY
+          // response (ambiguous/transient — never delete-all). See shouldGcOwnerBindings.
+          if (
+            pg &&
+            fromDaemonId &&
+            fromDaemonId !== "guest" &&
+            shouldGcOwnerBindings({ requestFiltered: agg.filtered, liveAgentCount: agents.length })
+          ) {
+            pg.deleteStaleAgentBindingsForOwner({
+              daemonId: fromDaemonId,
+              workspaceId,
+              liveAgentIds,
+              ownerGlobalId: agg.guestUserId,
+              ownerEmail: agg.guestEmail,
+            })
+              .then((deleted) => {
+                if (deleted > 0) {
+                  relayLog.warn(
+                    { daemonId: fromDaemonId, workspaceId, deleted, live: liveAgentIds.length },
+                    "GC'd stale agent_bindings for owner on daemon reconnect (#810)",
+                  );
+                }
+                return undefined;
+              })
+              .catch((err) =>
+                relayLog.error(
+                  { err, daemonId: fromDaemonId, workspaceId },
+                  "deleteStaleAgentBindingsForOwner failed — stale offline sessions may persist",
+                ),
+              );
           }
           if (fromDaemonId) agg.pendingDaemons.delete(fromDaemonId);
           if (agg.pendingDaemons.size === 0) void finalizeAgentList(requestId);

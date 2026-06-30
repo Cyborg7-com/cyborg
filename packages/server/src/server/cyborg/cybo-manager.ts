@@ -327,6 +327,13 @@ export async function spawnCybo(opts: {
   workspaceId: string;
   cyboIdOrSlug: string;
   userId: string;
+  // The human initiator's REAL (canonical cloud) email, threaded from the
+  // spawning caller's auth. Stored on the (non-ephemeral) binding's PG mirror so
+  // the offline visibility filter attributes the cybo session to its initiator —
+  // the daemon's local <id>@remote.local placeholder never matches (#810). Absent
+  // for autonomous/scheduled spawns (no human at the keyboard); those rows fall
+  // back to the GLOBAL-id match in the filter.
+  initiatedByEmail?: string | null;
   serverId?: string;
   cyborg7McpBaseUrl?: string;
   context?: SpawnCyboContext;
@@ -369,6 +376,7 @@ export async function spawnCybo(opts: {
     workspaceId,
     cyboIdOrSlug,
     userId,
+    initiatedByEmail,
     serverId,
     cyborg7McpBaseUrl,
     context,
@@ -497,6 +505,9 @@ export async function spawnCybo(opts: {
     daemonId: serverId ?? null,
     cyboId: cybo.id,
     initiatedBy: userId,
+    // Real initiator email (when the spawn has a human caller) so a non-ephemeral
+    // cybo session attributes to its owner in the offline visibility filter (#810).
+    initiatedByEmail: initiatedByEmail ?? null,
     cwd: sessionCwd,
     ephemeral,
   });

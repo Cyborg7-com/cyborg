@@ -1181,6 +1181,12 @@ export class DualStorage {
     daemonId?: string | null;
     cyboId?: string | null;
     initiatedBy?: string | null;
+    // The initiator's REAL (canonical cloud) email, threaded from the caller's
+    // auth on the cloud-forwarded path. PREFERRED over the local-id lookup below:
+    // a cloud guest's local SQLite user row carries only the synthetic
+    // "<id>@remote.local" placeholder (ensureUser), so without this the mirror
+    // stored a fake email the offline visibility filter could never match (#810).
+    initiatedByEmail?: string | null;
     cwd?: string | null;
     ephemeral?: boolean;
   }): StoredAgentBinding {
@@ -1192,6 +1198,20 @@ export class DualStorage {
     // forget + logSyncError pattern as archiveSession. initiated_by is a daemon-
     // local id, so we resolve its EMAIL here (the relay can't map the local id).
     if (this._pg && !opts.ephemeral) {
+      // Prefer the caller-supplied real email; otherwise resolve from the local
+      // user row. NEVER persist the daemon's synthetic "<id>@remote.local"
+      // placeholder — it would never match a real cloud email in the offline
+      // visibility filter, so store null and let the filter fall back to the
+      // GLOBAL-id match (initiated_by == the viewer's global id) for these rows.
+      const resolvedEmail =
+        opts.initiatedByEmail ??
+        (binding.initiated_by
+          ? (this.sqlite.getUserById(binding.initiated_by)?.email ?? null)
+          : null);
+      const initiatedByEmail =
+        resolvedEmail && resolvedEmail.toLowerCase().endsWith("@remote.local")
+          ? null
+          : resolvedEmail;
       this._pg
         .upsertAgentBinding({
           agentId: binding.agent_id,
@@ -1203,9 +1223,7 @@ export class DualStorage {
           daemonId: binding.daemon_id,
           cyboId: binding.cybo_id,
           initiatedBy: binding.initiated_by,
-          initiatedByEmail: binding.initiated_by
-            ? (this.sqlite.getUserById(binding.initiated_by)?.email ?? null)
-            : null,
+          initiatedByEmail,
           cwd: binding.cwd,
           providerSessionId: binding.provider_session_id,
         })

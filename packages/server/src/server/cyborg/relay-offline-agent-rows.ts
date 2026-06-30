@@ -90,12 +90,20 @@ export function agentBindingVisibleCore(
   return false;
 }
 
-// OFFLINE-path (relay) visibility. The binding's initiated_by id is daemon-scoped
-// and meaningless to the relay, so ownership is matched on the stable email
-// identity (case-insensitive). Ephemeral bindings are never mirrored to PG today
-// (upsertAgentBinding skips them), so `ephemeral` is virtually always false here —
-// but it is honored so an ephemeral row can NEVER leak via the offline list even if
-// a future change starts mirroring them.
+// OFFLINE-path (relay) visibility. Ownership is matched two ways, so BOTH new and
+// old mirror rows attribute to their real owner (#810):
+//   • by the stable EMAIL identity (case-insensitive) — sessions created on the
+//     owner's OWN daemon carry their real email; new cloud sessions now store the
+//     canonical email too (dispatcher/cybo-manager thread auth.user.email).
+//   • by the viewer's GLOBAL account id == the binding's initiated_by — a
+//     cloud-forwarded session stamps initiated_by with the global account id
+//     (bootstrap overrides auth.user.id to the relay's guestId). OLD rows mirror
+//     only the synthetic "<id>@remote.local" placeholder email (never matched), so
+//     this id path is what re-attributes them to their owner instead of leaking.
+// Ephemeral bindings are never mirrored to PG today (upsertAgentBinding skips
+// them), so `ephemeral` is virtually always false here — but it is honored so an
+// ephemeral row can NEVER leak via the offline list even if a future change starts
+// mirroring them.
 export function offlineBindingVisible(
   b: {
     channelId: string | null;
@@ -104,13 +112,15 @@ export function offlineBindingVisible(
     ephemeral?: boolean;
   },
   guestEmail: string | null,
+  viewerGlobalId: string | null,
 ): boolean {
   return agentBindingVisibleCore(
     { channelId: b.channelId, initiatedBy: b.initiatedBy, ephemeral: b.ephemeral === true },
     () =>
-      !!b.initiatedByEmail &&
-      !!guestEmail &&
-      b.initiatedByEmail.toLowerCase() === guestEmail.toLowerCase(),
+      (!!b.initiatedByEmail &&
+        !!guestEmail &&
+        b.initiatedByEmail.toLowerCase() === guestEmail.toLowerCase()) ||
+      (!!viewerGlobalId && !!b.initiatedBy && b.initiatedBy === viewerGlobalId),
   );
 }
 
@@ -142,17 +152,36 @@ export function auditAgentRows(
   return rows;
 }
 
+// Whether the stale-binding GC (#810) may run for a single daemon's
+// list_agents_response. The GC prunes the REQUESTER's bindings on the answering
+// daemon that are absent from the live set, so it is ONLY safe on a list that is
+// the COMPLETE set of the requester's visible live agents on that daemon:
+//   • requestFiltered (e.g. a cyboId-scoped request) → the daemon answered with a
+//     SUBSET (only that cybo's agents), so a binding absent from it may still be a
+//     LIVE agent of the user — NEVER prune. Only an UNFILTERED list is complete.
+//   • liveAgentCount === 0 → an empty response is ambiguous (it can be a transient
+//     daemon error / timeout / cold start), and "no live agents ⇒ delete them all"
+//     would wipe live bindings. Under-prune instead: skip (the user can still clear
+//     a leftover manually via the offline-archive path).
+export function shouldGcOwnerBindings(opts: {
+  requestFiltered: boolean;
+  liveAgentCount: number;
+}): boolean {
+  return !opts.requestFiltered && opts.liveAgentCount > 0;
+}
+
 // Visible offline rows for a workspace's mirrored bindings, EXCLUDING any agentId
 // already present in the live fan-out (the live daemon row always wins on dedupe).
 export function offlineAgentRows(
   bindings: OfflineAgentBinding[],
   guestEmail: string | null,
   liveAgentIds: ReadonlySet<string>,
+  viewerGlobalId: string | null,
 ): Record<string, unknown>[] {
   const rows: Record<string, unknown>[] = [];
   for (const b of bindings) {
     if (liveAgentIds.has(b.agentId)) continue;
-    if (!offlineBindingVisible(b, guestEmail)) continue;
+    if (!offlineBindingVisible(b, guestEmail, viewerGlobalId)) continue;
     rows.push(buildOfflineAgentRow(b));
   }
   return rows;

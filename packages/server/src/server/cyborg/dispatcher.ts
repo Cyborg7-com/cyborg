@@ -4601,6 +4601,9 @@ export class CyborgDispatcher {
         systemPrompt,
         daemonId: this.serverId,
         initiatedBy: auth.user.id,
+        // Real canonical email (cloud-forwarded path stamps it) so the offline
+        // visibility filter matches the owner — not the local <id>@remote.local.
+        initiatedByEmail: auth.user.email ?? null,
         cwd: agent.cwd ?? parsed.cwd ?? null,
       });
       // Session-history row for the Home stats (best-effort, PG-only).
@@ -7317,6 +7320,9 @@ export class CyborgDispatcher {
         workspaceId: parsed.workspaceId,
         cyboIdOrSlug: parsed.cyboIdOrSlug,
         userId: auth.user.id,
+        // Real initiator email so this (NON-ephemeral) cybo session attributes to
+        // its owner in the offline visibility filter — not <id>@remote.local (#810).
+        initiatedByEmail: auth.user.email ?? null,
         serverId: this.serverId ?? undefined,
         cyborg7McpBaseUrl: this.cyborg7McpBaseUrl ?? undefined,
         context: {
@@ -8712,7 +8718,7 @@ export class CyborgDispatcher {
   // oxlint-disable-next-line eslint/complexity -- flat control flow, just many null-coalescing chains
   private async handleArchiveAgent(
     msg: CyborgMsg,
-    _auth: CyborgAuthContext,
+    auth: CyborgAuthContext,
     emit: EmitFn,
   ): Promise<void> {
     const parsed = CyborgArchiveAgentRequestSchema.parse(msg);
@@ -8725,6 +8731,54 @@ export class CyborgDispatcher {
         payload: { requestId: parsed.requestId, error: "Agent not found" },
       });
       return;
+    }
+
+    // Ownership guard (#810 security fix; previously _auth was unused, so any
+    // member could archive anyone's private session). The SAME rule the relay's
+    // offline-clear path uses: a SHARED channel agent (channel-bound AND
+    // non-ephemeral) is archivable by ANY member; otherwise the session is PRIVATE
+    // and archivable only by its INITIATOR (bridged by email/id) OR a workspace
+    // OWNER/ADMIN (so an owner can clear members' clutter). Applied REGARDLESS of
+    // whether a binding row exists — a LIVE agent with a null/orphaned binding must
+    // NOT bypass the check. Identity is derived from the binding when present, else
+    // the live agent's labels (which never carry the initiator), so a null-binding
+    // PRIVATE session is archivable only by an owner/admin, never a random member.
+    {
+      const channelId = binding?.channel_id ?? agent?.labels?.channelId ?? null;
+      // PG/SQLite ephemeral bindings are torn down with their agent, so a non-null
+      // binding tells us ephemeral-ness; a null binding ⇒ treat as non-ephemeral.
+      const isEphemeral = binding ? binding.ephemeral === 1 : false;
+      const isSharedChannelAgent = !!channelId && !isEphemeral;
+      if (!isSharedChannelAgent) {
+        // PRIVATE: allow the initiator OR a workspace owner/admin.
+        const initiatorId = binding?.initiated_by ?? null;
+        let isInitiator = false;
+        if (initiatorId) {
+          // initiatorId is a LOCAL SQLite id; auth.user.id can be a CLOUD id for
+          // the same person (divergent namespaces). Bridge by email when the raw
+          // ids differ — only a genuinely different account fails the match.
+          if (initiatorId === auth.user.id) {
+            isInitiator = true;
+          } else {
+            const initiator = this.storage.getUserById(initiatorId);
+            isInitiator =
+              !!initiator?.email && !!auth.user.email && initiator.email === auth.user.email;
+          }
+        }
+        const role = this.workspaceManager.getMemberRole(parsed.workspaceId, auth.user.id);
+        const isAdmin = role === "owner" || role === "admin";
+        if (!isInitiator && !isAdmin) {
+          emit({
+            type: "cyborg:error",
+            payload: {
+              requestId: parsed.requestId,
+              code: "forbidden",
+              message: "Cannot archive another user's private agent session",
+            },
+          });
+          return;
+        }
+      }
     }
 
     const provider = agent?.provider ?? binding?.provider ?? "unknown";
@@ -8917,6 +8971,9 @@ export class CyborgDispatcher {
       model: snapshot.runtimeInfo?.model ?? parsed.overrides?.model ?? session.model,
       cyboId: session.cybo_id,
       initiatedBy: auth.user.id,
+      // Real canonical email so the resumed session's offline row attributes to
+      // its owner (not the local <id>@remote.local placeholder). See #810.
+      initiatedByEmail: auth.user.email ?? null,
       cwd: snapshot.cwd ?? session.cwd ?? null,
     });
 
@@ -9159,6 +9216,9 @@ export class CyborgDispatcher {
       cyboId,
       daemonId: this.serverId,
       initiatedBy: auth.user.id,
+      // Real canonical email so the imported session's offline row attributes to
+      // its owner (not the local <id>@remote.local placeholder). See #810.
+      initiatedByEmail: auth.user.email ?? null,
       cwd: resolvedCwd,
     });
 
