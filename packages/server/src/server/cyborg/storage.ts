@@ -387,7 +387,7 @@ export interface StoredInstalledRecipe {
 
 // Closed-set reason a scheduled run was skipped (never fired). Mirrors the PG
 // schedule_runs.skip_reason check — failures are shown, never dropped (#619).
-export type ScheduleSkipReason = "license_paused" | "overlap" | "unauthorized";
+export type ScheduleSkipReason = "license_paused" | "overlap" | "unauthorized" | "duplicate";
 export type ScheduleRunStatus = "running" | "succeeded" | "failed" | "skipped";
 
 export interface StoredScheduleRun {
@@ -1186,6 +1186,21 @@ export class CyborgStorage {
       );
       CREATE INDEX IF NOT EXISTS idx_schedule_runs_schedule
         ON schedule_runs(schedule_id, started_at);
+
+      -- Cross-daemon exactly-once claim for the RAW-PROMPT cron path (#cron-dup).
+      -- The per-task fire path is guarded by claimTaskDispatch; the raw-prompt path
+      -- (schedules.task_id NULL) had only the in-PROCESS inFlight Set, so the SAME
+      -- due schedule on >1 daemon double-fired. A daemon claims a slot by INSERTing
+      -- (schedule_id, scheduled_for); the PK makes it atomic, losers conflict and
+      -- skip. In SOLO mode this single daemon always wins the (only) claim, so the
+      -- in-process guard already suffices — the table just makes the path uniform.
+      CREATE TABLE IF NOT EXISTS schedule_dispatch_claims (
+        schedule_id TEXT NOT NULL,
+        scheduled_for INTEGER NOT NULL,
+        claimed_at INTEGER NOT NULL,
+        claimed_by TEXT,
+        PRIMARY KEY (schedule_id, scheduled_for)
+      );
 
       -- User "send later" scheduled posts (#607). A single deferred human message
       -- (channel OR DM). The ScheduledMessageRunner tick fires due+unprocessed rows
@@ -3430,6 +3445,25 @@ export class CyborgStorage {
         `UPDATE schedules SET last_run_at = ?, next_run_at = ?, updated_at = ?${runCountSql} WHERE id = ?`,
       )
       .run(lastRunAt, nextRunAt, Date.now(), id);
+  }
+
+  // Cross-daemon exactly-once claim for the RAW-PROMPT cron path (#cron-dup) — the
+  // SQLite mirror of pg.claimScheduleDispatch, and the AUTHORITATIVE claim in solo
+  // mode. Wins the right to fire (schedule, slot) iff no row exists for that pair.
+  // better-sqlite3 is synchronous, so the INSERT OR IGNORE is atomic against other
+  // in-process callers. Returns true iff THIS call inserted the claim (won the slot).
+  claimScheduleDispatch(
+    scheduleId: string,
+    scheduledFor: number,
+    claimedBy?: string | null,
+  ): boolean {
+    const res = this.db
+      .prepare(
+        `INSERT OR IGNORE INTO schedule_dispatch_claims (schedule_id, scheduled_for, claimed_at, claimed_by)
+         VALUES (?, ?, ?, ?)`,
+      )
+      .run(scheduleId, scheduledFor, Date.now(), claimedBy ?? null);
+    return res.changes > 0;
   }
 
   setScheduleEnabled(id: string, enabled: boolean, nextRunAt?: number | null): void {

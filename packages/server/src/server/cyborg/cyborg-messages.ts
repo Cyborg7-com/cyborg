@@ -3805,7 +3805,7 @@ export const CyborgScheduleRunViewSchema = z.object({
   startedAt: z.number(),
   endedAt: z.number().nullable(),
   status: z.enum(["running", "succeeded", "failed", "skipped"]),
-  skipReason: z.enum(["license_paused", "overlap", "unauthorized"]).nullable(),
+  skipReason: z.enum(["license_paused", "overlap", "unauthorized", "duplicate"]).nullable(),
   agentId: z.string().nullable(),
   error: z.string().nullable(),
 });

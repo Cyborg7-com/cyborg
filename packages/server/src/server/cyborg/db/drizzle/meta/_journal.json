@@ -323,6 +323,13 @@
       "when": 1783000023000,
       "tag": "0045_agent_bindings_autonomous",
       "breakpoints": true
+    },
+    {
+      "idx": 46,
+      "version": "7",
+      "when": 1783000024000,
+      "tag": "0046_schedule_dispatch_claims",
+      "breakpoints": true
     }
   ]
 }

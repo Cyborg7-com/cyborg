@@ -257,6 +257,33 @@ export class ScheduleRunner {
       this.storage.markScheduleRun(schedule.id, Date.now(), next, true);
     }
 
+    // Cross-daemon exactly-once (#cron-dup). Everything ABOVE is per-daemon local
+    // bookkeeping (each daemon advances its OWN next_run_at / run_count, so none
+    // re-fires this slot). The FIRE itself must happen on exactly ONE daemon: the
+    // raw-prompt path runs on EVERY daemon that holds this schedule, and the
+    // in-process `inFlight` Set only dedupes within THIS process — nothing stopped
+    // two daemons both spawning the cybo + posting (the per-task path has
+    // claimTaskDispatch; this is its missing twin). Atomically claim THIS
+    // (schedule, slot); the loser daemons already advanced past the slot above, so
+    // they record a clean 'duplicate' skip and never post a second time. The slot is
+    // non-null here (getDueSchedules filters next_run_at IS NOT NULL); the guard keeps
+    // it type-safe and degrades to the in-process guard if a null ever slips through.
+    if (scheduledFor !== null) {
+      const claimed = await this.storage.claimScheduleDispatch(
+        schedule.id,
+        scheduledFor,
+        this.serverId,
+      );
+      if (!claimed) {
+        this.logger.info(
+          { scheduleId: schedule.id, scheduledFor },
+          "[schedule] dispatch slot already claimed by another daemon — skipping fire",
+        );
+        this.recordSkip(schedule, scheduledFor, "duplicate");
+        return;
+      }
+    }
+
     // Open the run-history row, then fire-and-forget but TRACKED: inFlight spans
     // the whole spawn + cybo turn so the overlap guard above can skip the next tick
     // while this run is still going. The run row is closed in fire().

@@ -65,6 +65,7 @@ interface Harness {
     finishScheduleRun: ReturnType<typeof vi.fn>;
     recordSkippedScheduleRun: ReturnType<typeof vi.fn>;
     getLiveCyboBinding: ReturnType<typeof vi.fn>;
+    claimScheduleDispatch: ReturnType<typeof vi.fn>;
     pg: unknown;
   };
   runAgent: ReturnType<typeof vi.fn>;
@@ -108,6 +109,9 @@ function makeRunner(
     claimTaskDispatch: vi.fn(() => true),
     // Per-task fire path: fireTask resolves the bound task before dispatching.
     getTaskById: vi.fn(() => undefined),
+    // Cross-daemon exactly-once claim for the raw-prompt path (#cron-dup). Default
+    // to WON so the existing single-daemon tests fire exactly as before.
+    claimScheduleDispatch: vi.fn(async () => true),
     // Item 3 (session singleton): default to NO live binding so existing tests keep
     // taking the spawn path (undefined ⇒ runner spawns fresh, unchanged behavior).
     getLiveCyboBinding: vi.fn(() => opts.liveBinding ?? (undefined as unknown)),
@@ -687,6 +691,116 @@ describe("ScheduleRunner session singleton (#cron pile-up)", () => {
 
       expect(storage.getLiveCyboBinding(ws, "cybo_z", chan)?.agent_id).toBe("ag_chan");
       expect(storage.getLiveCyboBinding(ws, "cybo_z", null)?.agent_id).toBe("ag_dm");
+    } finally {
+      storage.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+// ─── Cross-daemon exactly-once for the RAW-PROMPT path (#cron-dup) ───────────
+// The bug: the raw-prompt cron path (schedule.task_id == null) had NO cross-daemon
+// guard — only the in-PROCESS inFlight Set + a LOCAL next_run_at advance. So the
+// SAME due schedule present on two daemons fired on BOTH → duplicate channel posts +
+// duplicate visible cybo sessions ("varios Ricks"). The fix is an atomic per-(schedule,
+// fired-slot) claim mirroring claimTaskDispatch. This test models two replicas as two
+// ScheduleRunner instances sharing ONE real store (no mocks for the claim) and proves
+// a single due schedule is spawned/prompted EXACTLY ONCE across both ticks.
+describe("ScheduleRunner raw-prompt cross-daemon exactly-once (#cron-dup)", () => {
+  beforeEach(() => {
+    spawnCyboMock.mockReset();
+    spawnCyboMock.mockResolvedValue({ agentId: "ag_once", cyboId: "cybo_1", cyboSlug: "c" });
+  });
+
+  it("two replicas sharing ONE store fire a due raw-prompt schedule EXACTLY once", async () => {
+    const tmp = mkdtempSync(path.join(tmpdir(), "sched-exactly-once-"));
+    const sqlite = new CyborgStorage(path.join(tmp, "t.db"));
+    // Solo mode (pg = null): one shared SQLite IS the shared store, so the SQLite
+    // claim is the cross-replica serializer — exactly what two daemons sharing PG get.
+    const storage = new DualStorage(sqlite, null);
+    try {
+      const user = storage.upsertUser("rick@test.dev", "Rick");
+      const ws = storage.createWorkspace("WS", user.id).id; // owner auto-membered
+      // A due raw-prompt schedule (task_id null): next_run_at in the past, enabled.
+      const schedule = sqlite.createSchedule({
+        workspaceId: ws,
+        cyboId: "cybo_1",
+        cronExpr: "0 9 * * *", // valid → computeNextRunAt won't throw
+        prompt: "DM Seb the morning market brief",
+        createdBy: user.id,
+        nextRunAt: Date.now() - 60_000,
+      });
+
+      // ONE agentManager shared by both runners, so runAgent is counted across both
+      // replicas regardless of which one wins the claim.
+      const runAgent = vi.fn(() => Promise.resolve({}));
+      const agentManager = {
+        runAgent,
+        getAgent: vi.fn(() => null), // no live binding → spawn path
+      } as unknown as AgentManager;
+      const logger = { warn: vi.fn(), info: vi.fn(), error: vi.fn() } as unknown as Logger;
+
+      const runnerA = new ScheduleRunner({ storage, agentManager, logger, serverId: "daemon_A" });
+      const runnerB = new ScheduleRunner({ storage, agentManager, logger, serverId: "daemon_B" });
+
+      // Tick BOTH concurrently: each reads the due schedule (same slot) before either
+      // advances next_run_at, so both reach the claim for the SAME (schedule, slot) —
+      // exactly the cross-daemon race. The atomic claim must let only ONE through.
+      await Promise.all([runnerA.tick(), runnerB.tick()]);
+      await flush();
+
+      // The cybo was spawned + prompted EXACTLY ONCE, not once per replica.
+      expect(spawnCyboMock).toHaveBeenCalledTimes(1);
+      expect(runAgent).toHaveBeenCalledTimes(1);
+
+      // The loser recorded a clean 'duplicate' skip — visible, never a second post.
+      const runs = storage.listScheduleRuns(schedule.id);
+      const duplicates = runs.filter((r) => r.skip_reason === "duplicate");
+      expect(duplicates).toHaveLength(1);
+      // Exactly one non-skip (the winner's) run row was opened.
+      const fired = runs.filter((r) => r.skip_reason === null);
+      expect(fired).toHaveLength(1);
+    } finally {
+      storage.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("a second slot (later tick) can be claimed again — the claim is per-slot, not per-schedule", async () => {
+    const tmp = mkdtempSync(path.join(tmpdir(), "sched-exactly-once-2-"));
+    const sqlite = new CyborgStorage(path.join(tmp, "t.db"));
+    const storage = new DualStorage(sqlite, null);
+    try {
+      const user = storage.upsertUser("rick2@test.dev", "Rick");
+      const ws = storage.createWorkspace("WS", user.id).id;
+      const schedule = sqlite.createSchedule({
+        workspaceId: ws,
+        cyboId: "cybo_1",
+        cronExpr: "* * * * *", // every minute → next slot is also soon due
+        prompt: "heartbeat",
+        createdBy: user.id,
+        nextRunAt: Date.now() - 60_000,
+      });
+
+      const runAgent = vi.fn(() => Promise.resolve({}));
+      const agentManager = {
+        runAgent,
+        getAgent: vi.fn(() => null),
+      } as unknown as AgentManager;
+      const logger = { warn: vi.fn(), info: vi.fn(), error: vi.fn() } as unknown as Logger;
+      const runner = new ScheduleRunner({ storage, agentManager, logger, serverId: "daemon_A" });
+
+      // First slot fires once.
+      await runner.tick();
+      await flush();
+      expect(spawnCyboMock).toHaveBeenCalledTimes(1);
+
+      // Force the schedule due again on a NEW slot, then tick: the per-slot claim must
+      // NOT block this distinct slot (a per-schedule claim would have wedged it).
+      sqlite.markScheduleRun(schedule.id, Date.now(), Date.now() - 30_000);
+      await runner.tick();
+      await flush();
+      expect(spawnCyboMock).toHaveBeenCalledTimes(2);
     } finally {
       storage.close();
       rmSync(tmp, { recursive: true, force: true });

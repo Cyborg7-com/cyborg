@@ -4050,6 +4050,25 @@ export class PgSync {
     });
   }
 
+  // Cross-daemon exactly-once claim for the RAW-PROMPT cron path (#cron-dup). The
+  // per-task path has claimTaskDispatch; this is its raw-prompt twin. INSERT…ON
+  // CONFLICT DO NOTHING on the (scheduleId, scheduledFor) primary key: the RETURNING
+  // row proves the winner, 0 rows => another daemon already claimed THIS slot. This
+  // is the AUTHORITATIVE cross-daemon guard (each daemon has its own SQLite, so a
+  // SQLite-only claim can't dedupe across daemons — only the shared PG row can).
+  async claimScheduleDispatch(
+    scheduleId: string,
+    scheduledFor: number,
+    claimedBy?: string | null,
+  ): Promise<boolean> {
+    const rows = await this.db
+      .insert(schema.scheduleDispatchClaims)
+      .values({ scheduleId, scheduledFor, claimedBy: claimedBy ?? null })
+      .onConflictDoNothing()
+      .returning({ scheduleId: schema.scheduleDispatchClaims.scheduleId });
+    return rows.length > 0;
+  }
+
   async markScheduleRun(
     id: string,
     lastRunAt: number,

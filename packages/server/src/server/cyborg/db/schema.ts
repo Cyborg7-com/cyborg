@@ -717,6 +717,35 @@ export const scheduleRuns = pgTable(
   ],
 );
 
+// ─── Schedule dispatch claims (cross-daemon exactly-once for the RAW-PROMPT
+// cron path) ─────────────────────────────────────────────────────────────
+// The PER-TASK fire path is guarded by claimTaskDispatch (tasks.last_dispatched_at)
+// so the SAME due task never fires on two daemons at once. The RAW-PROMPT path
+// (schedules.task_id NULL — e.g. "every morning DM Seb a brief") had ONLY the
+// daemon's in-PROCESS inFlight Set, so when the SAME schedule is present + due on
+// more than one daemon EACH fired it → duplicate channel posts + duplicate cybo
+// sessions. This table is that path's missing cross-process guard: a per-(schedule,
+// fired-slot) atomic claim. The daemon that wins a slot INSERTs the (scheduleId,
+// scheduledFor) row; every other daemon conflicts on the PK and skips the fire.
+// Unlike `schedules`/`scheduleRuns` (write-only mirrors), this table is the SHARED
+// SOURCE OF TRUTH the claim is decided against — it is INSERT…ON CONFLICT and read
+// (via RETURNING) in the same statement, never read for execution otherwise.
+export const scheduleDispatchClaims = pgTable(
+  "schedule_dispatch_claims",
+  {
+    scheduleId: text("schedule_id")
+      .notNull()
+      .references(() => schedules.id, { onDelete: "cascade" }),
+    // The cron slot (the next_run_at the runner fired against), epoch ms — the
+    // same value across every daemon for one logical fire, so it keys the claim.
+    scheduledFor: bigint("scheduled_for", { mode: "number" }).notNull(),
+    claimedAt: timestamp("claimed_at", { withTimezone: true }).notNull().defaultNow(),
+    // The serverId of the winning daemon (diagnostics only; not load-bearing).
+    claimedBy: text("claimed_by"),
+  },
+  (t) => [primaryKey({ columns: [t.scheduleId, t.scheduledFor] })],
+);
+
 // ─── Scheduled messages (user "send later", #607) ────────────────
 // A user-facing "schedule this message to send at a time" feature — distinct from
 // `schedules` above (which is recurring CYBO automation, cronExpr). A row is a

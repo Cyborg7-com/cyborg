@@ -899,6 +899,31 @@ export class DualStorage {
     }
   }
 
+  // Cross-daemon exactly-once claim for the RAW-PROMPT cron path (#cron-dup). Unlike
+  // the other write-through methods here, PG is the AUTHORITATIVE store, not a mirror:
+  // each daemon has its OWN SQLite, so a SQLite-only claim always wins locally and
+  // can't dedupe across daemons — only the SHARED PG row can. So connected mode
+  // awaits the PG claim and returns its verdict. On a transient PG error fall back to
+  // the local SQLite claim (liveness over a rare cross-daemon dup during a PG outage —
+  // the in-process inFlight guard still bounds it to one fire per daemon). Solo mode
+  // (no PG) has a single daemon, so the SQLite claim — which it always wins — plus the
+  // in-process guard is sufficient.
+  async claimScheduleDispatch(
+    scheduleId: string,
+    scheduledFor: number,
+    claimedBy?: string | null,
+  ): Promise<boolean> {
+    if (this._pg) {
+      try {
+        return await this._pg.claimScheduleDispatch(scheduleId, scheduledFor, claimedBy);
+      } catch (err) {
+        this.logSyncError("claimScheduleDispatch")(err);
+        return this.sqlite.claimScheduleDispatch(scheduleId, scheduledFor, claimedBy);
+      }
+    }
+    return this.sqlite.claimScheduleDispatch(scheduleId, scheduledFor, claimedBy);
+  }
+
   setScheduleEnabled(id: string, enabled: boolean, nextRunAt?: number | null): void {
     this.sqlite.setScheduleEnabled(id, enabled, nextRunAt);
     if (this._pg) {
