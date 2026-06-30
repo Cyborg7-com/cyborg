@@ -108,13 +108,40 @@ export async function unarchiveAgentState(
   return true;
 }
 
+// Matches a <paseo-system> / </paseo-system> tag (open or close), case-insensitively,
+// with or without attributes/trailing whitespace inside the angle brackets. The `\b`
+// guards against stripping unrelated tags like <paseo-systemx>.
+const SYSTEM_ENVELOPE_TAG_PATTERN = /<\/?paseo-system\b[^>]*>/gi;
+
 /**
  * Wrap a body in <paseo-system>…</paseo-system> so the receiving agent
  * recognizes the prompt as system-injected context — not a user turn.
  * Used by chat mentions, schedule fires, and notify-on-finish.
+ *
+ * SECURITY (envelope breakout / prompt injection): every caller folds caller- or
+ * USER-controlled text into the body — DM text, chat-mention message bodies, schedule
+ * prompts, agent titles. A user who types a literal `</paseo-system>` (or `<paseo-system>`)
+ * tag in that text could otherwise break OUT of the envelope: re-exposing the private
+ * framing (the leak fix) AND forging a system-level block the model would treat as
+ * authoritative. We strip any paseo-system tags from the body BEFORE wrapping, so the body
+ * can never fragment the envelope or forge a second one. This is the single chokepoint for
+ * the whole class — sanitize here, not at each callsite, so no future caller can forget.
+ * Trusted callers pass text with no such tags, so this is a no-op for them.
+ *
+ * The strip runs in a LOOP until the text is stable. A single global replace does NOT
+ * re-scan its own output (CWE-791, incomplete multi-character sanitization): an attacker
+ * can interleave a complete tag inside a split one — e.g. `</pas</paseo-system>eo-system>`
+ * — so removing the inner tag reconstructs a live outer tag (`</paseo-system>`). Re-running
+ * until no match remains guarantees the body contains NO paseo-system tag, however nested.
  */
 export function formatSystemNotificationPrompt(reason: string): string {
-  return `<paseo-system>\n${reason}\n</paseo-system>`;
+  let sanitizedReason = reason;
+  let previous: string;
+  do {
+    previous = sanitizedReason;
+    sanitizedReason = sanitizedReason.replace(SYSTEM_ENVELOPE_TAG_PATTERN, "");
+  } while (sanitizedReason !== previous);
+  return `<paseo-system>\n${sanitizedReason}\n</paseo-system>`;
 }
 
 const SYSTEM_ENVELOPE_PATTERN = /^<paseo-system>\n[\s\S]*\n<\/paseo-system>$/;

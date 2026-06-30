@@ -41,6 +41,7 @@ import { basename } from "node:path";
 import { expandPromptTemplate, formatTemplateDate } from "./prompt-template-expand.js";
 import type { AgentManager } from "../agent/agent-manager.js";
 import type { AgentStreamEvent, AgentPromptInput } from "../agent/agent-sdk-types.js";
+import { formatSystemNotificationPrompt } from "../agent/agent-prompt.js";
 import type { MessageCard } from "./webhook-card.js";
 import type { DaemonRelayClient } from "./daemon-relay-client.js";
 import { buildCyboSpawnFailureOutcome } from "./daemon-telemetry.js";
@@ -2220,11 +2221,29 @@ export class MessageRouter {
   // channel. A scheduled cybo's session still has "Current channel: …" baked into its
   // system prompt, so be explicit. Shared by the local + cloud DM entry points so both
   // frame identically.
+  //
+  // PRIVACY (must stay): the framing is wrapped in the <paseo-system>…</paseo-system>
+  // envelope (formatSystemNotificationPrompt). This is ONLY the model's turn INPUT —
+  // every provider (claude/pi/acp/opencode) echoes its turn input back as a live
+  // `user_message` timeline event, and AgentManager.onStreamTimelineEvent /
+  // hydrateTimelineFromLegacyProviderHistory SUPPRESS a `user_message` *only* when its
+  // text is a <paseo-system> envelope (isSystemInjectedEnvelope). Without the envelope
+  // the echo is recorded + broadcast as a visible "You" message — leaking the private
+  // framing into the agent-session transcript. The raw user text shown to humans comes
+  // from the separate appendTimelineItem({ user_message, text: rawPrompt }) in
+  // routeToAgent; this wrapper keeps the framing out of that visible transcript while
+  // the model still receives the full DM guard (same mechanism chat mentions use).
+  //
+  // SECURITY: recipient.text is UNTRUSTED user input. A user who types a literal
+  // </paseo-system> tag could break out of the envelope and forge a system block.
+  // formatSystemNotificationPrompt strips any paseo-system tags from the body before
+  // wrapping (centralized chokepoint), so the breakout is neutralized for this and every
+  // other envelope caller — no per-callsite sanitization needed here.
   buildDmPrompt(recipient: { userId: string; name: string; text: string }): string {
-    return (
+    return formatSystemNotificationPrompt(
       `[PRIVATE DM from ${recipient.name} (user id: ${recipient.userId})]: ${recipient.text}\n\n` +
-      `This is a private 1:1 direct message. Reply ONLY by DMing the user back ` +
-      `(cyborg7_send_message with to: "${recipient.userId}"). Do NOT post to any channel for this turn.`
+        `This is a private 1:1 direct message. Reply ONLY by DMing the user back ` +
+        `(cyborg7_send_message with to: "${recipient.userId}"). Do NOT post to any channel for this turn.`,
     );
   }
 
