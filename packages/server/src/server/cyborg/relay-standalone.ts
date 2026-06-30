@@ -5881,6 +5881,15 @@ async function main() {
             // to fromUserId (cloud id) directly. Carry the email so the daemon can
             // bridge the two id namespaces by identity.
             fromEmail: promptUser?.email ?? null,
+            // An agent-session / DM prompt to a cybo is an inherently PRIVATE 1:1
+            // turn (we injected a dm_broadcast for it just above). Tag the recipient
+            // so the owning daemon arms the DM guard (routeDmTurn) — without this the
+            // cloud path bypasses handleDm and a channel-bound cybo's reply leaks into
+            // its bound channel. The daemon resolves the recipient's LOCAL id by email
+            // (id namespaces differ); the email also steers the relay-flush guard.
+            ...(promptUser?.email
+              ? { dmRecipient: { userId: guest.userId, email: promptUser.email } }
+              : {}),
           });
           respond("cyborg:send_agent_prompt_response", {
             agentId,

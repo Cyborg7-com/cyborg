@@ -1256,6 +1256,16 @@ export class DualStorage {
     return this.sqlite.getCyboBindingsByWorkspace(workspaceId);
   }
 
+  // Item 3 (session singleton): the live non-ephemeral binding for a (cybo, scope) —
+  // reads SQLite (the authoritative live-binding store on this daemon).
+  getLiveCyboBinding(
+    workspaceId: string,
+    cyboId: string,
+    channelId: string | null,
+  ): StoredAgentBinding | undefined {
+    return this.sqlite.getLiveCyboBinding(workspaceId, cyboId, channelId);
+  }
+
   deleteAgentBinding(agentId: string): void {
     // Read BEFORE the SQLite delete so we still know whether this was an ephemeral
     // row (which was never mirrored, so its PG delete would be a no-op roundtrip).

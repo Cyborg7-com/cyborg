@@ -77,6 +77,13 @@ interface PendingAgentMessage {
   // #845: images the daemon captured from agent output and shipped inline; the
   // relay uploads them to S3 at flush and stores them as message attachments.
   imageAttachments?: AgentImageAttachment[];
+  // Item 2 (defense in depth): the DM recipient's email when this turn is a PRIVATE
+  // 1:1 (the daemon's emitAgentStream sets privateToEmail). Captured at accumulate
+  // time from the timeline stream (the flush trigger may be an agent_status payload
+  // that no longer carries it), and forces the reply to broadcast as a DM — so a
+  // DM-origin reply is STRUCTURALLY unable to land in a channel even if the owning
+  // (or a peer) daemon's in-process guard is stale/absent. null = channel-scoped.
+  dmRecipientEmail?: string | null;
 }
 
 export class WorkspaceRelay {
@@ -85,6 +92,11 @@ export class WorkspaceRelay {
   private workspaceSubscribers = new Map<string, Set<WebSocket>>();
   private workspaceSeqs = new Map<string, WorkspaceSeq>();
   private pendingAgentMessages = new Map<string, PendingAgentMessage>();
+  // Item 2: the DM recipient email captured for the message just flushed (keyed by
+  // agentId), so broadcastAgentReply addresses the DM even when the flush trigger is
+  // an agent_status payload that no longer carries privateToEmail. Set in
+  // flushPendingAgentMessage, read+cleared in broadcastAgentReply.
+  private lastFlushedDmEmail = new Map<string, string>();
   private bufferFlushTimer: ReturnType<typeof setInterval> | null = null;
   private presenceSweepTimer: ReturnType<typeof setInterval> | null = null;
   private keepaliveTimer: ReturnType<typeof setInterval> | null = null;
@@ -681,7 +693,15 @@ export class WorkspaceRelay {
       createdAt: record.createdAt,
     };
 
-    if (record.channelId) {
+    // Item 2 (defense in depth): a captured DM scope (from the flushed pending
+    // message) is AUTHORITATIVE — a private 1:1 reply must broadcast as a DM, never
+    // to a channel, even if some channelId survived. Prefer the captured email over
+    // the trigger payload's (which may be an agent_status without privateToEmail).
+    const agentId = typeof payload.agentId === "string" ? payload.agentId : null;
+    const capturedDmEmail = agentId ? this.lastFlushedDmEmail.get(agentId) : undefined;
+    if (agentId) this.lastFlushedDmEmail.delete(agentId);
+
+    if (record.channelId && !capturedDmEmail) {
       this.onBroadcast(
         workspaceId,
         {
@@ -695,7 +715,8 @@ export class WorkspaceRelay {
     }
 
     const privateToEmail =
-      typeof payload.privateToEmail === "string" ? payload.privateToEmail : null;
+      capturedDmEmail ??
+      (typeof payload.privateToEmail === "string" ? payload.privateToEmail : null);
     if (!privateToEmail || !this.pg) return;
     const user = await this.pg.getUserByEmail(privateToEmail);
     if (!user) return;
@@ -854,32 +875,68 @@ export class WorkspaceRelay {
       : [];
     const cyboName = typeof payload.cyboName === "string" ? payload.cyboName : null;
     const cyboId = typeof payload.cyboId === "string" ? payload.cyboId : null;
+    // Item 2 (defense in depth): a PRIVATE 1:1 turn carries privateToEmail. Treat its
+    // presence as authoritative DM scope — a private reply must NEVER persist into a
+    // channel, regardless of what channelId the daemon tagged (a stale/absent
+    // in-process guard, or a cross-daemon turn). When set, force channelId null.
+    const dmRecipientEmail =
+      typeof payload.privateToEmail === "string" ? payload.privateToEmail : null;
+    const channelId = dmRecipientEmail ? null : ((payload.channelId as string | null) ?? null);
     const existing = this.pendingAgentMessages.get(agentId);
     if (existing) {
-      existing.text += item.text;
-      existing.seq = seq;
-      // A split-across-deltas reply may carry the cybo identity on a later delta;
-      // set it once we see it, never clobber an already-captured value.
-      if (cyboName && !existing.cyboName) existing.cyboName = cyboName;
-      if (cyboId && !existing.cyboId) existing.cyboId = cyboId;
-      if (images.length > 0) {
-        existing.imageAttachments = [...(existing.imageAttachments ?? []), ...images];
-      }
+      this.mergeAgentStreamDelta(existing, {
+        seq,
+        text: item.text,
+        cyboName,
+        cyboId,
+        dmRecipientEmail,
+        images,
+      });
     } else {
       this.pendingAgentMessages.set(agentId, {
         workspaceId,
         agentId,
         messageId: (item.messageId as string) ?? randomUUID(),
-        // The agent's binding channel (null for DM agents) — carried on the
+        // The agent's binding channel (null for DM/private turns) — carried on the
         // payload by message-router so the persisted reply lands in the right
-        // channel and is findable on reload.
-        channelId: (payload.channelId as string | null) ?? null,
+        // channel and is findable on reload. Forced null for a private turn (above).
+        channelId,
         cyboName,
         cyboId,
         text: item.text,
         seq,
         imageAttachments: images.length > 0 ? images : undefined,
+        dmRecipientEmail,
       });
+    }
+  }
+
+  // Merge a later split-across-deltas timeline delta into the pending reply. Extracted
+  // from accumulateAgentStreamText to keep that method under the complexity budget.
+  private mergeAgentStreamDelta(
+    existing: PendingAgentMessage,
+    delta: {
+      seq: number;
+      text: string;
+      cyboName: string | null;
+      cyboId: string | null;
+      dmRecipientEmail: string | null;
+      images: AgentImageAttachment[];
+    },
+  ): void {
+    existing.text += delta.text;
+    existing.seq = delta.seq;
+    // A split delta may carry the cybo identity later; set it once, never clobber.
+    if (delta.cyboName && !existing.cyboName) existing.cyboName = delta.cyboName;
+    if (delta.cyboId && !existing.cyboId) existing.cyboId = delta.cyboId;
+    // The DM scope may arrive on a later delta — sticky: once a delta marks this turn
+    // private, it STAYS private (null channel) for the whole reply.
+    if (delta.dmRecipientEmail) {
+      existing.dmRecipientEmail = delta.dmRecipientEmail;
+      existing.channelId = null;
+    }
+    if (delta.images.length > 0) {
+      existing.imageAttachments = [...(existing.imageAttachments ?? []), ...delta.images];
     }
   }
 
@@ -918,6 +975,14 @@ export class WorkspaceRelay {
         }
       }
       if (uploaded.length > 0) attachments = uploaded;
+    }
+
+    // Item 2: hand the captured DM scope to broadcastAgentReply (the flush trigger
+    // payload may be an agent_status without privateToEmail). Cleared after read.
+    if (pending.dmRecipientEmail) {
+      this.lastFlushedDmEmail.set(agentId, pending.dmRecipientEmail);
+    } else {
+      this.lastFlushedDmEmail.delete(agentId);
     }
 
     return {

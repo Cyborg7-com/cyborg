@@ -1046,6 +1046,48 @@ export async function createPaseoDaemon(
     return !!initiator?.email && !!fwd.fromEmail && initiator.email === fwd.fromEmail;
   };
 
+  // Route a forwarded prompt to its agent. A DM/agent-session prompt (dmRecipient set)
+  // goes through the armed DM path (routeDmTurn) so a channel-bound cybo's reply can't
+  // leak into its bound channel — the cloud parity of the local handleDm path. The
+  // LOCAL recipient id is resolved from the email (cloud id ≠ local id); with no
+  // attachments we also Layer-A frame the raw text, otherwise we route the pre-built
+  // vision prompt as-is (Layer-B guard + stream steering still apply). Extracted from
+  // the agent_prompt_forward handler to keep that handler under the complexity budget.
+  const routeForwardedPrompt = (
+    fwd: {
+      agentId: string;
+      prompt: AgentPromptInput;
+      attachments?: PromptAttachment[];
+      dmRecipient?: { userId: string; email: string };
+    },
+    routedPrompt: AgentPromptInput,
+  ): void => {
+    const rawPrompt = promptInputToText(routedPrompt);
+    if (!fwd.dmRecipient) {
+      void cyborgMessageRouter.routeToAgent(fwd.agentId, routedPrompt, { rawPrompt });
+      return;
+    }
+    const localUser = fwd.dmRecipient.email
+      ? cyborgStorage?.getUserByEmail(fwd.dmRecipient.email)
+      : undefined;
+    const recipientId = localUser?.id ?? fwd.dmRecipient.userId;
+    const hasAttachments = !!fwd.attachments && fwd.attachments.length > 0;
+    const dmPrompt =
+      typeof fwd.prompt === "string" && !hasAttachments
+        ? cyborgMessageRouter.buildDmPrompt({
+            userId: recipientId,
+            name: localUser?.name ?? localUser?.email ?? fwd.dmRecipient.email,
+            text: fwd.prompt,
+          })
+        : routedPrompt;
+    void cyborgMessageRouter.routeDmTurn(
+      fwd.agentId,
+      { userId: recipientId, email: fwd.dmRecipient.email },
+      dmPrompt,
+      { rawPrompt },
+    );
+  };
+
   // Cyborg7: resolve the relay deterministically (#664) — env → cyborg-relay-url
   // file → config.relayEndpoint, NEVER relay.paseo.sh. Resolved ONCE here and
   // reused by the Paseo relay transport below (which previously defaulted to
@@ -1266,6 +1308,12 @@ export async function createPaseoDaemon(
             attachments?: PromptAttachment[];
             fromUserId?: string;
             fromEmail?: string | null;
+            // Set by the relay for an agent-session / DM prompt to a cybo (an
+            // inherently PRIVATE 1:1 turn). When present, route through the DM
+            // guard (routeDmTurn) so a channel-bound cybo's reply can't leak into
+            // its bound channel — the CLOUD parity of the local handleDm path.
+            // userId is the CLOUD (PG) id; the daemon resolves the LOCAL id by email.
+            dmRecipient?: { userId: string; email: string };
           };
           void (async () => {
             const binding = cyborgStorage?.getAgentBinding(fwd.agentId);
@@ -1335,9 +1383,9 @@ export async function createPaseoDaemon(
                     supportsImageBlocks: binding?.provider === "claude",
                   })
                 : fwd.prompt;
-            void cyborgMessageRouter.routeToAgent(fwd.agentId, routedPrompt, {
-              rawPrompt: promptInputToText(routedPrompt),
-            });
+            // Route to the agent — a DM/agent-session prompt (dmRecipient set) goes
+            // through the armed DM guard so its reply can't leak into a channel.
+            routeForwardedPrompt(fwd, routedPrompt);
           })();
         } else if (msgType === "cyborg:permission_response_forward") {
           const fwd = msg as { agentId: string; permissionRequestId: string; response: unknown };

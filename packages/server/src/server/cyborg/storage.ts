@@ -3773,6 +3773,28 @@ export class CyborgStorage {
     return this.getCyboBindingsByWorkspaceStmt.all(workspaceId) as StoredAgentBinding[];
   }
 
+  // Item 3 (session singleton): the live, NON-ephemeral binding for a (cybo, scope)
+  // so a recurring cron fire / DM reuses ONE session instead of spawning a fresh
+  // "several Ricks" pile-up. Scope is the channel: a channelId selects the
+  // channel-bound session; channelId = null selects the DM-scoped session (which has
+  // no "Current channel" in its prompt, so its reply can't pick up #general). Returns
+  // the most recently created match (a tie-breaker for legacy duplicate rows), or
+  // undefined when none exists (first run / agent torn down → caller spawns fresh).
+  getLiveCyboBinding(
+    workspaceId: string,
+    cyboId: string,
+    channelId: string | null,
+  ): StoredAgentBinding | undefined {
+    const sql =
+      channelId === null
+        ? "SELECT * FROM agent_bindings WHERE workspace_id = ? AND cybo_id = ? AND channel_id IS NULL AND ephemeral = 0 ORDER BY created_at DESC LIMIT 1"
+        : "SELECT * FROM agent_bindings WHERE workspace_id = ? AND cybo_id = ? AND channel_id = ? AND ephemeral = 0 ORDER BY created_at DESC LIMIT 1";
+    const stmt = this.db.prepare(sql);
+    const row =
+      channelId === null ? stmt.get(workspaceId, cyboId) : stmt.get(workspaceId, cyboId, channelId);
+    return row as StoredAgentBinding | undefined;
+  }
+
   deleteAgentBinding(agentId: string): void {
     this.deleteAgentBindingStmt.run(agentId);
   }

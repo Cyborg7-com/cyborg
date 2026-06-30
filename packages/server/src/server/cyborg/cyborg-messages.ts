@@ -2270,6 +2270,12 @@ export const CyborgSendAgentPromptRequestSchema = z.object({
   // text reference for providers without image support. Same shape as channel
   // attachments, capped to keep the prompt payload bounded.
   attachments: z.array(AttachmentSchema).max(10).optional(),
+  // DM/agent-session prompt is an inherently PRIVATE 1:1 turn (the relay also
+  // injects a dm_broadcast for it). When present, the relay forwards it on the
+  // agent_prompt_forward so the owning daemon arms the DM guard (routeDmTurn) —
+  // closing the cloud DM-to-cybo channel-leak. Additive/optional → fully
+  // back-compat with clients that don't send it (a non-DM agent-session prompt).
+  dmRecipient: z.object({ userId: z.string(), email: z.string() }).optional(),
 });
 
 export const CyborgCreateAgentResponseSchema = z.object({

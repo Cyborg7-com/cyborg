@@ -2200,32 +2200,62 @@ export class MessageRouter {
 
     const binding = this.storage.getAgentBinding(msg.toId);
     if (binding && binding.workspace_id === msg.workspaceId) {
-      const senderName = auth.user.name ?? auth.user.email;
-      // Layer A (prompt scoping): tell the cybo this is a PRIVATE 1:1 DM and it must
-      // reply by DMing the user back, never to a channel. A scheduled cybo's session
-      // still has "Current channel: …" baked into its system prompt, so be explicit.
-      const prompt =
-        `[PRIVATE DM from ${senderName} (user id: ${auth.user.id})]: ${msg.text}\n\n` +
-        `This is a private 1:1 direct message. Reply ONLY by DMing the user back ` +
-        `(cyborg7_send_message with to: "${auth.user.id}"). Do NOT post to any channel for this turn.`;
-      // Layer B (hard guard): mark this agent as mid-DM-turn so handleAgentMessage
-      // redirects any channel post to this DM recipient. Tracked in a Set so a
-      // concurrent/rejected turn's .finally only removes its own id; the key is
-      // dropped when the last DM turn for the agent ends.
-      let recipients = this.dmTurnRecipient.get(msg.toId);
-      if (!recipients) {
-        recipients = new Map<string, string>();
-        this.dmTurnRecipient.set(msg.toId, recipients);
-      }
-      recipients.set(auth.user.id, auth.user.email);
-      void this.routeToAgent(msg.toId, prompt, { rawPrompt: msg.text }).finally(() => {
-        const set = this.dmTurnRecipient.get(msg.toId);
-        if (set) {
-          set.delete(auth.user.id);
-          if (set.size === 0) this.dmTurnRecipient.delete(msg.toId);
-        }
+      // Route through the single armed DM path so a DM-to-cybo reply can never leak
+      // into the cybo's persistent channel-bound session — see routeDmTurn. The
+      // Layer-A framed prompt is built here (the cloud path frames its own in
+      // bootstrap, folding in any attachments).
+      const prompt = this.buildDmPrompt({
+        userId: auth.user.id,
+        name: auth.user.name ?? auth.user.email,
+        text: msg.text,
+      });
+      void this.routeDmTurn(msg.toId, { userId: auth.user.id, email: auth.user.email }, prompt, {
+        rawPrompt: msg.text,
       });
     }
+  }
+
+  // Build the Layer-A (prompt scoping) framing for a 1:1 DM turn: tell the cybo this
+  // is a PRIVATE direct message and it must reply by DMing the user back, never to a
+  // channel. A scheduled cybo's session still has "Current channel: …" baked into its
+  // system prompt, so be explicit. Shared by the local + cloud DM entry points so both
+  // frame identically.
+  buildDmPrompt(recipient: { userId: string; name: string; text: string }): string {
+    return (
+      `[PRIVATE DM from ${recipient.name} (user id: ${recipient.userId})]: ${recipient.text}\n\n` +
+      `This is a private 1:1 direct message. Reply ONLY by DMing the user back ` +
+      `(cyborg7_send_message with to: "${recipient.userId}"). Do NOT post to any channel for this turn.`
+    );
+  }
+
+  // The ONE armed DM path: mark the agent as mid-DM-turn (dmTurnRecipient), route the
+  // (caller-framed) turn, and clear the guard on completion. Used by BOTH the local
+  // handleDm and the CLOUD agent_prompt_forward path (bootstrap), so a DM-to-cybo reply
+  // can never leak into the cybo's persistent channel-bound session regardless of which
+  // entry point delivered the prompt. The guard is a Map (per recipient id) so a second
+  // concurrent DM whose routeToAgent rejects ("agent busy") only clears its OWN entry,
+  // never the still-running turn's; the key is dropped when the last DM turn for this
+  // agent ends. While it's armed, emitAgentStream nulls the channel + sets
+  // privateToEmail, and handleAgentMessage redirects any channel post to the DM.
+  routeDmTurn(
+    agentId: string,
+    recipient: { userId: string; email: string },
+    prompt: AgentPromptInput,
+    opts?: { rawPrompt?: string },
+  ): Promise<void> {
+    let recipients = this.dmTurnRecipient.get(agentId);
+    if (!recipients) {
+      recipients = new Map<string, string>();
+      this.dmTurnRecipient.set(agentId, recipients);
+    }
+    recipients.set(recipient.userId, recipient.email);
+    return this.routeToAgent(agentId, prompt, opts).finally(() => {
+      const set = this.dmTurnRecipient.get(agentId);
+      if (set) {
+        set.delete(recipient.userId);
+        if (set.size === 0) this.dmTurnRecipient.delete(agentId);
+      }
+    });
   }
 
   // If this agent is mid-DM-turn, a channel post must be redirected to the DM

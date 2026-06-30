@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import type { DualStorage } from "./dual-storage.js";
+import { mkdtempSync, rmSync } from "node:fs";
+import path from "node:path";
+import { tmpdir } from "node:os";
+import { DualStorage } from "./dual-storage.js";
+import { CyborgStorage } from "./storage.js";
 import type { AgentManager } from "../agent/agent-manager.js";
 import type { Logger } from "pino";
 import type { StoredSchedule } from "./storage.js";
@@ -60,9 +64,11 @@ interface Harness {
     startScheduleRun: ReturnType<typeof vi.fn>;
     finishScheduleRun: ReturnType<typeof vi.fn>;
     recordSkippedScheduleRun: ReturnType<typeof vi.fn>;
+    getLiveCyboBinding: ReturnType<typeof vi.fn>;
     pg: unknown;
   };
   runAgent: ReturnType<typeof vi.fn>;
+  getAgent: ReturnType<typeof vi.fn>;
 }
 
 let runRowSeq = 0;
@@ -73,6 +79,10 @@ function makeRunner(
     member?: boolean;
     pg?: unknown;
     runAgent?: ReturnType<typeof vi.fn>;
+    // Item 3: override agentManager.getAgent (reuse probe) + the storage live-binding
+    // lookup to exercise the session-singleton reuse path.
+    getAgent?: ReturnType<typeof vi.fn>;
+    liveBinding?: { agent_id: string } | undefined;
   } = {},
 ): Harness {
   const schedule = opts.schedule ?? makeSchedule();
@@ -98,6 +108,9 @@ function makeRunner(
     claimTaskDispatch: vi.fn(() => true),
     // Per-task fire path: fireTask resolves the bound task before dispatching.
     getTaskById: vi.fn(() => undefined),
+    // Item 3 (session singleton): default to NO live binding so existing tests keep
+    // taking the spawn path (undefined ⇒ runner spawns fresh, unchanged behavior).
+    getLiveCyboBinding: vi.fn(() => opts.liveBinding ?? (undefined as unknown)),
     // Id-space bridge: created_by is a daemon-LOCAL id; the runner resolves its
     // email to look up the CLOUD account id (connected mode). Default: unknown
     // local id (no email) so solo/aligned tests don't bridge.
@@ -105,7 +118,10 @@ function makeRunner(
     pg: opts.pg ?? null,
   };
   const runAgent = opts.runAgent ?? vi.fn(() => Promise.resolve({}));
-  const agentManager = { runAgent };
+  // Item 3: getAgent default returns null (agent not loaded) ⇒ reuse never triggers,
+  // so existing tests keep spawning fresh. The reuse test overrides both.
+  const getAgent = opts.getAgent ?? vi.fn(() => null);
+  const agentManager = { runAgent, getAgent };
   const logger = { warn: vi.fn(), info: vi.fn(), error: vi.fn() };
   const runner = new ScheduleRunner({
     storage: storage as unknown as DualStorage,
@@ -113,7 +129,7 @@ function makeRunner(
     logger: logger as unknown as Logger,
     serverId: "daemon_1",
   });
-  return { runner, storage, runAgent };
+  return { runner, storage, runAgent, getAgent };
 }
 
 // Drain microtasks so the fire-and-forget fire() promise (spawn + runAgent +
@@ -571,5 +587,109 @@ describe("ScheduleRunner fire() per-task routing", () => {
     expect(spawnCyboMock).toHaveBeenCalledTimes(1);
     expect(dispatchTaskSpy).not.toHaveBeenCalled();
     expect(h.storage.getTaskById).not.toHaveBeenCalled();
+  });
+});
+
+// Item 3 (session singleton): a per-(cybo, channel) cron fire must reuse ONE live
+// session instead of spawning a fresh visible "Rick" on every tick.
+describe("ScheduleRunner session singleton (#cron pile-up)", () => {
+  beforeEach(() => {
+    spawnCyboMock.mockReset();
+    spawnCyboMock.mockResolvedValue({ agentId: "ag_new", cyboId: "cybo_1", cyboSlug: "c" });
+  });
+
+  it("reuses a LIVE (cybo, channel) binding — no new spawn, routes to the same agent", async () => {
+    // A live channel-bound session already exists for this cybo, and its agent is
+    // loaded in this process — the reuse probe must pick it up.
+    const liveAgentId = "ag_live";
+    const getAgent = vi.fn((id: string) => (id === liveAgentId ? ({ id } as unknown) : null));
+    const h = makeRunner({
+      schedule: makeSchedule({ channel_id: "chan_1" }),
+      liveBinding: { agent_id: liveAgentId },
+      getAgent,
+    });
+
+    await h.runner.tick();
+    await flush();
+
+    // No fresh spawn — the existing session was reused.
+    expect(spawnCyboMock).not.toHaveBeenCalled();
+    // The reuse probe queried the (cybo, channel) scope and ran the SAME agent.
+    expect(h.storage.getLiveCyboBinding).toHaveBeenCalledWith("ws_1", "cybo_1", "chan_1");
+    expect(h.runAgent).toHaveBeenCalledTimes(1);
+    expect(h.runAgent.mock.calls[0][0]).toBe(liveAgentId);
+  });
+
+  it("two consecutive fires for the same (cybo, channel) reuse ONE binding", async () => {
+    const liveAgentId = "ag_live";
+    const getAgent = vi.fn((id: string) => (id === liveAgentId ? ({ id } as unknown) : null));
+    const h = makeRunner({
+      schedule: makeSchedule({ channel_id: "chan_1" }),
+      liveBinding: { agent_id: liveAgentId },
+      getAgent,
+    });
+
+    await h.runner.tick();
+    await flush();
+    await h.runner.tick();
+    await flush();
+
+    // Both fires reused the live session — zero spawns, two runs on the same agent.
+    expect(spawnCyboMock).not.toHaveBeenCalled();
+    expect(h.runAgent).toHaveBeenCalledTimes(2);
+    expect(h.runAgent.mock.calls[0][0]).toBe(liveAgentId);
+    expect(h.runAgent.mock.calls[1][0]).toBe(liveAgentId);
+  });
+
+  it("spawns fresh when the live binding's agent is NOT loaded (torn down / first run)", async () => {
+    // A binding row exists but its agent is gone (getAgent → null): prefer a clean
+    // fresh spawn over reviving a cold session.
+    const h = makeRunner({
+      schedule: makeSchedule({ channel_id: "chan_1" }),
+      liveBinding: { agent_id: "ag_stale" },
+      getAgent: vi.fn(() => null),
+    });
+
+    await h.runner.tick();
+    await flush();
+
+    expect(spawnCyboMock).toHaveBeenCalledTimes(1);
+    expect(h.runAgent).toHaveBeenCalledTimes(1);
+    expect(h.runAgent.mock.calls[0][0]).toBe("ag_new");
+  });
+
+  it("getLiveCyboBinding(channelId=null) selects the DM-scoped binding", () => {
+    // The reuse keying must distinguish a DM-scoped binding (channel_id IS NULL) from
+    // a channel-bound one — proven at the storage layer so a DM never reuses a
+    // channel-bound session (whose prompt carries "Current channel" → leak risk).
+    const tmp = mkdtempSync(path.join(tmpdir(), "sched-singleton-"));
+    const sqlite = new CyborgStorage(path.join(tmp, "t.db"));
+    const storage = new DualStorage(sqlite, null);
+    try {
+      const user = storage.upsertUser("z@test.dev", "Z");
+      const ws = storage.createWorkspace("WS", user.id).id;
+      const chan = storage.getChannels(ws).find((c) => c.name === "general")!.id;
+      // Two NON-ephemeral bindings for the SAME cybo: one channel-bound, one DM-scoped.
+      storage.createAgentBinding({
+        agentId: "ag_chan",
+        workspaceId: ws,
+        channelId: chan,
+        provider: "pi",
+        cyboId: "cybo_z",
+      });
+      storage.createAgentBinding({
+        agentId: "ag_dm",
+        workspaceId: ws,
+        channelId: null,
+        provider: "pi",
+        cyboId: "cybo_z",
+      });
+
+      expect(storage.getLiveCyboBinding(ws, "cybo_z", chan)?.agent_id).toBe("ag_chan");
+      expect(storage.getLiveCyboBinding(ws, "cybo_z", null)?.agent_id).toBe("ag_dm");
+    } finally {
+      storage.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
   });
 });

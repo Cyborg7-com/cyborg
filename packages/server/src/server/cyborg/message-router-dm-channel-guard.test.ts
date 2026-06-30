@@ -143,4 +143,68 @@ describe("message-router: DM turn cannot post to a channel", () => {
     expect(post!.payload.channelId).toBe(channelId);
     expect(broadcastTypes()).not.toContain("cyborg:dm_broadcast");
   });
+
+  // REGRESSION (#1026/#1030 only guarded handleDm — the CLOUD desktop DMG never calls
+  // it). The cloud DM-to-cybo path is relay-standalone send_agent_prompt →
+  // agent_prompt_forward → daemon bootstrap, which now calls routeDmTurn (NOT bare
+  // routeToAgent). This proves that armed path redirects a channel post to the DM —
+  // the exact leak the cloud client hit.
+  it("CLOUD path (routeDmTurn) redirects a channel post to the DM, never the channel", async () => {
+    // Simulate the cloud turn: the daemon's agent_prompt_forward handler calls
+    // routeDmTurn after resolving the local recipient by email. Inside the turn the
+    // channel-bound cybo tries to post to its bound channel — the leak path.
+    (messageRouter as any).routeToAgent = async (id: string) => {
+      messageRouter.handleAgentMessage(id, workspaceId, channelId, null, "secret cloud DM reply");
+    };
+
+    const prompt = messageRouter.buildDmPrompt({
+      userId: owner.user.id,
+      name: owner.user.name ?? owner.user.email,
+      text: "hey, privately (cloud)",
+    });
+    await messageRouter.routeDmTurn(
+      agentId,
+      { userId: owner.user.id, email: owner.user.email },
+      prompt,
+      { rawPrompt: "hey, privately (cloud)" },
+    );
+
+    // No channel post leaked.
+    expect(broadcastTypes()).not.toContain("cyborg:channel_message_broadcast");
+    // The reply went to the human as a DM instead.
+    const dm = broadcasts.find(
+      (b) => b.type === "cyborg:dm_broadcast" && b.payload.text === "secret cloud DM reply",
+    );
+    expect(dm).toBeDefined();
+    expect(dm!.payload.toId).toBe(owner.user.id);
+  });
+
+  // The CLOUD path must also steer the relay flush: a channel-bound cybo answering a
+  // DM via the agent_stream path emits channelId:null + the recipient's email so the
+  // relay persists/broadcasts a DM, not a channel post.
+  it("CLOUD path (routeDmTurn) steers agent_stream to the DM (channelId:null + email)", async () => {
+    (messageRouter as any).routeToAgent = async (id: string) => {
+      (messageRouter as any).emitAgentStream(id, storage.getAgentBinding(id), {
+        type: "timeline",
+        item: { type: "assistant_message", text: "private cloud", messageId: "mc1" },
+      });
+    };
+
+    const prompt = messageRouter.buildDmPrompt({
+      userId: owner.user.id,
+      name: owner.user.name ?? owner.user.email,
+      text: "hey (cloud stream)",
+    });
+    await messageRouter.routeDmTurn(
+      agentId,
+      { userId: owner.user.id, email: owner.user.email },
+      prompt,
+      { rawPrompt: "hey (cloud stream)" },
+    );
+
+    const stream = broadcasts.find((b) => b.type === "cyborg:agent_stream");
+    expect(stream).toBeDefined();
+    expect(stream!.payload.channelId).toBeNull();
+    expect(stream!.payload.privateToEmail).toBe(owner.user.email);
+  });
 });

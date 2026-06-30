@@ -470,38 +470,59 @@ export class ScheduleRunner {
       return;
     }
     try {
-      const channel = schedule.channel_id
-        ? this.storage.getChannel(schedule.channel_id)
-        : undefined;
-      const result = await spawnCybo({
-        storage: this.storage,
-        agentManager: this.agentManager,
-        workspaceId: schedule.workspace_id,
-        cyboIdOrSlug: schedule.cybo_id,
-        userId: schedule.created_by,
-        serverId: this.serverId,
-        cyborg7McpBaseUrl: this.cyborg7McpBaseUrl,
-        // A scheduled run is UNATTENDED — no human to answer a permission prompt —
-        // so a claude cybo must bypass canUseTool or its post/tool calls hang
-        // forever (the turn never settles, the inFlight guard never clears, and the
-        // reminder is never posted). Stays a visible agent session (not ephemeral).
-        unattended: true,
-        context: {
-          channelId: schedule.channel_id ?? undefined,
-          channelName: channel?.name,
-        },
-        credentialStore: this.credentialStore,
-        composio: this.composio,
-        autonomous: true,
-        logger: this.logger,
-      });
+      // Item 3 (session singleton): reuse the cybo's live (cybo, channel) session
+      // instead of spawning a fresh one on EVERY fire — a per-minute cron otherwise
+      // piled up one visible "Rick" session per tick. Reuse only when the binding's
+      // agent is still LOADED in this process (routeToAgent/runAgent can act on it);
+      // a torn-down/never-loaded agent falls through to a fresh spawn (first run /
+      // agent gone), preserving continuity without resurrecting a dead session.
+      const reusedAgentId = this.reuseLiveCyboBinding(
+        schedule.workspace_id,
+        schedule.cybo_id,
+        schedule.channel_id ?? null,
+      );
+      let agentId: string;
+      if (reusedAgentId) {
+        agentId = reusedAgentId;
+        this.logger.info(
+          { scheduleId: schedule.id, agentId, channelId: schedule.channel_id ?? null },
+          "[schedule] reusing live cybo session (no new spawn)",
+        );
+      } else {
+        const channel = schedule.channel_id
+          ? this.storage.getChannel(schedule.channel_id)
+          : undefined;
+        const result = await spawnCybo({
+          storage: this.storage,
+          agentManager: this.agentManager,
+          workspaceId: schedule.workspace_id,
+          cyboIdOrSlug: schedule.cybo_id,
+          userId: schedule.created_by,
+          serverId: this.serverId,
+          cyborg7McpBaseUrl: this.cyborg7McpBaseUrl,
+          // A scheduled run is UNATTENDED — no human to answer a permission prompt —
+          // so a claude cybo must bypass canUseTool or its post/tool calls hang
+          // forever (the turn never settles, the inFlight guard never clears, and the
+          // reminder is never posted). Stays a visible agent session (not ephemeral).
+          unattended: true,
+          context: {
+            channelId: schedule.channel_id ?? undefined,
+            channelName: channel?.name,
+          },
+          credentialStore: this.credentialStore,
+          composio: this.composio,
+          autonomous: true,
+          logger: this.logger,
+        });
+        agentId = result.agentId;
+      }
       // Deliver the schedule's prompt as the cybo's first turn. AWAIT the full turn
       // (runAgent resolves at turn end) so the inFlight overlap guard stays set for
       // the whole run, not just the spawn. The timeline persists independently.
-      await this.agentManager.runAgent(result.agentId, schedule.prompt);
-      // Closed-set 'succeeded' with the spawned agent id so the UI can deep-link
-      // into the Agents pane (#619).
-      this.finishRun(runId, { status: "succeeded", agentId: result.agentId });
+      await this.agentManager.runAgent(agentId, schedule.prompt);
+      // Closed-set 'succeeded' with the agent id so the UI can deep-link into the
+      // Agents pane (#619).
+      this.finishRun(runId, { status: "succeeded", agentId });
     } catch (err) {
       this.logger.warn({ err, scheduleId: schedule.id }, "[schedule] spawn/run failed");
       // Failures are SHOWN, never dropped (#619): record the error on the run row.
@@ -602,6 +623,26 @@ export class ScheduleRunner {
         error: err instanceof Error ? err.message : String(err),
       });
     }
+  }
+
+  // Item 3 (session singleton): return the agentId of the cybo's live (cybo, channel)
+  // session to reuse, or null to spawn fresh. A binding qualifies only when its agent
+  // is still LOADED in this process — a recurring cron fire then routes to the SAME
+  // session instead of spawning a new visible "Rick" per tick. A stale binding whose
+  // agent was torn down (or never loaded) returns null so the caller spawns fresh,
+  // preserving continuity without resurrecting a dead session. channelId null = a
+  // DM-scoped binding; a cron fire always targets the schedule's channel scope.
+  private reuseLiveCyboBinding(
+    workspaceId: string,
+    cyboId: string,
+    channelId: string | null,
+  ): string | null {
+    const binding = this.storage.getLiveCyboBinding(workspaceId, cyboId, channelId);
+    if (!binding) return null;
+    // Only reuse when the agent is loadable right now (in-memory). getAgent is a
+    // cheap synchronous probe; routeToAgent/runAgent would lazy-restore from disk,
+    // but for a cron fire we prefer a clean fresh spawn over reviving a cold session.
+    return this.agentManager.getAgent(binding.agent_id) ? binding.agent_id : null;
   }
 
   // Best-effort close of a run row — a history write must never throw out of the
