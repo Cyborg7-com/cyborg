@@ -616,6 +616,18 @@ describe("cyborg7 channel tools — membership gating for cybos", () => {
     );
   });
 
+  it("get_channel_history allows a member channel and denies a non-member channel", async () => {
+    // Parity with read_channel — get_channel_history was missing the membership gate
+    // (IDOR: a cybo could read a private channel's history it hadn't joined).
+    const { deps: testDeps } = makeDeps(["ch_member"]);
+    expect(
+      await callAsCybo(testDeps, "cyborg7_get_channel_history", { channel: "joined" }),
+    ).toContain("[Alice] hi");
+    expect(
+      await callAsCybo(testDeps, "cyborg7_get_channel_history", { channel: "stranger" }),
+    ).toContain("not a member");
+  });
+
   it("send_message posts to a member channel and refuses a non-member channel", async () => {
     const { deps: testDeps, sent } = makeDeps(["ch_member"]);
     expect(

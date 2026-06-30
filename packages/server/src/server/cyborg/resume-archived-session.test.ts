@@ -59,7 +59,7 @@ describe("CyborgStorage archived-session resume (data-loss fix)", () => {
     storage.markArchivedSessionResumed(archived.id, "agent-live-1");
 
     // The row is NOT gone — it is preserved and recoverable by id.
-    const still = storage.getArchivedSession(archived.id);
+    const still = storage.getArchivedSession(archived.id, ws);
     expect(still).toBeDefined();
     expect(still!.resumed_agent_id).toBe("agent-live-1");
     // It is still in the raw archive table (not deleted).
@@ -196,7 +196,7 @@ describe("cyborg:resume archived session lifecycle (dispatcher)", () => {
     // duplicated, not gone.
     expect((await listArchived()).map((r) => r.id)).not.toContain(sid);
     // The underlying row is still present and recoverable.
-    expect(storage.getArchivedSession(sid)).toBeDefined();
+    expect(storage.getArchivedSession(sid, workspaceId)).toBeDefined();
   });
 
   it("resume then end (re-archive) returns the session to history — not lost", async () => {

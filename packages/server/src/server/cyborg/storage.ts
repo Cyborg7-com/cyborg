@@ -499,6 +499,12 @@ export interface StoredArchivedSession {
   // session is reachable via the active list instead. Cleared when the agent is
   // re-archived. This prevents the resume → delete → permanent-loss data bug.
   resumed_agent_id: string | null;
+  // Owner captured at archive/import time (the live binding's initiator). LOCAL
+  // SQLite id; bridge to the caller via initiated_by_email across the local/cloud
+  // id namespaces. NULL on rows archived before this column existed — those fall
+  // through to the workspace owner/admin gate only (fail-closed for plain members).
+  initiated_by: string | null;
+  initiated_by_email: string | null;
 }
 
 export interface StoredProject {
@@ -576,6 +582,7 @@ export class CyborgStorage {
   private insertArchivedSessionStmt!: Statement;
   private getArchivedSessionsByWorkspaceStmt!: Statement;
   private getArchivedSessionByIdStmt!: Statement;
+  private getArchivedSessionByIdInWorkspaceStmt!: Statement;
   private getArchivedSessionByResumedAgentStmt!: Statement;
   private markArchivedSessionResumedStmt!: Statement;
   private reviveArchivedSessionStmt!: Statement;
@@ -774,14 +781,20 @@ export class CyborgStorage {
 
   private initDeferredStatements(): void {
     this.insertArchivedSessionStmt = this.db.prepare(
-      `INSERT OR REPLACE INTO archived_sessions (id, workspace_id, provider, provider_handle_id, title, cwd, model, cybo_id, archived_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT OR REPLACE INTO archived_sessions (id, workspace_id, provider, provider_handle_id, title, cwd, model, cybo_id, archived_at, initiated_by, initiated_by_email)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     this.getArchivedSessionsByWorkspaceStmt = this.db.prepare(
       "SELECT * FROM archived_sessions WHERE workspace_id = ? ORDER BY archived_at DESC",
     );
     this.getArchivedSessionByIdStmt = this.db.prepare(
       "SELECT * FROM archived_sessions WHERE id = ?",
+    );
+    // Workspace-scoped lookup: a session can only be restored/read within its OWN
+    // workspace, so callers that authorize by workspace pass it here — a row in a
+    // different workspace returns undefined (can't be reached cross-workspace by id).
+    this.getArchivedSessionByIdInWorkspaceStmt = this.db.prepare(
+      "SELECT * FROM archived_sessions WHERE id = ? AND workspace_id = ?",
     );
     this.getArchivedSessionByResumedAgentStmt = this.db.prepare(
       "SELECT * FROM archived_sessions WHERE resumed_agent_id = ?",
@@ -1483,7 +1496,9 @@ export class CyborgStorage {
         model TEXT,
         cybo_id TEXT,
         archived_at INTEGER NOT NULL,
-        resumed_agent_id TEXT
+        resumed_agent_id TEXT,
+        initiated_by TEXT,
+        initiated_by_email TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_archived_sessions_workspace
         ON archived_sessions(workspace_id, archived_at);
@@ -1789,6 +1804,14 @@ export class CyborgStorage {
     // is kept and linked to the live agent via resumed_agent_id; the listing
     // suppresses it only while that binding still exists. See handleRestoreSession.
     this.addColumnIfMissing("archived_sessions", "resumed_agent_id", "TEXT");
+    // Owner of the archived session, captured at archive/import time from the live
+    // binding's initiator (email-bridged across the local/cloud id namespaces).
+    // Needed to gate restore/import/list to the owner OR a workspace owner/admin —
+    // without it the row has no recorded owner and any spawn-scoped member could
+    // restore it and read the full transcript (IDOR back-door). See
+    // handleRestoreSession / canOwnArchivedSession.
+    this.addColumnIfMissing("archived_sessions", "initiated_by", "TEXT");
+    this.addColumnIfMissing("archived_sessions", "initiated_by_email", "TEXT");
     this.db.exec(
       `CREATE INDEX IF NOT EXISTS idx_archived_sessions_resumed_agent
          ON archived_sessions(resumed_agent_id)`,
@@ -4239,6 +4262,8 @@ export class CyborgStorage {
     cwd?: string | null;
     model?: string | null;
     cyboId?: string | null;
+    initiatedBy?: string | null;
+    initiatedByEmail?: string | null;
   }): StoredArchivedSession {
     const id = `as_${randomUUID()}`;
     const now = Date.now();
@@ -4252,6 +4277,8 @@ export class CyborgStorage {
       opts.model ?? null,
       opts.cyboId ?? null,
       now,
+      opts.initiatedBy ?? null,
+      opts.initiatedByEmail ?? null,
     );
     return this.getArchivedSessionByIdStmt.get(id) as StoredArchivedSession;
   }
@@ -4298,8 +4325,14 @@ export class CyborgStorage {
     return { sessions: rows, nextCursor: null };
   }
 
-  getArchivedSession(id: string): StoredArchivedSession | undefined {
-    return this.getArchivedSessionByIdStmt.get(id) as StoredArchivedSession | undefined;
+  // Workspace-scoped by default: a session is only restorable/readable within its
+  // OWN workspace, so a row in another workspace returns undefined (can't be
+  // reached cross-workspace by id alone). The internal id-only lookup remains for
+  // resumed-agent revival where the workspace is already established.
+  getArchivedSession(id: string, workspaceId: string): StoredArchivedSession | undefined {
+    return this.getArchivedSessionByIdInWorkspaceStmt.get(id, workspaceId) as
+      | StoredArchivedSession
+      | undefined;
   }
 
   // Look up the archived row that was resumed into a given live agent (if any),

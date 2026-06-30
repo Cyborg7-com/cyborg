@@ -1574,11 +1574,14 @@ export class DualStorage {
     cwd?: string | null;
     model?: string | null;
     cyboId?: string | null;
+    initiatedBy?: string | null;
+    initiatedByEmail?: string | null;
   }): StoredArchivedSession {
     const row = this.sqlite.archiveSession(opts);
     // Mirror to PG so the cloud relay's list_archived_sessions (which reads PG)
     // actually shows it — previously archives only hit SQLite and the cloud list
-    // was always empty.
+    // was always empty. The initiator is mirrored too so the relay's restore/list
+    // ownership gate can resolve the owner from PG.
     if (this._pg) {
       this._pg
         .archiveSession({
@@ -1591,6 +1594,8 @@ export class DualStorage {
           model: row.model,
           cyboId: row.cybo_id,
           archivedAt: row.archived_at,
+          initiatedBy: row.initiated_by,
+          initiatedByEmail: row.initiated_by_email,
         })
         .catch(this.logSyncError("archiveSession"));
     }
@@ -1610,8 +1615,8 @@ export class DualStorage {
     return this.sqlite.getArchivedSessionsPage(workspaceId, filter);
   }
 
-  getArchivedSession(id: string): StoredArchivedSession | undefined {
-    return this.sqlite.getArchivedSession(id);
+  getArchivedSession(id: string, workspaceId: string): StoredArchivedSession | undefined {
+    return this.sqlite.getArchivedSession(id, workspaceId);
   }
 
   getArchivedSessionByResumedAgent(agentId: string): StoredArchivedSession | undefined {

@@ -789,6 +789,10 @@ export function createCyborg7McpServer(deps: Cyborg7McpDeps, ctx: Cyborg7McpCont
         return {
           content: [{ type: "text" as const, text: `Error: channel '${channel}' not found` }],
         };
+      // Channel-membership gate, parity with cyborg7_read_channel — a cybo must not
+      // read a private channel's history it isn't a member of (IDOR fix).
+      const denied = await requireChannelMembership(target);
+      if (denied) return denied;
 
       const messages = await readMessages({ channelId: target.id, limit: limit ?? 30 });
       const formatted = messages

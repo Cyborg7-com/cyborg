@@ -5282,6 +5282,8 @@ export class PgSync {
     model: string | null;
     cyboId: string | null;
     archivedAt: number;
+    initiatedBy?: string | null;
+    initiatedByEmail?: string | null;
   }): Promise<void> {
     await this.db
       .insert(schema.archivedSessions)
@@ -5295,6 +5297,8 @@ export class PgSync {
         model: s.model,
         cyboId: s.cyboId,
         archivedAt: new Date(s.archivedAt),
+        initiatedBy: s.initiatedBy ?? null,
+        initiatedByEmail: s.initiatedByEmail ?? null,
       })
       .onConflictDoNothing();
   }
@@ -5309,6 +5313,8 @@ export class PgSync {
       model: string | null;
       cyboId: string | null;
       archivedAt: number;
+      initiatedBy: string | null;
+      initiatedByEmail: string | null;
     }>
   > {
     const rows = await this.db
@@ -5328,7 +5334,39 @@ export class PgSync {
       // and the daemon path returns ms; an ISO string made `Date.now() - ts` NaN
       // ("NaNd ago").
       archivedAt: r.archivedAt.getTime(),
+      initiatedBy: r.initiatedBy,
+      initiatedByEmail: r.initiatedByEmail,
     }));
+  }
+
+  // Single archived row by id, WORKSPACE-SCOPED — the relay's restore ownership
+  // gate resolves the owner (initiatedBy / initiatedByEmail) from this before
+  // forwarding, and the workspace match prevents a cross-workspace id reference.
+  async getArchivedSessionById(
+    id: string,
+    workspaceId: string,
+  ): Promise<{
+    id: string;
+    workspaceId: string;
+    initiatedBy: string | null;
+    initiatedByEmail: string | null;
+  } | null> {
+    const rows = await this.db
+      .select({
+        id: schema.archivedSessions.id,
+        workspaceId: schema.archivedSessions.workspaceId,
+        initiatedBy: schema.archivedSessions.initiatedBy,
+        initiatedByEmail: schema.archivedSessions.initiatedByEmail,
+      })
+      .from(schema.archivedSessions)
+      .where(
+        and(
+          eq(schema.archivedSessions.id, id),
+          eq(schema.archivedSessions.workspaceId, workspaceId),
+        ),
+      )
+      .limit(1);
+    return rows[0] ?? null;
   }
 
   // Link an archived session to the live agent it was resumed into (keeps the

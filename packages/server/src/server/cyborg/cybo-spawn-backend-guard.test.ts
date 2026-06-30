@@ -114,8 +114,11 @@ describe("handleSpawnCybo per-backend gate (blocks before opening)", () => {
   });
 
   afterEach(() => {
-    storage.close();
-    rmSync(tmpDir, { recursive: true, force: true });
+    try {
+      storage.close();
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 
   function makeCybo(model: string): string {
@@ -240,8 +243,11 @@ describe("handleSpawnCybo native-harness gate (internal docs)", () => {
   });
 
   afterEach(() => {
-    storage.close();
-    rmSync(tmpDir, { recursive: true, force: true });
+    try {
+      storage.close();
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 
   function makeClaudeCybo(): string {
@@ -296,5 +302,120 @@ describe("handleSpawnCybo native-harness gate (internal docs)", () => {
     dispatcher.setProviderSnapshotManager(nativeSnapshotStub({ claude: true, pi: false }));
     await spawn(makeClaudeCybo());
     expect(createdAgents).toHaveLength(1);
+  });
+});
+
+// ─── Session singleton (dedup): interactive spawn reuses a live (cybo,channel) ──
+
+describe("handleSpawnCybo dedup: reuses the live (cybo, channel) session", () => {
+  let tmpDir: string;
+  let storage: DualStorage;
+  let dispatcher: CyborgDispatcher;
+  let createdIds: string[];
+  let liveIds: Set<string>;
+  let nextAgentId: number;
+  let owner: NonNullable<ReturnType<CyborgAuth["validateToken"]>>;
+  let workspaceId: string;
+
+  beforeEach(async () => {
+    tmpDir = mkdtempSync(path.join(tmpdir(), "dedup-"));
+    storage = new DualStorage(new CyborgStorage(path.join(tmpDir, "t.db")), null);
+    const auth = new CyborgAuth(storage);
+    const workspaceManager = new WorkspaceManager(storage);
+    const router = new MessageRouter(storage, workspaceManager, { toWorkspace() {}, toUser() {} });
+    dispatcher = new CyborgDispatcher(router, workspaceManager, storage);
+    createdIds = [];
+    liveIds = new Set();
+    nextAgentId = 0;
+    dispatcher.setAgentManager({
+      createAgent: async (config: unknown, agentId?: string) => {
+        const id = agentId ?? `agent-${nextAgentId++}`;
+        createdIds.push(id);
+        liveIds.add(id); // the agent is now loaded/live in this process
+        return {
+          id,
+          provider: (config as { provider: string }).provider,
+          lifecycle: "idle",
+          cwd: "/tmp",
+          labels: {},
+        };
+      },
+      // Liveness probe used by the dedup reuse-check (and getLiveCyboBinding caller).
+      getAgent: (id: string) => (liveIds.has(id) ? { id } : undefined),
+    } as unknown as AgentManager);
+    dispatcher.setProviderSnapshotManager(nativeSnapshotStub({ claude: true }));
+    owner = auth.validateToken(auth.createToken("d@test.com", "D"))!;
+    const ws: unknown[] = [];
+    await dispatcher.dispatch(
+      { type: "cyborg:create_workspace", name: "WS", requestId: "w1" } as never,
+      owner,
+      (m) => ws.push(m),
+    );
+    workspaceId = (ws[0] as { payload: { workspace: { id: string } } }).payload.workspace.id;
+  });
+
+  afterEach(() => {
+    try {
+      storage.close();
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  function makeCybo(): string {
+    return storage.createCybo({
+      workspaceId,
+      slug: "apex",
+      name: "Apex",
+      soul: "Be sharp.",
+      provider: "claude",
+      model: "claude-haiku-4-5",
+      createdBy: owner.user.id,
+    }).id;
+  }
+
+  async function spawn(cyboId: string, channelId: string | null): Promise<string> {
+    const out: unknown[] = [];
+    await dispatcher.dispatch(
+      {
+        type: "cyborg:spawn_cybo",
+        requestId: "s",
+        workspaceId,
+        cyboIdOrSlug: cyboId,
+        channelId: channelId ?? undefined,
+      } as never,
+      owner,
+      (m) => out.push(m),
+    );
+    const resp = out.find((m) => (m as { type: string }).type === "cyborg:spawn_cybo_response") as {
+      payload: { agentId: string };
+    };
+    expect(resp).toBeDefined();
+    return resp.payload.agentId;
+  }
+
+  it("spawning the same (cybo, channel) twice while live REUSES the same agentId", async () => {
+    const cyboId = makeCybo();
+    const first = await spawn(cyboId, "chan-1");
+    const second = await spawn(cyboId, "chan-1");
+    expect(second).toBe(first);
+    expect(createdIds).toHaveLength(1); // no second binding/agent was created
+  });
+
+  it("after the agent is gone, a NEW session is created", async () => {
+    const cyboId = makeCybo();
+    const first = await spawn(cyboId, "chan-1");
+    liveIds.delete(first); // agent torn down — binding is now stale
+    const second = await spawn(cyboId, "chan-1");
+    expect(second).not.toBe(first);
+    expect(createdIds).toHaveLength(2);
+  });
+
+  it("a DIFFERENT channel spawns its own session (channel-scoped)", async () => {
+    const cyboId = makeCybo();
+    const inChan1 = await spawn(cyboId, "chan-1");
+    const inChan2 = await spawn(cyboId, "chan-2");
+    expect(inChan2).not.toBe(inChan1);
+    expect(createdIds).toHaveLength(2);
   });
 });

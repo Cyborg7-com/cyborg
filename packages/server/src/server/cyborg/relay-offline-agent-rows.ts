@@ -222,6 +222,44 @@ export function canClearAgentBinding(
   return isAdmin || isInitiator;
 }
 
+// Authorization for READING a session's transcript / injected context from the
+// relay (IDOR fix). STRICTER than canClearAgentBinding for the channel case: a
+// transcript read requires ACTUAL channel MEMBERSHIP (the caller-supplied
+// `isChannelMember`, a PG lookup), not mere workspace membership — a non-member
+// must never read a private channel's cybo transcript. Beyond that the rule
+// matches: the session INITIATOR (email- or id-bridged) OR a workspace OWNER/ADMIN
+// may always read. Fail-closed: no channel membership AND not initiator/admin ⇒ deny.
+export function canReadAgentSession(
+  b: { channelId: string | null; initiatedBy: string | null; initiatedByEmail: string | null },
+  caller: { userId: string; email: string | null; role: string | null; isChannelMember: boolean },
+): boolean {
+  if (b.channelId && caller.isChannelMember) return true;
+  const isAdmin = caller.role === "owner" || caller.role === "admin";
+  const isInitiator =
+    (!!b.initiatedByEmail &&
+      !!caller.email &&
+      b.initiatedByEmail.toLowerCase() === caller.email.toLowerCase()) ||
+    (!!b.initiatedBy && b.initiatedBy === caller.userId);
+  return isAdmin || isInitiator;
+}
+
+// Routing decision for an authorized owner/admin archive (archiveOwnerBypass). A
+// LIVE session is owned by its daemon's SQLite, NOT PG — so clearing only the PG
+// mirror lets the still-online daemon re-advertise the live agent on the next
+// list_agents fan-out (the reappearing-row bug). The relay must therefore defer to
+// the daemon when it can reach the owning one:
+//   • "daemon"  — the owning daemon is known AND reachable: forward the RPC and let
+//     IT tear down its SQLite + kill the live agent + answer authoritatively. The
+//     relay does NOT clear PG or fake success.
+//   • "pg-clear" — the owning daemon is offline OR unresolved: no live daemon can
+//     re-advertise, so clearing the PG mirror is correct and authoritative.
+export function resolveOwnerArchiveRoute(opts: {
+  owningDaemonId: string | undefined;
+  daemonReachable: boolean;
+}): "daemon" | "pg-clear" {
+  return opts.owningDaemonId && opts.daemonReachable ? "daemon" : "pg-clear";
+}
+
 // Visible offline rows for a workspace's mirrored bindings, EXCLUDING any agentId
 // already present in the live fan-out (the live daemon row always wins on dedupe).
 export function offlineAgentRows(

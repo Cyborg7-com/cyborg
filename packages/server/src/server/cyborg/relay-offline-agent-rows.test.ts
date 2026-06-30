@@ -7,6 +7,8 @@ import {
   auditAgentRows,
   shouldGcOwnerBindings,
   canClearAgentBinding,
+  canReadAgentSession,
+  resolveOwnerArchiveRoute,
   type OfflineAgentBinding,
 } from "./relay-offline-agent-rows.js";
 
@@ -363,6 +365,113 @@ describe("relay-offline-agent-rows", () => {
           role: null,
         }),
       ).toBe(false);
+    });
+  });
+
+  // ─── Session-read authorization (relay-side IDOR gate) ──────────────────────
+  describe("canReadAgentSession", () => {
+    const channelBinding = {
+      channelId: "chan-1",
+      initiatedBy: "global-init",
+      initiatedByEmail: "init@test.dev",
+    };
+    const privateBinding = {
+      channelId: null,
+      initiatedBy: "global-init",
+      initiatedByEmail: "init@test.dev",
+    };
+
+    it("DENIES a non-member of the session's channel (the IDOR case)", () => {
+      // STRICTER than canClearAgentBinding: a channel-bound session is NOT readable
+      // by any workspace member, only by ACTUAL channel members.
+      expect(
+        canReadAgentSession(channelBinding, {
+          userId: "global-stranger",
+          email: "stranger@test.dev",
+          role: "member",
+          isChannelMember: false,
+        }),
+      ).toBe(false);
+    });
+
+    it("ALLOWS a member of the session's channel", () => {
+      expect(
+        canReadAgentSession(channelBinding, {
+          userId: "global-member",
+          email: "member@test.dev",
+          role: "member",
+          isChannelMember: true,
+        }),
+      ).toBe(true);
+    });
+
+    it("ALLOWS the initiator (email-bridged) of a PRIVATE session, no channel", () => {
+      expect(
+        canReadAgentSession(privateBinding, {
+          userId: "global-different",
+          email: "Init@Test.dev",
+          role: "member",
+          isChannelMember: false,
+        }),
+      ).toBe(true);
+    });
+
+    it("ALLOWS the initiator matched by GLOBAL id (#810 bridge)", () => {
+      expect(
+        canReadAgentSession(
+          { channelId: null, initiatedBy: "acct-9", initiatedByEmail: "acct-9@remote.local" },
+          { userId: "acct-9", email: "real@test.dev", role: "member", isChannelMember: false },
+        ),
+      ).toBe(true);
+    });
+
+    it("ALLOWS a workspace OWNER/ADMIN to read any session (audit)", () => {
+      expect(
+        canReadAgentSession(privateBinding, {
+          userId: "global-admin",
+          email: "admin@test.dev",
+          role: "owner",
+          isChannelMember: false,
+        }),
+      ).toBe(true);
+    });
+
+    it("DENIES a non-initiator, non-admin, non-member for a PRIVATE session", () => {
+      expect(
+        canReadAgentSession(privateBinding, {
+          userId: "global-nobody",
+          email: "nobody@test.dev",
+          role: "member",
+          isChannelMember: false,
+        }),
+      ).toBe(false);
+    });
+  });
+
+  // ─── Owner-archive routing (the live-session reappearing-row fix) ───────────
+  describe("resolveOwnerArchiveRoute", () => {
+    it("ONLINE owning daemon ⇒ 'daemon' (authoritative forward, NOT a PG-only clear)", () => {
+      // The bug: clearing only PG let the still-online daemon re-advertise the live
+      // agent on the next list_agents fan-out, so the archived row reappeared. The
+      // archive must be handled by the owning daemon (SQLite teardown + agent kill).
+      expect(
+        resolveOwnerArchiveRoute({ owningDaemonId: "daemon-a", daemonReachable: true }),
+      ).toBe("daemon");
+    });
+
+    it("OFFLINE owning daemon ⇒ 'pg-clear' (the offline fallback is correct)", () => {
+      expect(
+        resolveOwnerArchiveRoute({ owningDaemonId: "daemon-a", daemonReachable: false }),
+      ).toBe("pg-clear");
+    });
+
+    it("no resolvable owning daemon ⇒ 'pg-clear' (cannot aim the live teardown)", () => {
+      expect(
+        resolveOwnerArchiveRoute({ owningDaemonId: undefined, daemonReachable: true }),
+      ).toBe("pg-clear");
+      expect(
+        resolveOwnerArchiveRoute({ owningDaemonId: undefined, daemonReachable: false }),
+      ).toBe("pg-clear");
     });
   });
 });

@@ -69,6 +69,8 @@ import {
   auditAgentRows,
   shouldGcOwnerBindings,
   canClearAgentBinding,
+  canReadAgentSession,
+  resolveOwnerArchiveRoute,
 } from "./relay-offline-agent-rows.js";
 import {
   computeCyboReadiness,
@@ -430,6 +432,18 @@ const DAEMON_HOST_CONTROL_TYPES = new Set([
   // Daemon-owner audit (#993): admin-grade, daemon-targeted (explicit daemonId).
   // The admin-scope gate here rejects a non-admin guest BEFORE any daemon forward.
   "cyborg:list_daemon_sessions",
+]);
+
+// Forwarded session-READ ops keyed by agentId that expose a session's full
+// transcript / injected context (IDOR fix). Before this set, reads fell through
+// the spawn/control/terminal/host gates UNGUARDED — only workspace membership was
+// checked — so any member could read ANY session's transcript by agentId. Gated
+// below to the session INITIATOR, a MEMBER of the binding's channel, or a
+// workspace OWNER/ADMIN. (The owning daemon re-enforces the same rule as
+// defense-in-depth via canReadLiveSession.)
+const DAEMON_SESSION_READ_TYPES = new Set([
+  "cyborg:fetch_agent_timeline",
+  "cyborg:fetch_session_context",
 ]);
 
 const PORT = parseInt(process.env.RELAY_PORT ?? "9100", 10);
@@ -2351,9 +2365,11 @@ async function main() {
       const requiredScope = scopeForType(type);
       // archive_agent ONLY: set when a workspace owner/admin (or the session
       // initiator) bypasses the spawn-scope gate below. Read after the gate to
-      // route the archive through the relay-side PG clear + best-effort forward
-      // (so an owner can ALWAYS clear a session, even one whose daemon they don't
-      // own — the #1059 daemon/offline owner-override never reached this ONLINE gate).
+      // route the archive AUTHORITATIVELY: forward to the ONLINE owning daemon (it
+      // tears down its SQLite + kills the live agent + answers), or PG-clear when
+      // that daemon is OFFLINE — so an owner can ALWAYS clear a session, even one
+      // whose daemon they don't own (the #1059 owner-override never reached this
+      // ONLINE gate). See the archiveOwnerBypass block below.
       let archiveOwnerBypass = false;
       // The archive_agent binding, fetched + validated ONCE in the gate below and
       // reused by the bypass block (no redundant DB round-trip). Non-null whenever
@@ -2486,6 +2502,38 @@ async function main() {
               : "viewers cannot restore sessions",
           );
           return;
+        }
+        // OWNERSHIP GATE (IDOR back-door), defense in depth — mirrors the daemon's
+        // handleRestoreSession gate so a bad request is rejected BEFORE it reaches a
+        // daemon. restore_session names an archived sessionId resolvable in PG:
+        // require the caller to be its OWNER (initiator, email-bridged) OR a
+        // workspace owner/admin. Fail-closed: an unresolvable / cross-workspace id
+        // denies here (the daemon re-checks regardless). import_session carries NO
+        // archived id (it resumes the caller's own on-disk transcript by
+        // provider+handle), so the daemon's runImportSession owns its gate.
+        if (type === "cyborg:restore_session") {
+          const restoreSessionId = inner.sessionId as string | undefined;
+          if (!restoreSessionId) {
+            respondError("sessionId required");
+            return;
+          }
+          const archived = await pg.getArchivedSessionById(restoreSessionId, targetWorkspace);
+          const isAdmin = callerRole === "owner" || callerRole === "admin";
+          const guestEmail = guest.email?.toLowerCase();
+          const isOwner =
+            !!archived &&
+            ((!!archived.initiatedBy && archived.initiatedBy === guest.userId) ||
+              (!!archived.initiatedByEmail &&
+                !!guestEmail &&
+                archived.initiatedByEmail.toLowerCase() === guestEmail));
+          if (!archived || (!isAdmin && !isOwner)) {
+            relayLog.error(
+              { caller: guest.userId, sessionId: restoreSessionId, workspaceId: targetWorkspace },
+              "restore_session denied — not the session owner or a workspace admin",
+            );
+            respondError("Not authorized to restore this session");
+            return;
+          }
         }
         let resumeDaemonId = targetDaemonId;
         if (!resumeDaemonId) {
@@ -2647,6 +2695,53 @@ async function main() {
           respondError("no admin access to this daemon");
           return;
         }
+      } else if (DAEMON_SESSION_READ_TYPES.has(type)) {
+        // IDOR gate (session-transcript read): these reads were UNGUARDED here —
+        // they fell through every branch above to the forward with only workspace
+        // membership checked, so any member could read ANY session's full
+        // transcript / injected context by agentId. Require the caller to be the
+        // session INITIATOR, a MEMBER of the binding's channel, or a workspace
+        // OWNER/ADMIN. Fail-closed: a missing binding or membership lookup denies.
+        const readAgentId = inner.agentId as string | undefined;
+        if (!readAgentId) {
+          respondError("agentId required");
+          return;
+        }
+        const readBinding = await pg.getAgentBinding(readAgentId);
+        // EPHEMERAL sessions (mention/slash summons) are NEVER mirrored to PG, so a
+        // missing PG binding here is EXPECTED for them — the relay can't authorize
+        // and MUST NOT blanket-deny (that would break the legit initiator/channel-
+        // member reading their own live mention session). Forward and let the
+        // OWNING DAEMON's canReadLiveSession (it has the SQLite binding incl.
+        // initiated_by + channel_id, and resolves channel membership) be the
+        // authoritative gate. When a PG binding DOES exist (non-ephemeral), enforce
+        // here too as defense-in-depth — deny a caller who is neither initiator,
+        // channel member, nor owner/admin BEFORE the forward.
+        if (readBinding && readBinding.workspaceId === targetWorkspace) {
+          const isChannelMember = readBinding.channelId
+            ? !!(await pg.getChannelMemberRole(readBinding.channelId, guest.userId))
+            : false;
+          if (
+            !canReadAgentSession(readBinding, {
+              userId: guest.userId,
+              email: guest.email,
+              role: callerRole,
+              isChannelMember,
+            })
+          ) {
+            relayLog.error(
+              {
+                type,
+                caller: guest.userId,
+                agentId: readAgentId,
+                channelId: readBinding.channelId,
+              },
+              "session-read denied — not initiator, channel member, or admin",
+            );
+            respondError("Not authorized to read this session");
+            return;
+          }
+        }
       }
 
       const relayRpc = {
@@ -2658,14 +2753,28 @@ async function main() {
         inner,
       };
 
-      // OWNER/ADMIN archive bypass (online owning daemon). The gate above set
-      // archiveOwnerBypass for an archive the caller is authorized to clear but
-      // lacks spawn scope for. The relay is the AUTHORITATIVE responder here: it
-      // clears the PG mirror itself (so the session disappears even if the owning
-      // daemon is offline OR on OLD code that lacks the #1059 owner-override) AND
-      // best-effort forwards to the owning daemon so a CURRENT daemon also stops the
-      // live process. Returns before the generic forward below so we never
-      // double-clear / double-respond.
+      // OWNER/ADMIN archive bypass. The gate above set archiveOwnerBypass for an
+      // archive the caller is authorized to clear but lacks spawn scope for.
+      //
+      // A LIVE session is owned by its daemon's OWN SQLite (source of truth), NOT
+      // PG. The old code here cleared only the PG mirror best-effort and ignored
+      // the daemon — so the row blipped out, then the still-live daemon
+      // re-advertised the agent on the next list_agents fan-out and it reappeared,
+      // while the relay had already (falsely) reported success.
+      //
+      // Fix: make the daemon AUTHORITATIVE when it's ONLINE.
+      //  • ONLINE owning daemon: forward the RPC with its requestId INTACT and let
+      //    the daemon answer. handleArchiveAgent deletes the SQLite binding + kills
+      //    the live agent (so it stops re-advertising) and emits the
+      //    archive_agent_response — OR a `cyborg:error` if IT rejects (e.g. another
+      //    user's private session on a daemon that doesn't see the caller as
+      //    owner). Both flow straight back to this guest via onBroadcast. No PG-only
+      //    clear, no fake success: on daemon success its `removed` agent_status
+      //    drives the PG mirror cleanup (onBroadcast → removeDaemonAgent +
+      //    archiveAgentSession); on daemon error the mirror is correctly left alone.
+      //  • OFFLINE owning daemon (or no resolvable owning daemon): no live daemon to
+      //    re-advertise, so clearing the PG mirror is correct and the owner can
+      //    always get rid of the dead row.
       if (archiveOwnerBypass) {
         const agentId = inner.agentId as string;
         // Reuse the binding the gate already fetched + validated (no second DB
@@ -2677,30 +2786,27 @@ async function main() {
           respondError("agent not found");
           return;
         }
-        // Best-effort forward FIRST so a live, current daemon stops the running
-        // process. Forward a requestId-STRIPPED copy: the daemon still archives +
-        // broadcasts its own `agent_status removed` (idempotent with our PG clear),
-        // but cannot send a requestId-matched archive_agent_response that would
-        // collide with the relay's authoritative response below. We ignore the
-        // forward result — the PG clear runs regardless.
         const owningDaemonId =
           (inner.daemonId as string | undefined) ??
           binding.daemonId ??
           (await pg.getAgentDaemonId(agentId, targetWorkspace)) ??
           undefined;
-        const fwdInner = { ...inner };
-        delete fwdInner.requestId;
-        relay.sendToDaemonInWorkspace(
-          targetWorkspace,
-          { ...relayRpc, inner: fwdInner },
-          owningDaemonId,
-        );
-        // Relay-side PG clear (mirrors the OFFLINE archive block). Acceptable
-        // residual: if the owning daemon is online but on OLD code, the relay still
-        // clears the PG binding (the session disappears from everyone's view) and
-        // the orphaned live process keeps running on that machine until it
-        // dies/updates — an acceptable consistency wart, far better than the owner
-        // being unable to clear it.
+        // Forward with requestId INTACT so the daemon's response (success OR error)
+        // is the authoritative answer this guest gets. Target the KNOWN owning
+        // daemon only: sendToDaemonInWorkspace returns true ONLY on a real delivery
+        // to THAT connected daemon — the same online/offline signal the generic
+        // forward uses (resolveOwnerArchiveRoute encodes the decision, unit-tested).
+        // When the route is "daemon" the daemon owns the teardown + response, so we
+        // return here and DON'T touch the PG mirror (its `removed` agent_status
+        // drives that cleanup, or its error correctly leaves the mirror intact).
+        const daemonReachable = owningDaemonId
+          ? relay.sendToDaemonInWorkspace(targetWorkspace, relayRpc, owningDaemonId)
+          : false;
+        if (resolveOwnerArchiveRoute({ owningDaemonId, daemonReachable }) === "daemon") {
+          return;
+        }
+        // Offline / unbound: clear the PG mirror directly (the proven offline-archive
+        // behavior). No live daemon can re-advertise, so this is authoritative.
         await pg.deleteAgentBinding(agentId);
         await pg
           .archiveAgentSession(agentId)
@@ -3705,6 +3811,23 @@ async function main() {
           if (!parent || parent.workspaceId !== workspaceId) {
             respond("cyborg:fetch_thread_response", { parentId, messages: [] });
             break;
+          }
+          // Private-channel gate (mirrors cyborg:fetch_messages): a workspace
+          // member who is NOT in a private channel must not read its thread
+          // replies. The parent message carries the channelId; resolve the
+          // channel and require channel membership when it is private. A null
+          // channelId is a DM thread — leave it unchanged (DM auth is the peer
+          // relationship, not channel membership). Fail-closed.
+          if (parent.channelId) {
+            const ftChannel = await pg.getChannel(parent.channelId);
+            if (
+              !ftChannel ||
+              (ftChannel.is_private &&
+                !(await pg.getChannelMemberRole(parent.channelId, guest.userId)))
+            ) {
+              respondError("channel not found");
+              break;
+            }
           }
           const replies = await pg.getThreadReplies(parentId);
           // Per-thread "New replies" divider (#7): return the viewer's frozen

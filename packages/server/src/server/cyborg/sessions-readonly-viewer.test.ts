@@ -78,10 +78,23 @@ interface Harness {
 // predicate. Mirrors pg.getUserDaemonScopes (owner ⇒ all scopes). Every other PG
 // method is an async no-op (fire-and-forget mirror writes / upserts) so the
 // dual-storage hot path doesn't blow up — we only care about the scope check.
-function fakePg(scopesByUser: Map<string, Set<string>>) {
+function fakePg(
+  scopesByUser: Map<string, Set<string>>,
+  channelMembers?: Map<string, Array<{ userId: string; email: string }>>,
+) {
   const base: Record<string, any> = {
     getUserDaemonScopes: async (_ws: string, _daemon: string, userId: string) =>
       scopesByUser.get(userId) ?? new Set<string>(),
+    // Channel membership for the IDOR read-gate (canReadLiveSession). Returns the
+    // humans in a channel keyed by CLOUD id + email — mirrors pg.getChannelMembers.
+    getChannelMembers: async (channelId: string) =>
+      (channelMembers?.get(channelId) ?? []).map((m) => ({
+        userId: m.userId,
+        email: m.email,
+        name: null,
+        role: "member",
+        joinedAt: 0,
+      })),
     upsertUser: async (id: string) => id,
     getWorkspacesForUser: async () => [],
   };
@@ -93,7 +106,7 @@ function fakePg(scopesByUser: Map<string, Set<string>>) {
   }) as any;
 }
 
-function makeHarness(opts?: { pg?: any }): Harness {
+function makeHarness(opts?: { pg?: any; ownerEmail?: string }): Harness {
   const tmpDir = mkdtempSync(path.join(tmpdir(), "rov-"));
   const dbPath = path.join(tmpDir, "test.db");
   const sqlite = new CyborgStorage(dbPath);
@@ -111,7 +124,9 @@ function makeHarness(opts?: { pg?: any }): Harness {
   const durable = new SqliteAgentTimelineStore(new Database(":memory:"));
   dispatcher.setDurableTimelineStore(durable);
 
-  const ownerAuth = auth.validateToken(auth.createToken("alice@test.com", "Alice"));
+  const ownerAuth = auth.validateToken(
+    auth.createToken(opts?.ownerEmail ?? "alice@test.com", "Alice"),
+  );
   const ownerId = ownerAuth.user.id;
   const workspaceId = workspaceManager.createWorkspace("RO WS", ownerId).id;
   return {
@@ -446,6 +461,129 @@ describe("read RPCs (timeline + context)", () => {
   });
 });
 
+// ─── IDOR gate: LIVE session reads (initiator / channel-member / admin) ──────
+
+// A live binding that is loaded in the agent manager (getAgent returns it), with a
+// durable transcript so the read returns rows.
+async function seedLiveSession(
+  h: Harness,
+  agentId: string,
+  opts: { channelId?: string | null; initiatedBy?: string | null },
+) {
+  h.storage.createAgentBinding({
+    agentId,
+    workspaceId: h.workspaceId,
+    channelId: opts.channelId ?? null,
+    provider: "claude",
+    initiatedBy: opts.initiatedBy ?? null,
+    ephemeral: false,
+  });
+  h.manager.getAgent.mockImplementation((id: string) => (id === agentId ? ({ id } as any) : undefined));
+  await h.durable.appendCommitted(agentId, { type: "user_message", text: "secret transcript" } as any);
+}
+
+async function fetchTimeline(h: Harness, agentId: string, who: any) {
+  const c = collect();
+  await h.dispatcher.dispatch(
+    { type: "cyborg:fetch_agent_timeline", requestId: "tl", workspaceId: h.workspaceId, agentId } as any,
+    who,
+    c.emit,
+  );
+  return c.messages;
+}
+
+describe("IDOR gate: live session timeline/context reads", () => {
+  let h: Harness;
+  let scopes: Map<string, Set<string>>;
+  let channelMembers: Map<string, Array<{ userId: string; email: string }>>;
+  beforeEach(() => {
+    scopes = new Map();
+    channelMembers = new Map();
+    // Owner = Alice, holds admin (audit) scope.
+    h = makeHarness({ pg: fakePg(scopes, channelMembers) });
+    scopes.set(h.ownerId, new Set(["admin"]));
+  });
+  afterEach(() => teardownHarness(h));
+
+  it("DENIES a non-member of the session's channel", async () => {
+    const initiator = h.auth.validateToken(h.auth.createToken("initiator@test.com", "Init"));
+    await seedLiveSession(h, "live-ch", { channelId: "chan-X", initiatedBy: initiator.user.id });
+    channelMembers.set("chan-X", [{ userId: initiator.user.id, email: "initiator@test.com" }]);
+
+    const stranger = h.auth.validateToken(h.auth.createToken("stranger@test.com", "Stranger"));
+    const msgs = await fetchTimeline(h, "live-ch", stranger);
+    expect(msgs.find((m) => m.type === "cyborg:error")?.payload.code).toBe("forbidden");
+    expect(msgs.find((m) => m.type === "cyborg:fetch_agent_timeline_response")).toBeUndefined();
+  });
+
+  it("ALLOWS a member of the session's channel", async () => {
+    await seedLiveSession(h, "live-ch2", { channelId: "chan-Y", initiatedBy: null });
+    const member = h.auth.validateToken(h.auth.createToken("member@test.com", "Member"));
+    channelMembers.set("chan-Y", [{ userId: member.user.id, email: "member@test.com" }]);
+
+    const msgs = await fetchTimeline(h, "live-ch2", member);
+    const resp = msgs.find((m) => m.type === "cyborg:fetch_agent_timeline_response");
+    expect(resp).toBeDefined();
+    expect(resp.payload.items.map((i: any) => i.text)).toEqual(["secret transcript"]);
+  });
+
+  it("ALLOWS the session initiator (even with no channel membership)", async () => {
+    const initiator = h.auth.validateToken(h.auth.createToken("owner2@test.com", "Owner2"));
+    await seedLiveSession(h, "live-priv", { channelId: null, initiatedBy: initiator.user.id });
+    const msgs = await fetchTimeline(h, "live-priv", initiator);
+    expect(msgs.find((m) => m.type === "cyborg:fetch_agent_timeline_response")).toBeDefined();
+  });
+
+  it("ALLOWS an admin (audit) read of any session", async () => {
+    const initiator = h.auth.validateToken(h.auth.createToken("someone@test.com", "Someone"));
+    await seedLiveSession(h, "live-priv2", { channelId: null, initiatedBy: initiator.user.id });
+    // h.ownerAuth (Alice) holds admin scope but is NOT the initiator or a channel member.
+    const msgs = await fetchTimeline(h, "live-priv2", h.ownerAuth);
+    expect(msgs.find((m) => m.type === "cyborg:fetch_agent_timeline_response")).toBeDefined();
+  });
+
+  it("DENIES a non-initiator, non-admin for a PRIVATE (no-channel) session", async () => {
+    const initiator = h.auth.validateToken(h.auth.createToken("owner3@test.com", "Owner3"));
+    await seedLiveSession(h, "live-priv3", { channelId: null, initiatedBy: initiator.user.id });
+    const stranger = h.auth.validateToken(h.auth.createToken("nobody@test.com", "Nobody"));
+    const msgs = await fetchTimeline(h, "live-priv3", stranger);
+    expect(msgs.find((m) => m.type === "cyborg:error")?.payload.code).toBe("forbidden");
+  });
+
+  it("gates fetch_session_context the same way (non-member denied, member allowed)", async () => {
+    await seedLiveSession(h, "live-ctx", { channelId: "chan-Z", initiatedBy: null });
+    h.storage.saveEphemeralSessionContext({
+      agentId: "live-ctx",
+      workspaceId: h.workspaceId,
+      channelId: "chan-Z",
+      cyboId: "cybo-z",
+      systemPrompt: "You are Z.",
+    });
+    const member = h.auth.validateToken(h.auth.createToken("cm@test.com", "CM"));
+    channelMembers.set("chan-Z", [{ userId: member.user.id, email: "cm@test.com" }]);
+    const stranger = h.auth.validateToken(h.auth.createToken("out@test.com", "Out"));
+
+    const denied = collect();
+    await h.dispatcher.dispatch(
+      { type: "cyborg:fetch_session_context", requestId: "x1", workspaceId: h.workspaceId, agentId: "live-ctx" } as any,
+      stranger,
+      denied.emit,
+    );
+    expect(denied.messages.find((m) => m.type === "cyborg:error")?.payload.code).toBe("forbidden");
+
+    const allowed = collect();
+    await h.dispatcher.dispatch(
+      { type: "cyborg:fetch_session_context", requestId: "x2", workspaceId: h.workspaceId, agentId: "live-ctx" } as any,
+      member,
+      allowed.emit,
+    );
+    expect(
+      allowed.messages.find((m) => m.type === "cyborg:fetch_session_context_response")?.payload.context
+        ?.systemPrompt,
+    ).toBe("You are Z.");
+  });
+});
+
 // ─── Secret redaction (task: redaction on the served context) ───────────────
 
 describe("secret redaction on served context", () => {
@@ -500,5 +638,236 @@ describe("secret redaction on served context", () => {
   it("redactSecrets leaves clean text untouched", () => {
     expect(redactSecrets("just a normal prompt")).toBe("just a normal prompt");
     expect(redactSecrets(null)).toBeNull();
+  });
+});
+
+// ─── IDOR back-door: restore / import / list archived-session gates ──────────
+// The timeline-read gate is bypassable via restore (it hydrates the victim's full
+// transcript into a live agent stamped with the RESTORER as initiator, so the
+// gated fetch_agent_timeline then passes for them). These lock the ownership gate
+// on restore_session, import_session's idempotent revive, and list_archived_sessions
+// (+ the workspace-scoped getArchivedSession lookup).
+
+async function dispatch(h: Harness, msg: any, who: any) {
+  const c = collect();
+  await h.dispatcher.dispatch(msg, who, c.emit);
+  return c.messages;
+}
+
+// For ALLOW-path assertions: the gate denies by EMITTING `forbidden` and RETURNING
+// (no throw). When it ALLOWS, restore proceeds to importProviderSession, which the
+// mock agent manager can't satisfy and throws — that throw means the gate PASSED.
+// Swallow it so the test can assert "no forbidden error" without an unhandled reject.
+async function dispatchPastGate(h: Harness, msg: any, who: any) {
+  const c = collect();
+  try {
+    await h.dispatcher.dispatch(msg, who, c.emit);
+  } catch {
+    // Post-gate hydration failure in the mock — proves the gate let it through.
+  }
+  return c.messages;
+}
+
+describe("IDOR gate: restore_session ownership", () => {
+  let h: Harness;
+  let scopes: Map<string, Set<string>>;
+  beforeEach(() => {
+    scopes = new Map();
+    h = makeHarness({ pg: fakePg(scopes) });
+    scopes.set(h.ownerId, new Set(["admin"])); // Alice = workspace owner/admin (audit)
+  });
+  afterEach(() => teardownHarness(h));
+
+  // Seed an archived row owned by `owner` and return its id.
+  function seedArchived(owner: { id: string | null; email: string | null }): string {
+    return h.storage.archiveSession({
+      workspaceId: h.workspaceId,
+      provider: "claude",
+      providerHandleId: "handle-1",
+      initiatedBy: owner.id,
+      initiatedByEmail: owner.email,
+    }).id;
+  }
+
+  it("DENIES a non-owner, non-admin member (the back-door)", async () => {
+    const victim = h.auth.validateToken(h.auth.createToken("victim@test.com", "Victim"));
+    const id = seedArchived({ id: victim.user.id, email: "victim@test.com" });
+    const attacker = h.auth.validateToken(h.auth.createToken("attacker@test.com", "Attacker"));
+    const msgs = await dispatch(
+      h,
+      { type: "cyborg:restore_session", requestId: "r1", workspaceId: h.workspaceId, sessionId: id },
+      attacker,
+    );
+    expect(msgs.find((m) => m.type === "cyborg:error")?.payload.code).toBe("forbidden");
+    expect(msgs.find((m) => m.type === "cyborg:restore_session_response")).toBeUndefined();
+  });
+
+  it("ALLOWS the OWNER (matched by initiated_by) past the gate", async () => {
+    const owner = h.auth.validateToken(h.auth.createToken("owner-r@test.com", "OwnerR"));
+    const id = seedArchived({ id: owner.user.id, email: "owner-r@test.com" });
+    const msgs = await dispatchPastGate(
+      h,
+      { type: "cyborg:restore_session", requestId: "r2", workspaceId: h.workspaceId, sessionId: id },
+      owner,
+    );
+    // The gate let it through — any error is NOT a forbidden (it's the mock manager
+    // failing to hydrate, which proves the gate passed).
+    expect(msgs.find((m) => m.type === "cyborg:error")?.payload.code).not.toBe("forbidden");
+  });
+
+  it("ALLOWS the OWNER when only the email matches (id bridged across namespaces)", async () => {
+    // Row stamped with a DIFFERENT local id but the owner's canonical email.
+    const id = seedArchived({ id: "local-xyz", email: "owner-e@test.com" });
+    const owner = h.auth.validateToken(h.auth.createToken("owner-e@test.com", "OwnerE"));
+    const msgs = await dispatchPastGate(
+      h,
+      { type: "cyborg:restore_session", requestId: "r3", workspaceId: h.workspaceId, sessionId: id },
+      owner,
+    );
+    expect(msgs.find((m) => m.type === "cyborg:error")?.payload.code).not.toBe("forbidden");
+  });
+
+  it("ALLOWS a workspace ADMIN to restore any session (audit)", async () => {
+    const someone = h.auth.validateToken(h.auth.createToken("someone-r@test.com", "SomeoneR"));
+    const id = seedArchived({ id: someone.user.id, email: "someone-r@test.com" });
+    // Alice (ownerAuth) holds admin scope but is neither initiator nor email-owner.
+    const msgs = await dispatchPastGate(
+      h,
+      { type: "cyborg:restore_session", requestId: "r4", workspaceId: h.workspaceId, sessionId: id },
+      h.ownerAuth,
+    );
+    expect(msgs.find((m) => m.type === "cyborg:error")?.payload.code).not.toBe("forbidden");
+  });
+
+  it("DENIES a non-admin for a NULL-owner legacy row (fail-closed)", async () => {
+    const id = seedArchived({ id: null, email: null });
+    const plain = h.auth.validateToken(h.auth.createToken("plain@test.com", "Plain"));
+    const msgs = await dispatch(
+      h,
+      { type: "cyborg:restore_session", requestId: "r5", workspaceId: h.workspaceId, sessionId: id },
+      plain,
+    );
+    expect(msgs.find((m) => m.type === "cyborg:error")?.payload.code).toBe("forbidden");
+  });
+
+  it("DENIES restoring a session that lives in a DIFFERENT workspace (id scope)", async () => {
+    // Archive in THIS workspace, then attempt restore under a bogus workspace id.
+    const owner = h.auth.validateToken(h.auth.createToken("owner-w@test.com", "OwnerW"));
+    const id = seedArchived({ id: owner.user.id, email: "owner-w@test.com" });
+    const msgs = await dispatch(
+      h,
+      { type: "cyborg:restore_session", requestId: "r6", workspaceId: "ws-other", sessionId: id },
+      owner,
+    );
+    // Workspace-scoped lookup returns undefined ⇒ "not found", never a leak.
+    expect(msgs.find((m) => m.type === "cyborg:restore_session_response")).toBeUndefined();
+    expect(msgs.find((m) => m.type === "cyborg:error")).toBeDefined();
+  });
+
+  it("getArchivedSession is workspace-scoped (won't return a foreign-workspace row)", () => {
+    const id = seedArchived({ id: "x", email: "x@test.com" });
+    expect(h.storage.getArchivedSession(id, h.workspaceId)?.id).toBe(id);
+    expect(h.storage.getArchivedSession(id, "ws-other")).toBeUndefined();
+  });
+});
+
+describe("IDOR gate: import_session idempotent-revive ownership", () => {
+  let h: Harness;
+  let scopes: Map<string, Set<string>>;
+  beforeEach(() => {
+    scopes = new Map();
+    h = makeHarness({ pg: fakePg(scopes) });
+    scopes.set(h.ownerId, new Set(["admin"]));
+  });
+  afterEach(() => teardownHarness(h));
+
+  it("DENIES importing when an existing archived row in the workspace is owned by another user", async () => {
+    const victim = h.auth.validateToken(h.auth.createToken("victim-i@test.com", "VictimI"));
+    // Pre-existing archived row (provider+handle the attacker will import) owned by victim.
+    h.storage.archiveSession({
+      workspaceId: h.workspaceId,
+      provider: "claude",
+      providerHandleId: "shared-handle",
+      initiatedBy: victim.user.id,
+      initiatedByEmail: "victim-i@test.com",
+    });
+    // Attacker passes the create_agent permission (workspace admin role) but holds
+    // NO daemon audit scope — so the ownership gate (isAuditVisible + initiator) is
+    // the SOLE denier here, not the upstream permission check.
+    const attacker = h.auth.validateToken(h.auth.createToken("attacker-i@test.com", "AttackerI"));
+    h.storage.addMember(h.workspaceId, attacker.user.id, "admin");
+    const msgs = await dispatch(
+      h,
+      {
+        type: "cyborg:import_session",
+        requestId: "i1",
+        workspaceId: h.workspaceId,
+        provider: "claude",
+        providerHandleId: "shared-handle",
+      },
+      attacker,
+    );
+    const err = msgs.find((m) => m.type === "cyborg:error");
+    expect(err).toBeDefined();
+    expect(err?.payload.message).toMatch(/not authorized to import/i);
+  });
+});
+
+describe("IDOR gate: list_archived_sessions own-only vs admin", () => {
+  let h: Harness;
+  let scopes: Map<string, Set<string>>;
+  beforeEach(() => {
+    scopes = new Map();
+    h = makeHarness({ pg: fakePg(scopes) });
+    scopes.set(h.ownerId, new Set(["admin"])); // Alice = admin (audit ⇒ sees all)
+  });
+  afterEach(() => teardownHarness(h));
+
+  function listFor(who: any) {
+    return dispatch(h, {
+      type: "cyborg:list_archived_sessions",
+      requestId: "L",
+      workspaceId: h.workspaceId,
+    }, who);
+  }
+  function idsOf(msgs: any[]): string[] {
+    const resp = msgs.find((m) => m.type === "cyborg:list_archived_sessions_response");
+    return (resp?.payload.sessions ?? []).map((s: any) => s.id);
+  }
+
+  it("a plain member sees ONLY their own sessions; an admin sees ALL", async () => {
+    const bob = h.auth.validateToken(h.auth.createToken("bob@test.com", "Bob"));
+    const carol = h.auth.validateToken(h.auth.createToken("carol@test.com", "Carol"));
+    const bobRow = h.storage.archiveSession({
+      workspaceId: h.workspaceId,
+      provider: "claude",
+      providerHandleId: "h-bob",
+      initiatedBy: bob.user.id,
+      initiatedByEmail: "bob@test.com",
+    }).id;
+    const carolRow = h.storage.archiveSession({
+      workspaceId: h.workspaceId,
+      provider: "claude",
+      providerHandleId: "h-carol",
+      initiatedBy: carol.user.id,
+      initiatedByEmail: "carol@test.com",
+    }).id;
+    const legacyRow = h.storage.archiveSession({
+      workspaceId: h.workspaceId,
+      provider: "claude",
+      providerHandleId: "h-legacy",
+      initiatedBy: null,
+      initiatedByEmail: null,
+    }).id;
+
+    // Bob (plain member, no admin scope): only his own row, never Carol's or the legacy one.
+    const bobIds = idsOf(await listFor(bob));
+    expect(bobIds).toContain(bobRow);
+    expect(bobIds).not.toContain(carolRow);
+    expect(bobIds).not.toContain(legacyRow);
+
+    // Alice (admin): sees everything, including the null-owner legacy row.
+    const adminIds = idsOf(await listFor(h.ownerAuth));
+    expect(adminIds).toEqual(expect.arrayContaining([bobRow, carolRow, legacyRow]));
   });
 });

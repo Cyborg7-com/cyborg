@@ -1218,6 +1218,12 @@ export const archivedSessions = pgTable(
     // resumed (shown in the active list, hidden from history). Cleared on
     // re-archive. Prevents resume from deleting the session from history.
     resumedAgentId: text("resumed_agent_id"),
+    // Owner captured at archive/import time (the live binding's initiator). Used to
+    // gate restore/import/list to the owner or a workspace owner/admin (IDOR fix).
+    // initiatedBy is a LOCAL daemon id; initiatedByEmail bridges it to the caller's
+    // cloud account across the divergent id namespaces.
+    initiatedBy: text("initiated_by"),
+    initiatedByEmail: text("initiated_by_email"),
   },
   (t) => [
     index("idx_archived_sessions_workspace").on(t.workspaceId, t.archivedAt),

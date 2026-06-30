@@ -7287,6 +7287,39 @@ export class CyborgDispatcher {
     }
   }
 
+  // Session singleton (dedup) for an INTERACTIVE spawn. When the cybo already has a
+  // LIVE (cybo, channel) session in this process, emit a spawn_cybo_response that
+  // points at it and return true (the caller skips spawnCybo); else return false to
+  // spawn fresh. Mirrors the cron path's reuseLiveCyboBinding EXACTLY — same channel
+  // scoping (getLiveCyboBinding) and same liveness probe (getAgent: reuse only while
+  // the agent is loaded; a torn-down/never-loaded binding ⇒ fresh spawn).
+  private reuseLiveCyboSpawn(
+    parsed: { requestId: string; workspaceId: string; channelId?: string | null },
+    cybo: StoredCybo | undefined,
+    emit: EmitFn,
+  ): boolean {
+    if (!cybo) return false;
+    const binding = this.storage.getLiveCyboBinding(
+      parsed.workspaceId,
+      cybo.id,
+      parsed.channelId ?? null,
+    );
+    if (!binding || !this.agentManager?.getAgent(binding.agent_id)) return false;
+    emit({
+      type: "cyborg:spawn_cybo_response",
+      payload: {
+        requestId: parsed.requestId,
+        agentId: binding.agent_id,
+        cyboId: cybo.id,
+        cyboSlug: cybo.slug,
+        provider: cybo.provider,
+        model: cybo.model,
+      },
+    });
+    return true;
+  }
+
+  // oxlint-disable-next-line eslint/complexity -- linear guard chain (permission, agent-manager, daemon-access, rate-limit, harness gate) + the dedup reuse check
   private async handleSpawnCybo(
     msg: CyborgMsg,
     auth: CyborgAuthContext,
@@ -7367,11 +7400,23 @@ export class CyborgDispatcher {
     try {
       const channel = parsed.channelId ? this.storage.getChannel(parsed.channelId) : undefined;
 
+      // Session singleton (dedup): an interactive add-to-channel / start-chat must
+      // REUSE the cybo's existing live (cybo, channel) session instead of minting a
+      // fresh agent+binding on every click. Resolve the cybo's id ONCE (bindings key
+      // on cybo.id, not the slug) and pass it through so spawnCybo doesn't resolve
+      // twice; reuseLiveCyboSpawn emits the reuse response and returns true when a
+      // live session was found (extracted to keep this handler under the complexity cap).
+      const resolvedCybo =
+        (parsed.resolvedCybo as StoredCybo | undefined) ??
+        (await resolveCybo(this.storage, parsed.workspaceId, parsed.cyboIdOrSlug));
+      if (this.reuseLiveCyboSpawn(parsed, resolvedCybo, emit)) return;
+
       const result = await spawnCybo({
         storage: this.storage,
         agentManager: this.agentManager,
         workspaceId: parsed.workspaceId,
         cyboIdOrSlug: parsed.cyboIdOrSlug,
+        resolvedCybo,
         userId: auth.user.id,
         // Real initiator email so this (NON-ephemeral) cybo session attributes to
         // its owner in the offline visibility filter — not <id>@remote.local (#810).
@@ -7383,9 +7428,8 @@ export class CyborgDispatcher {
           channelName: channel?.name,
           cwd: parsed.cwd,
         },
-        // Cloud: the relay resolved the cybo from PG (the daemon's local SQLite may
-        // not have it). Without this, resolveCybo throws "Cybo not found".
-        resolvedCybo: parsed.resolvedCybo as StoredCybo | undefined,
+        // resolvedCybo passed above (resolved once for the dedup probe). Cloud: the
+        // relay resolves the cybo from PG (the daemon's local SQLite may not have it).
         credentialStore: this.credentialStore,
         composio: this.composio,
         logger: this.logger ?? undefined,
@@ -8839,6 +8883,93 @@ export class CyborgDispatcher {
     return scopes.has("admin");
   }
 
+  // Read-authorization for a LIVE session's transcript/context (IDOR fix). The
+  // hole: handleFetchAgentTimeline ignored `auth` on the live path, so ANY
+  // workspace member could read ANY session by agentId. A session is readable by:
+  //   • its INITIATOR (binding.initiated_by, bridged by email — initiated_by is a
+  //     LOCAL SQLite id, auth.user.id can be a CLOUD id for the same person; the
+  //     same #810 bridge handleArchiveAgent / the prompt path use), OR
+  //   • a MEMBER of the binding's channel (channel-bound sessions are collaborative;
+  //     a non-member must NOT read a private channel's cybo transcript), OR
+  //   • an audit-visible admin (isAuditVisible — the daemon owner / #993 grant).
+  // FAIL-CLOSED: when the daemon can't resolve channel membership (no PG / not a
+  // channel session) the channel clause is simply false, so only initiator/admin
+  // pass. getChannelMembers returns CLOUD ids + emails (innerJoins users), so match
+  // the caller by either to survive the local/cloud id divergence. Solo mode (no PG)
+  // is single-tenant — the local caller IS the host (isAuditVisible returns true).
+  private async canReadLiveSession(
+    binding: { initiated_by: string | null; channel_id: string | null },
+    workspaceId: string,
+    auth: CyborgAuthContext,
+  ): Promise<boolean> {
+    // Initiator (email-bridged across the local/cloud id namespaces).
+    if (binding.initiated_by) {
+      if (binding.initiated_by === auth.user.id) return true;
+      const initiator = this.storage.getUserById(binding.initiated_by);
+      if (initiator?.email && auth.user.email && initiator.email === auth.user.email) return true;
+    }
+    // Channel member (PG-only; getChannelMembers drops cybos, returns humans).
+    const pg = this.storage.pg;
+    if (binding.channel_id && pg) {
+      try {
+        const members = await pg.getChannelMembers(binding.channel_id);
+        const email = auth.user.email?.toLowerCase();
+        if (
+          members.some(
+            (m) => m.userId === auth.user.id || (!!email && m.email?.toLowerCase() === email),
+          )
+        ) {
+          return true;
+        }
+      } catch (err) {
+        // Fail closed on a membership lookup error — fall through to the admin gate.
+        this.logger?.warn(
+          { err, channelId: binding.channel_id },
+          "[timeline] channel-membership check failed — denying channel-member access",
+        );
+      }
+    }
+    // Auditor (admin scope on this daemon) — also the solo/single-tenant allow.
+    return this.isAuditVisible(workspaceId, auth.user.id);
+  }
+
+  // Ownership gate for an ARCHIVED session (restore/import/list IDOR fix). An
+  // archived row carries NO channel context (the binding is torn down on archive),
+  // so unlike canReadLiveSession there is no channel-member clause — a session is
+  // owned by:
+  //   • its INITIATOR — matched by the persisted initiated_by (LOCAL id) OR
+  //     initiated_by_email (email-bridged across local/cloud id namespaces, the
+  //     same #810 bridge handleArchiveAgent uses), OR
+  //   • an audit-visible workspace OWNER/ADMIN (isAuditVisible — daemon owner / #993
+  //     grant; also the solo/single-tenant allow).
+  // FAIL-CLOSED: a row with a NULL owner (archived before the owner column existed)
+  // passes ONLY for an owner/admin — a plain member is denied.
+  private async canOwnArchivedSession(
+    session: { initiated_by: string | null; initiated_by_email: string | null },
+    workspaceId: string,
+    auth: CyborgAuthContext,
+  ): Promise<boolean> {
+    if (session.initiated_by && session.initiated_by === auth.user.id) return true;
+    const email = auth.user.email?.toLowerCase();
+    if (session.initiated_by_email && email && session.initiated_by_email.toLowerCase() === email) {
+      return true;
+    }
+    return this.isAuditVisible(workspaceId, auth.user.id);
+  }
+
+  // Shared forbidden response for the session-read gate (keeps the read handlers
+  // under the complexity cap).
+  private emitSessionReadForbidden(requestId: string, emit: EmitFn): void {
+    emit({
+      type: "cyborg:error",
+      payload: {
+        requestId,
+        code: "forbidden",
+        message: "Not authorized to read this session",
+      },
+    });
+  }
+
   // Serve a torn-down ephemeral session's durable transcript to an auditor, or
   // emit not_found. Pure durable read — never revives. Extracted from
   // handleFetchAgentTimeline (complexity budget).
@@ -8950,7 +9081,16 @@ export class CyborgDispatcher {
     emit: EmitFn,
   ): Promise<void> {
     const parsed = CyborgFetchSessionContextRequestSchema.parse(msg);
-    if (!(await this.isAuditVisible(parsed.workspaceId, auth.user.id))) {
+    // Authorize the SAME way as the timeline read (they expose the same session).
+    // LIVE binding present → initiator / channel-member / admin (canReadLiveSession);
+    // torn-down ephemeral (no binding, captured row only) → admin audit (the binding
+    // that would carry initiator/channel is gone, so fail-closed to the auditor).
+    const ctxBinding = this.storage.getAgentBinding(parsed.agentId);
+    const authorized =
+      ctxBinding && ctxBinding.workspace_id === parsed.workspaceId
+        ? await this.canReadLiveSession(ctxBinding, parsed.workspaceId, auth)
+        : await this.isAuditVisible(parsed.workspaceId, auth.user.id);
+    if (!authorized) {
       emit({
         type: "cyborg:error",
         payload: { requestId: parsed.requestId, code: "forbidden", message: "Not authorized" },
@@ -8968,9 +9108,10 @@ export class CyborgDispatcher {
     });
   }
 
+  // oxlint-disable-next-line eslint/complexity -- linear guard chain + live/durable timeline assembly; the IDOR gate adds one early-return guard
   private async handleFetchAgentTimeline(
     msg: CyborgMsg,
-    _auth: CyborgAuthContext,
+    auth: CyborgAuthContext,
     emit: EmitFn,
   ): Promise<void> {
     const parsed = CyborgFetchAgentTimelineRequestSchema.parse(msg);
@@ -8979,7 +9120,15 @@ export class CyborgDispatcher {
       // No live binding — a TORN-DOWN ephemeral session still has durable rows.
       // Serve them attach-free to an auditor, else not_found (#994). Extracted to
       // keep this handler's complexity in budget.
-      await this.serveTornDownTimeline(parsed, _auth.user.id, emit);
+      await this.serveTornDownTimeline(parsed, auth.user.id, emit);
+      return;
+    }
+
+    // IDOR gate: a LIVE binding's transcript is readable only by the initiator, a
+    // channel member, or an audit admin (previously `auth` was ignored on this path,
+    // so any workspace member could read any session by agentId). Fail-closed.
+    if (!(await this.canReadLiveSession(binding, parsed.workspaceId, auth))) {
+      this.emitSessionReadForbidden(parsed.requestId, emit);
       return;
     }
 
@@ -9158,6 +9307,15 @@ export class CyborgDispatcher {
     const cwd = agent?.cwd ?? null;
     const cyboId = agent?.labels?.cyboId ?? binding?.cybo_id ?? null;
 
+    // Capture the SESSION OWNER (the binding's initiator, NOT whoever clicked
+    // archive — an owner/admin may archive a member's session). Persisted on the
+    // archived row so restore/import/list can gate to the owner later. Email-
+    // bridged: initiated_by is a LOCAL id, so we also store the canonical email.
+    const ownerInitiatedBy = binding?.initiated_by ?? null;
+    const ownerInitiatedByEmail = ownerInitiatedBy
+      ? (this.storage.getUserById(ownerInitiatedBy)?.email ?? null)
+      : null;
+
     // If this agent was resumed from an existing archived session, REVIVE that
     // same history row (refresh its metadata + timestamp, clear the live link)
     // instead of inserting a duplicate. Otherwise archive as a fresh session.
@@ -9179,6 +9337,8 @@ export class CyborgDispatcher {
           cwd,
           model,
           cyboId,
+          initiatedBy: ownerInitiatedBy,
+          initiatedByEmail: ownerInitiatedByEmail,
         });
 
     this.storage.archiveAgentSessionRow(parsed.agentId);
@@ -9229,7 +9389,7 @@ export class CyborgDispatcher {
 
   private async handleListArchivedSessions(
     msg: CyborgMsg,
-    _auth: CyborgAuthContext,
+    auth: CyborgAuthContext,
     emit: EmitFn,
   ): Promise<void> {
     const parsed = CyborgListArchivedSessionsRequestSchema.parse(msg);
@@ -9240,13 +9400,29 @@ export class CyborgDispatcher {
       parsed.workspaceId,
       { limit: parsed.limit, cursor: parsed.cursor },
     );
+    // OWNERSHIP FILTER (IDOR fix): previously _auth was ignored and EVERY member's
+    // archived sessions (ids + titles + cwds) were returned to anyone — the
+    // discovery surface for the restore back-door. Return only the caller's OWN
+    // sessions; an audit-visible owner/admin sees ALL (audit). Fail-closed: a row
+    // with a NULL owner is hidden from a plain member (only owner/admin see it).
+    // Applied alongside the dedup filter; nextCursor stays off the RAW page (same
+    // reason as dedup) so the keyset advances even when rows are hidden.
+    const isAdmin = await this.isAuditVisible(parsed.workspaceId, auth.user.id);
+    const callerEmail = auth.user.email?.toLowerCase();
+    const ownsRow = (r: { initiated_by: string | null; initiated_by_email: string | null }) =>
+      (!!r.initiated_by && r.initiated_by === auth.user.id) ||
+      (!!r.initiated_by_email &&
+        !!callerEmail &&
+        r.initiated_by_email.toLowerCase() === callerEmail);
     // De-duplicate: a session that has been resumed into a still-live agent is
     // shown in the ACTIVE list (via its binding), so hide it from history while
     // the binding exists — otherwise it would appear in both places. If the
     // binding is gone (agent fully removed) the row is shown again so the session
     // is never unreachable.
     const rows = pageRows.filter(
-      (r) => !r.resumed_agent_id || !this.storage.getAgentBinding(r.resumed_agent_id),
+      (r) =>
+        (isAdmin || ownsRow(r)) &&
+        (!r.resumed_agent_id || !this.storage.getAgentBinding(r.resumed_agent_id)),
     );
     const cyboInfo = await this.buildCyboInfoMap(parsed.workspaceId);
     emit({
@@ -9281,12 +9457,34 @@ export class CyborgDispatcher {
     emit: EmitFn,
   ): Promise<void> {
     const parsed = CyborgRestoreSessionRequestSchema.parse(msg);
-    const session = this.storage.getArchivedSession(parsed.sessionId);
+    // WORKSPACE-SCOPED lookup: a session can't be restored cross-workspace by id.
+    const session = this.storage.getArchivedSession(parsed.sessionId, parsed.workspaceId);
 
     if (!session) {
       emit({
         type: "cyborg:error",
         payload: { requestId: parsed.requestId, error: "Archived session not found" },
+      });
+      return;
+    }
+
+    // OWNERSHIP GATE (IDOR back-door): restoring hydrates the session's FULL
+    // transcript into a live agent stamped with the RESTORER as initiator, so the
+    // now-gated fetch_agent_timeline then passes for them — a transcript leak
+    // unless restore itself is gated. Require the caller to be the session's OWNER
+    // (initiator, email-bridged) OR a workspace owner/admin. Fail-closed.
+    if (!(await this.canOwnArchivedSession(session, parsed.workspaceId, auth))) {
+      this.logger?.error(
+        { caller: auth.user.id, sessionId: parsed.sessionId, workspaceId: parsed.workspaceId },
+        "restore_session denied — not the session owner or a workspace admin",
+      );
+      emit({
+        type: "cyborg:error",
+        payload: {
+          requestId: parsed.requestId,
+          code: "forbidden",
+          message: "Not authorized to restore this session",
+        },
       });
       return;
     }
@@ -9447,6 +9645,39 @@ export class CyborgDispatcher {
           requestId: parsed.requestId,
           code: "forbidden",
           message: "Cannot import session",
+        },
+      });
+      return;
+    }
+
+    // OWNERSHIP GATE (IDOR back-door): import never takes an archived-session id,
+    // but its idempotent get-or-create can REVIVE/RETURN a PRE-EXISTING archived row
+    // in this workspace (matched by provider+handle). If that row belongs to a
+    // DIFFERENT user, reviving it would hand its live agent + transcript to the
+    // importer — the same leak as restore. So when an existing row is found, require
+    // the caller to OWN it (initiator, email-bridged) OR be a workspace owner/admin.
+    // A fresh transcript (no existing row) is the caller's OWN on-disk session — no
+    // gate beyond create_agent. Checked here (before the in-flight machinery) so the
+    // denial never gets shared by the single-flight cache.
+    const existingArchived = this.findArchivedSessionByProviderHandle(
+      parsed.workspaceId,
+      parsed.provider,
+      parsed.providerHandleId,
+    );
+    if (
+      existingArchived &&
+      !(await this.canOwnArchivedSession(existingArchived, parsed.workspaceId, auth))
+    ) {
+      this.logger?.error(
+        { caller: auth.user.id, sessionId: existingArchived.id, workspaceId: parsed.workspaceId },
+        "import_session denied — existing archived row owned by another user",
+      );
+      emit({
+        type: "cyborg:error",
+        payload: {
+          requestId: parsed.requestId,
+          code: "forbidden",
+          message: "Not authorized to import this session",
         },
       });
       return;
@@ -9625,6 +9856,11 @@ export class CyborgDispatcher {
           cwd: resolvedCwd,
           model,
           cyboId,
+          // The importer owns the imported transcript's archived row. auth.user.email
+          // is non-optional (string), so no `?? null` is needed here — keeping the
+          // call branch-free preserves this method's oxlint complexity budget.
+          initiatedBy: auth.user.id,
+          initiatedByEmail: auth.user.email,
         });
     this.storage.markArchivedSessionResumed(session.id, snapshot.id);
 
