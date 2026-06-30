@@ -1242,6 +1242,10 @@ export class DualStorage {
     initiatedByEmail?: string | null;
     cwd?: string | null;
     ephemeral?: boolean;
+    // AUTONOMOUS (cron / scheduled / webhook) spawn — owner-scoped in the session
+    // list (see agentBindingVisibleCore). Mirrored to PG so the offline list scopes
+    // it identically to the live list.
+    autonomous?: boolean;
   }): StoredAgentBinding {
     const binding = this.sqlite.createAgentBinding(opts);
     // Mirror NON-ephemeral bindings to PG so the cloud relay's list_agents can show
@@ -1279,6 +1283,7 @@ export class DualStorage {
           initiatedByEmail,
           cwd: binding.cwd,
           providerSessionId: binding.provider_session_id,
+          autonomous: binding.autonomous === 1,
         })
         .catch(this.logSyncError("upsertAgentBinding"));
     }

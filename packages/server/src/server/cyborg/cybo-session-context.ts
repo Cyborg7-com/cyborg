@@ -116,7 +116,12 @@ export class CyboSessionContext {
       .filter((b) => b.cybo_id === cyboId)
       .filter((b) =>
         agentBindingVisibleCore(
-          { channelId: b.channel_id, initiatedBy: b.initiated_by, ephemeral: b.ephemeral === 1 },
+          {
+            channelId: b.channel_id,
+            initiatedBy: b.initiated_by,
+            ephemeral: b.ephemeral === 1,
+            autonomous: b.autonomous === 1,
+          },
           () => !!ownerLocalId && b.initiated_by === ownerLocalId,
         ),
       );

@@ -316,6 +316,13 @@
       "when": 1783000022000,
       "tag": "0044_installed_recipes",
       "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "7",
+      "when": 1783000023000,
+      "tag": "0045_agent_bindings_autonomous",
+      "breakpoints": true
     }
   ]
 }

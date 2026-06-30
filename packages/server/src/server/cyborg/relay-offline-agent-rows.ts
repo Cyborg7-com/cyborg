@@ -29,6 +29,13 @@ export interface OfflineAgentBinding {
   // ephemeral bindings (they're one-turn, torn down), so in practice this is
   // absent/false offline — but the audit row carries the field for parity.
   ephemeral?: boolean;
+  // AUTONOMOUS (cron / scheduled / webhook) spawn — no human invoker. Unlike a
+  // human-spawned interactive channel agent (a deliberately SHARED collaborative
+  // resource), an autonomous session belongs PRIVATELY to whoever scheduled it and
+  // must be OWNER-SCOPED in the session list (it still POSTS to its channel — only
+  // the sidebar SESSION visibility is scoped). Persisted on the mirror so the
+  // offline list scopes it the same way the live list does.
+  autonomous?: boolean;
 }
 
 // Build the offline (owning-daemon-asleep) list_agents row for a mirrored binding.
@@ -76,17 +83,32 @@ export function buildOfflineAgentRow(b: OfflineAgentBinding): Record<string, unk
 // channel-bound: they belong to the user who triggered them and must appear ONLY in
 // that user's list. Letting a channel-bound ephemeral through the "shared channel"
 // branch is exactly the 2026-06-12 ghost-session leak (a member saw — and could
-// resume — every other member's mention summons). So the channel short-circuit is
-// reached ONLY for non-ephemeral bindings.
+// resume — every other member's mention summons).
+//
+// AUTONOMOUS sessions (cron / scheduled / webhook fires — spawnCybo with
+// autonomous:true) are LIKEWISE owner-scoped: a scheduled cybo (e.g. a per-user
+// "market brief" cron) is a PRIVATE session of whoever scheduled it, not a shared
+// channel resource — even though it is non-ephemeral and channel-bound (it posts
+// its output INTO the channel). Without this an autonomous binding leaked into
+// EVERY workspace member's sidebar via the channel short-circuit. So the channel
+// short-circuit is reached ONLY for non-ephemeral, NON-autonomous bindings — i.e. a
+// genuinely human-spawned, deliberately SHARED interactive channel agent.
 export function agentBindingVisibleCore(
-  b: { channelId: string | null; initiatedBy: string | null; ephemeral: boolean },
+  b: {
+    channelId: string | null;
+    initiatedBy: string | null;
+    ephemeral: boolean;
+    autonomous: boolean;
+  },
   isOwner: () => boolean,
 ): boolean {
   if (!b.initiatedBy) return true;
   if (isOwner()) return true;
-  // A non-ephemeral channel agent is shared with the whole channel; an ephemeral
-  // one is private to its initiator (already admitted by the isOwner check above).
-  if (b.channelId && !b.ephemeral) return true;
+  // A non-ephemeral, NON-autonomous channel agent is shared with the whole channel.
+  // Ephemeral (mention/slash) and autonomous (cron/scheduled/webhook) channel
+  // sessions are private to their initiator (already admitted by the isOwner check
+  // above) and must NOT take this shared short-circuit.
+  if (b.channelId && !b.ephemeral && !b.autonomous) return true;
   return false;
 }
 
@@ -110,12 +132,18 @@ export function offlineBindingVisible(
     initiatedBy: string | null;
     initiatedByEmail: string | null;
     ephemeral?: boolean;
+    autonomous?: boolean;
   },
   guestEmail: string | null,
   viewerGlobalId: string | null,
 ): boolean {
   return agentBindingVisibleCore(
-    { channelId: b.channelId, initiatedBy: b.initiatedBy, ephemeral: b.ephemeral === true },
+    {
+      channelId: b.channelId,
+      initiatedBy: b.initiatedBy,
+      ephemeral: b.ephemeral === true,
+      autonomous: b.autonomous === true,
+    },
     () =>
       (!!b.initiatedByEmail &&
         !!guestEmail &&
@@ -133,6 +161,7 @@ export function offlineBindingVisible(
 export function buildAuditAgentRow(b: OfflineAgentBinding): Record<string, unknown> {
   const row = buildOfflineAgentRow(b);
   row.ephemeral = b.ephemeral === true;
+  row.autonomous = b.autonomous === true;
   row.internal = false;
   return row;
 }

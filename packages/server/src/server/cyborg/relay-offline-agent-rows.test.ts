@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  agentBindingVisibleCore,
   buildOfflineAgentRow,
   offlineBindingVisible,
   offlineAgentRows,
@@ -79,6 +80,44 @@ describe("relay-offline-agent-rows", () => {
     expect(offlineBindingVisible(b, null, null)).toBe(false);
   });
 
+  it("offlineBindingVisible: a channel-bound AUTONOMOUS (cron) session is owner-scoped (NOT shared)", () => {
+    // The cron-session leak (Rodrigo seeing Seb's "Rick" market-brief crons): a
+    // scheduled cybo is channel-bound + non-ephemeral, so it slipped through the
+    // "shared channel agent" short-circuit into every member's sidebar. An
+    // autonomous session belongs PRIVATELY to whoever scheduled it.
+    const b = {
+      channelId: "chan-1",
+      initiatedBy: "local-user-1",
+      initiatedByEmail: "owner@test.dev",
+      autonomous: true,
+    };
+    expect(offlineBindingVisible(b, "owner@test.dev", null)).toBe(true); // the scheduler sees it
+    expect(offlineBindingVisible(b, "someone-else@test.dev", "viewer-9")).toBe(false); // others do NOT
+    expect(offlineBindingVisible(b, null, null)).toBe(false);
+  });
+
+  it("agentBindingVisibleCore: autonomous channel session is owner-scoped on the LIVE (id-space) path too", () => {
+    // The daemon's handleListAgents calls this same predicate with an id-space
+    // ownership check. An autonomous channel-bound session must be visible ONLY to
+    // its initiator there as well — so live + offline lists can never disagree.
+    const autonomousChannel = {
+      channelId: "chan-1",
+      initiatedBy: "local-user-1",
+      ephemeral: false,
+      autonomous: true,
+    };
+    expect(agentBindingVisibleCore(autonomousChannel, () => true)).toBe(true); // owner (id match)
+    expect(agentBindingVisibleCore(autonomousChannel, () => false)).toBe(false); // a peer
+    // A human-spawned (non-autonomous) channel agent stays shared for the peer.
+    const interactiveChannel = {
+      channelId: "chan-1",
+      initiatedBy: "local-user-1",
+      ephemeral: false,
+      autonomous: false,
+    };
+    expect(agentBindingVisibleCore(interactiveChannel, () => false)).toBe(true);
+  });
+
   it("offlineBindingVisible: a session with no initiator is visible", () => {
     const b = { channelId: null, initiatedBy: null, initiatedByEmail: null };
     expect(offlineBindingVisible(b, "anyone@test.dev", "anyone-global")).toBe(true);
@@ -132,6 +171,34 @@ describe("relay-offline-agent-rows", () => {
     expect(ids).toContain("a-own"); // own private session
     expect(ids).toContain("a-channel"); // channel-bound, everyone sees it
     expect(ids).not.toContain("a-other"); // someone else's private session stays hidden
+  });
+
+  it("hides another member's AUTONOMOUS (cron) channel session, but shows it to its scheduler", () => {
+    // Seb scheduled "Rick" market-brief crons (autonomous, channel-bound). Rodrigo
+    // must NOT see them in his sidebar; Seb still does.
+    const bindings = [
+      binding({
+        agentId: "rick-cron",
+        channelId: "chan-market",
+        initiatedBy: "seb-local",
+        initiatedByEmail: "seb@cyborg7.com",
+        autonomous: true,
+      }),
+      // A genuinely human-spawned shared channel agent (autonomous false) stays
+      // visible to every member — the collaborative feature is preserved.
+      binding({
+        agentId: "shared-helper",
+        channelId: "chan-market",
+        initiatedBy: "seb-local",
+        initiatedByEmail: "seb@cyborg7.com",
+      }),
+    ];
+    // Rodrigo (a peer) — sees only the shared interactive agent, NOT Seb's cron.
+    const rodrigo = offlineAgentRows(bindings, "rodrigo@cyborg7.com", new Set(), "rodrigo-global");
+    expect(rodrigo.map((r) => r.agentId)).toEqual(["shared-helper"]);
+    // Seb (the scheduler) — sees BOTH his cron and the shared agent.
+    const seb = offlineAgentRows(bindings, "seb@cyborg7.com", new Set(), "seb-global");
+    expect(seb.map((r) => r.agentId).sort()).toEqual(["rick-cron", "shared-helper"]);
   });
 
   it("lists an OLD @remote.local private row to its owner by GLOBAL id, but hides a peer's (#810)", () => {

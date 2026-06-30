@@ -459,6 +459,11 @@ export interface StoredAgentBinding {
   provider_session_id: string | null;
   // 1 = ephemeral summon (one turn, torn down on completion); 0 = persistent.
   ephemeral: number;
+  // 1 = AUTONOMOUS spawn (cron / scheduled / webhook — no human invoker); 0 =
+  // human-initiated. An autonomous channel-bound session is OWNER-SCOPED in the
+  // session list (visible only to whoever scheduled it), unlike a human-spawned
+  // interactive channel agent which stays shared. See agentBindingVisibleCore.
+  autonomous: number;
   created_at: number;
 }
 
@@ -700,8 +705,8 @@ export class CyborgStorage {
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     this.insertAgentBindingStmt = this.db.prepare(
-      `INSERT INTO agent_bindings (agent_id, workspace_id, channel_id, provider, model, system_prompt, daemon_id, cybo_id, initiated_by, cwd, ephemeral, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO agent_bindings (agent_id, workspace_id, channel_id, provider, model, system_prompt, daemon_id, cybo_id, initiated_by, cwd, ephemeral, autonomous, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     this.getAgentBindingStmt = this.db.prepare("SELECT * FROM agent_bindings WHERE agent_id = ?");
     this.getAgentsByWorkspaceStmt = this.db.prepare(
@@ -1246,6 +1251,7 @@ export class CyborgStorage {
         system_prompt TEXT,
         daemon_id TEXT,
         provider_session_id TEXT,
+        autonomous INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL
       );
 
@@ -1337,6 +1343,10 @@ export class CyborgStorage {
     if (!cols.some((c) => c.name === "provider_session_id")) {
       this.db.exec("ALTER TABLE agent_bindings ADD COLUMN provider_session_id TEXT");
     }
+    // AUTONOMOUS (cron/scheduled) marker — owner-scopes the session in list_agents.
+    // Uses addColumnIfMissing (a method call, no extra branch) to stay within the
+    // migrate() complexity budget.
+    this.addColumnIfMissing("agent_bindings", "autonomous", "INTEGER NOT NULL DEFAULT 0");
     this.addColumnIfMissing("messages", "from_name", "TEXT");
     this.addColumnIfMissing("messages", "attachments", "TEXT");
     this.addColumnIfMissing("messages", "pinned_at", "INTEGER");
@@ -3842,6 +3852,7 @@ export class CyborgStorage {
     initiatedBy?: string | null;
     cwd?: string | null;
     ephemeral?: boolean;
+    autonomous?: boolean;
   }): StoredAgentBinding {
     const now = Date.now();
     this.insertAgentBindingStmt.run(
@@ -3856,6 +3867,7 @@ export class CyborgStorage {
       opts.initiatedBy ?? null,
       opts.cwd ?? null,
       opts.ephemeral ? 1 : 0,
+      opts.autonomous ? 1 : 0,
       now,
     );
     return this.getAgentBindingStmt.get(opts.agentId) as StoredAgentBinding;

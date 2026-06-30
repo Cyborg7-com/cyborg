@@ -5370,6 +5370,9 @@ export class PgSync {
     initiatedByEmail: string | null;
     cwd: string | null;
     providerSessionId: string | null;
+    // AUTONOMOUS (cron / scheduled / webhook) spawn — owner-scoped in the session
+    // list (see agentBindingVisibleCore / offlineBindingVisible).
+    autonomous: boolean;
   }): Promise<void> {
     await this.db
       .insert(schema.agentBindings)
@@ -5386,6 +5389,7 @@ export class PgSync {
         initiatedByEmail: b.initiatedByEmail,
         cwd: b.cwd,
         providerSessionId: b.providerSessionId,
+        autonomous: b.autonomous,
       })
       .onConflictDoUpdate({
         target: schema.agentBindings.agentId,
@@ -5401,6 +5405,7 @@ export class PgSync {
           initiatedByEmail: b.initiatedByEmail,
           cwd: b.cwd,
           providerSessionId: b.providerSessionId,
+          autonomous: b.autonomous,
           updatedAt: new Date(),
         },
       });
@@ -5542,6 +5547,7 @@ export class PgSync {
       initiatedByEmail: string | null;
       cwd: string | null;
       providerSessionId: string | null;
+      autonomous: boolean;
     }>
   > {
     const rows = await this.db
@@ -5561,6 +5567,7 @@ export class PgSync {
       initiatedByEmail: r.initiatedByEmail,
       cwd: r.cwd,
       providerSessionId: r.providerSessionId,
+      autonomous: r.autonomous,
     }));
   }
 

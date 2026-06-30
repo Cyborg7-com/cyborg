@@ -4696,14 +4696,18 @@ export class CyborgDispatcher {
     // (@-mentions, slash commands) are OWNER-SCOPED: they belong to the user who
     // triggered them and appear ONLY in that user's list — never every member's
     // sidebar (the 2026-06-12 ghost-session incident: a channel-bound ephemeral
-    // leaked to ALL members through the channel_id short-circuit). Non-ephemeral
-    // channel agents stay SHARED (a deliberate collaborative feature).
+    // leaked to ALL members through the channel_id short-circuit). AUTONOMOUS
+    // (cron/scheduled) sessions are owner-scoped the same way — a scheduled cybo is
+    // private to whoever scheduled it, not a shared channel resource. Only a
+    // human-spawned, non-ephemeral, NON-autonomous channel agent stays SHARED (a
+    // deliberate collaborative feature).
     bindings = bindings.filter((b) =>
       agentBindingVisibleCore(
         {
           channelId: b.channel_id,
           initiatedBy: b.initiated_by,
           ephemeral: b.ephemeral === 1,
+          autonomous: b.autonomous === 1,
         },
         () => b.initiated_by === auth.user.id || b.initiated_by === callerLocalId,
       ),
@@ -4858,6 +4862,7 @@ export class CyborgDispatcher {
     const live = this.agentManager?.getAgent(b.agent_id);
     const row = this.toAgentListRow(b, cyboInfo);
     row.ephemeral = b.ephemeral === 1;
+    row.autonomous = b.autonomous === 1;
     row.internal = live?.internal ?? false;
     return row;
   }

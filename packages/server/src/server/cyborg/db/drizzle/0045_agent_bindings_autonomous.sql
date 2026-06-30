@@ -1,0 +1,23 @@
+-- agent_bindings.autonomous: mark a cron/scheduled/webhook (autonomous) cybo
+-- session so the cloud relay's list_agents OFFLINE fallback can OWNER-SCOPE it.
+--
+-- The bug: a non-ephemeral, channel-bound cybo session was visible to EVERY
+-- workspace member via the "shared channel agent" short-circuit in
+-- agentBindingVisibleCore. That is correct for a human-spawned interactive channel
+-- agent (a deliberately shared resource), but WRONG for an autonomous spawn
+-- (spawnCybo autonomous:true — a scheduled "market brief" cron) which is a PRIVATE
+-- session of whoever scheduled it. A member saw (and could resume) another
+-- member's cron sessions in their own sidebar.
+--
+-- The live (daemon handleListAgents) and offline (relay offlineBindingVisible)
+-- paths share ONE predicate (agentBindingVisibleCore); both now exclude autonomous
+-- channel sessions from the shared short-circuit. This column persists the marker
+-- so the offline mirror scopes identically to the live list. Message delivery is
+-- unaffected — this is sidebar SESSION-list visibility only.
+--
+-- Additive + IDEMPOTENT (ADD COLUMN IF NOT EXISTS), matching the repo's
+-- hand-applied-prod convention (see 0043_composio_tools.sql /
+-- 0036_persist_agent_bindings.sql). NOT NULL DEFAULT false ⇒ every pre-existing
+-- row backfills to non-autonomous (its current shared behaviour), so no
+-- legitimately-shared session is hidden by this migration. Safe no-op on re-run.
+ALTER TABLE "agent_bindings" ADD COLUMN IF NOT EXISTS "autonomous" boolean DEFAULT false NOT NULL;

@@ -519,6 +519,12 @@ export async function spawnCybo(opts: {
     initiatedByEmail: initiatedByEmail ?? null,
     cwd: sessionCwd,
     ephemeral,
+    // Persist the autonomous marker so BOTH the live (handleListAgents) and offline
+    // (offlineBindingVisible) lists OWNER-SCOPE a cron/scheduled session instead of
+    // leaking it to every channel member via the shared-channel short-circuit. A
+    // human-spawned interactive channel agent (autonomous undefined/false) stays
+    // shared. Message delivery is unaffected — this is sidebar SESSION visibility.
+    autonomous,
   });
   // Capture the EPHEMERAL session's injected context durably (#994) — the system
   // prompt AND the assembled mcpServers map only co-exist here before

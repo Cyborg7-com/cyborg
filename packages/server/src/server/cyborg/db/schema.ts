@@ -1231,6 +1231,12 @@ export const agentBindings = pgTable(
     // Best-effort provider resume id (Paseo's on-disk JSON is the real resume
     // source; this is mirrored for completeness, nullable until a turn reveals it).
     providerSessionId: text("provider_session_id"),
+    // AUTONOMOUS (cron / scheduled / webhook) spawn — no human invoker. An
+    // autonomous channel-bound session is OWNER-SCOPED in the session list (visible
+    // only to whoever scheduled it), unlike a human-spawned interactive channel
+    // agent which stays shared. Powers the offline-row visibility filter the same
+    // way the live daemon list does (agentBindingVisibleCore).
+    autonomous: boolean("autonomous").notNull().default(false),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
