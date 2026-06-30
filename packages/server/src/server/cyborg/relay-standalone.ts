@@ -51,7 +51,10 @@ import {
   pgStoredCyboToFetchResponse,
   resolveWorkspaceCybo,
 } from "./cybo-roster-merge.js";
-import { applyHomeDaemonRouting } from "./cybo-home-daemon-routing.js";
+import {
+  applyHomeDaemonRouting,
+  shouldApplyHomeRoutingForSpawn,
+} from "./cybo-home-daemon-routing.js";
 import {
   finalizeTerminalDirectory,
   mergeTerminalDirectoryResponse,
@@ -2327,14 +2330,28 @@ async function main() {
       // Problem (4) — HOME-DAEMON authoritative spawn routing. A cybo's
       // home_daemon_id (the machine it "lives on", chosen at creation) was
       // persisted but inert: spawn_cybo always landed on the sponsor/selected
-      // daemon. Honor it here: when the caller didn't pin an explicit daemon and
-      // the cybo's home daemon is ONLINE + the caller can run on it, pin the
-      // spawn there. Falls back GRACEFULLY (and tells the author why) when the
-      // home daemon is offline/inaccessible — never a hard fail, never blocking
-      // the existing multi-daemon resolution below. Only spawn_cybo carries a
-      // resolvedCybo; create_schedule names a cybo too but a schedule's runner
-      // must stay on its owning daemon, so it is deliberately excluded.
-      if (type === "cyborg:spawn_cybo" && !targetDaemonId) {
+      // daemon. Honor it here: when the cybo's home daemon is ONLINE + the caller
+      // can run on it, pin the spawn there. Falls back GRACEFULLY (and tells the
+      // author why) when the home daemon is offline/inaccessible — never a hard
+      // fail, never blocking the existing multi-daemon resolution below. Only
+      // spawn_cybo carries a resolvedCybo; create_schedule names a cybo too but a
+      // schedule's runner must stay on its owning daemon, so it is deliberately
+      // excluded.
+      //
+      // #1035 gated this on `!targetDaemonId`, but the INTERACTIVE Agents/DM
+      // "Start chat" UI ALWAYS sends an incidental daemonId (the currently-shown
+      // / effective daemon, NOT a deliberate per-spawn pick), which SHADOWED home
+      // routing — so a homed cybo a user opens a session with landed on the
+      // sponsor daemon instead of its home, and every interactive turn ran on the
+      // wrong machine. A homed cybo must CONVERGE on its home, so home routing now
+      // runs even when an incidental daemonId is present and OVERRIDES it when home
+      // is online + accessible. The single escape hatch is an explicit
+      // `pinDaemon: true` from the caller — a deliberate "run on THIS daemon, do
+      // not re-home" pick — which leaves the caller's targetDaemonId untouched. No
+      // client sends pinDaemon today, so the incidental shown-daemon path now
+      // re-homes (the fix); a future "run here" affordance can opt out.
+      const explicitDaemonPin = inner.pinDaemon === true;
+      if (type === "cyborg:spawn_cybo" && shouldApplyHomeRoutingForSpawn({ explicitDaemonPin })) {
         const resolvedCybo = inner.resolvedCybo as
           | { home_daemon_id?: string | null; slug?: string | null }
           | undefined;
@@ -5952,6 +5969,17 @@ async function main() {
         }
 
         case "cyborg:send_agent_prompt": {
+          // HOME-DAEMON routing caveat (interactive path): a turn here addresses an
+          // EXISTING agent session by agentId and is BROADCAST — the daemon that
+          // already owns that session's binding picks it up, so the relay can't (and
+          // must not) re-pick a daemon mid-conversation without orphaning the live
+          // session's history. Home routing is therefore enforced at SESSION CREATION
+          // (cyborg:spawn_cybo above): every "Start chat" with a homed cybo now spawns
+          // a FRESH session on its home daemon, so subsequent send_agent_prompt turns
+          // already land on home. A session created on the WRONG daemon BEFORE this fix
+          // (or via an explicit pin) stays there until the user starts a new chat —
+          // which re-homes — or deletes the stale session. A homed cybo thus converges
+          // on its home on the next interactive session, never the wrong machine.
           if (!workspaceId) break;
           const agentId = inner.agentId as string;
           const prompt = inner.prompt as string;

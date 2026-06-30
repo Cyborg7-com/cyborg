@@ -3,6 +3,7 @@ import {
   applyHomeDaemonRouting,
   describeHomeDaemonFallback,
   resolveSpawnDaemon,
+  shouldApplyHomeRoutingForSpawn,
 } from "./cybo-home-daemon-routing.js";
 
 // Problem (4) — the cybo's HOME daemon must be AUTHORITATIVE for where its
@@ -150,5 +151,108 @@ describe("applyHomeDaemonRouting (problem 4 — relay orchestrator)", () => {
     expect(getOnline).not.toHaveBeenCalled();
     expect(onPinned).not.toHaveBeenCalled();
     expect(onFallback).not.toHaveBeenCalled();
+  });
+});
+
+// Interactive agent-session / "Start chat" gap (home-daemon routing for the
+// INTERACTIVE path). The relay #1035 only honored a cybo's home daemon when the
+// caller pinned NO daemon, but the Agents/DM "Start chat" UI ALWAYS sends an
+// incidental daemonId (the shown/effective daemon). shouldApplyHomeRoutingForSpawn
+// is the gate that lets home routing run anyway (and override that incidental
+// daemon), opting out ONLY for an explicit pinDaemon pick.
+describe("shouldApplyHomeRoutingForSpawn (interactive agent-session gap)", () => {
+  it("runs home routing when the caller did NOT explicitly pin a daemon", () => {
+    // The interactive "Start chat" case: an incidental shown daemonId is present
+    // on the wire, but it is not a deliberate pick (pinDaemon is absent ⇒ false).
+    expect(shouldApplyHomeRoutingForSpawn({ explicitDaemonPin: false })).toBe(true);
+  });
+
+  it("skips home routing only when the caller explicitly pins a daemon", () => {
+    expect(shouldApplyHomeRoutingForSpawn({ explicitDaemonPin: true })).toBe(false);
+  });
+});
+
+// End-to-end of the relay's spawn decision for the INTERACTIVE path: an incidental
+// daemonId (the shown/effective daemon) is on the wire, yet a homed cybo whose home
+// is online + accessible must still re-home there (the bug: it previously landed on
+// the sponsor daemon). These compose the gate + the async orchestrator exactly as
+// the relay handler does.
+describe("interactive spawn re-homes a homed cybo despite an incidental daemonId", () => {
+  // Mirror the relay: compute the gate, then (if it passes) run applyHomeDaemonRouting;
+  // the returned id (or null = keep the caller's incidental daemon) is what the
+  // forward is pinned to.
+  async function decideForward(opts: {
+    incidentalDaemonId: string; // the shown/effective daemon the UI sent
+    explicitDaemonPin: boolean;
+    homeDaemonId: string | null;
+    online: ReadonlySet<string>;
+    accessible: (id: string) => boolean;
+  }): Promise<string> {
+    let target = opts.incidentalDaemonId;
+    if (shouldApplyHomeRoutingForSpawn({ explicitDaemonPin: opts.explicitDaemonPin })) {
+      const pinned = await applyHomeDaemonRouting({
+        homeDaemonId: opts.homeDaemonId,
+        cyboSlug: "apex",
+        getOnlineWorkspaceDaemonIds: async () => opts.online,
+        isAccessible: async (id) => opts.accessible(id),
+      });
+      if (pinned) target = pinned;
+    }
+    return target;
+  }
+
+  it("forwards to the HOME daemon (not the incidental shown daemon) when home is online + accessible", async () => {
+    const target = await decideForward({
+      incidentalDaemonId: "daemon_sponsor",
+      explicitDaemonPin: false,
+      homeDaemonId: "daemon_home",
+      online: new Set(["daemon_home", "daemon_sponsor"]),
+      accessible: () => true,
+    });
+    expect(target).toBe("daemon_home");
+  });
+
+  it("falls back to the incidental sponsor daemon when home is OFFLINE (no hard fail)", async () => {
+    const target = await decideForward({
+      incidentalDaemonId: "daemon_sponsor",
+      explicitDaemonPin: false,
+      homeDaemonId: "daemon_home",
+      online: new Set(["daemon_sponsor"]),
+      accessible: () => true,
+    });
+    expect(target).toBe("daemon_sponsor");
+  });
+
+  it("falls back to the incidental sponsor daemon when home is online but INACCESSIBLE", async () => {
+    const target = await decideForward({
+      incidentalDaemonId: "daemon_sponsor",
+      explicitDaemonPin: false,
+      homeDaemonId: "daemon_home",
+      online: new Set(["daemon_home", "daemon_sponsor"]),
+      accessible: (id) => id !== "daemon_home",
+    });
+    expect(target).toBe("daemon_sponsor");
+  });
+
+  it("keeps the incidental daemon UNCHANGED when the cybo has NO home (null)", async () => {
+    const target = await decideForward({
+      incidentalDaemonId: "daemon_sponsor",
+      explicitDaemonPin: false,
+      homeDaemonId: null,
+      online: new Set(["daemon_home", "daemon_sponsor"]),
+      accessible: () => true,
+    });
+    expect(target).toBe("daemon_sponsor");
+  });
+
+  it("honors an EXPLICIT pin: an online home does NOT override a deliberate daemon choice", async () => {
+    const target = await decideForward({
+      incidentalDaemonId: "daemon_sponsor",
+      explicitDaemonPin: true,
+      homeDaemonId: "daemon_home",
+      online: new Set(["daemon_home", "daemon_sponsor"]),
+      accessible: () => true,
+    });
+    expect(target).toBe("daemon_sponsor");
   });
 });

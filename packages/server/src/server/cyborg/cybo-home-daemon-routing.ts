@@ -58,6 +58,25 @@ export function resolveSpawnDaemon(inputs: HomeDaemonRouteInputs): HomeDaemonRou
   return { daemonId: home, reason: "home" };
 }
 
+// Whether the relay should run home-daemon routing for a spawn AT ALL.
+//
+// #1035 only honored the home daemon when the caller pinned NO daemon
+// (`!targetDaemonId`). But the interactive Agents/DM "Start chat" UI ALWAYS sends
+// an INCIDENTAL daemonId — the currently-shown / effective daemon, not a
+// deliberate per-spawn pick — so home routing was silently shadowed and a homed
+// cybo's interactive session landed on the sponsor daemon instead of its home.
+//
+// A homed cybo must CONVERGE on its home, so routing now runs even when an
+// incidental daemonId is present (it OVERRIDES it iff home is online +
+// accessible — resolveSpawnDaemon still falls back gracefully otherwise). The
+// ONLY way to opt out is an explicit `pinDaemon` flag from the caller — a
+// deliberate "run on THIS daemon, do not re-home" choice. No client sends
+// pinDaemon today, so the incidental shown-daemon path now re-homes (the fix);
+// a future "run here" affordance can set pinDaemon to keep its target.
+export function shouldApplyHomeRoutingForSpawn(inputs: { explicitDaemonPin: boolean }): boolean {
+  return !inputs.explicitDaemonPin;
+}
+
 // Human-readable explanation for a fallback (logs + author notices). Returns
 // null for the non-fallback reasons ("unset" / "home") since there's nothing to
 // explain when behavior is normal.
