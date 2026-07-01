@@ -63,7 +63,12 @@
 
   const name = $derived.by(() => {
     if (target?.kind === "human") {
-      return member?.name ?? member?.email?.split("@")[0] ?? "User";
+      return (
+        member?.name ??
+        authState.getMemberName(target.id) ??
+        member?.email?.split("@")[0] ??
+        "User"
+      );
     }
     if (agentData) return sharedAgentDisplayName(agentData, cyboState.list);
     return cybo?.name ?? target?.id ?? "Agent";

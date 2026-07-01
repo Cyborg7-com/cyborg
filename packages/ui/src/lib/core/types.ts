@@ -581,6 +581,17 @@ export interface WorkspaceMember {
   joinedAt: number;
 }
 
+// An external chat participant surfaced for identity display only (name +
+// avatar), e.g. a Slack guest (id `slack:<team>:<user>`) who posted in a
+// workspace channel. NOT a workspace member — never counted as a seat, never
+// added to workspaceState.members. Delivered by cyborg:list_members so the
+// profile panel + chat can render their real name/avatar.
+export interface ExternalParticipant {
+  userId: string;
+  name: string | null;
+  imageUrl: string | null;
+}
+
 export interface TypingEvent {
   workspaceId: string;
   channelId: string;

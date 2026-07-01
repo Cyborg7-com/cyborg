@@ -15,6 +15,7 @@ import {
   inArray,
   notInArray,
   ilike,
+  like,
 } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
@@ -1003,6 +1004,30 @@ export class PgSync {
       membershipType: r.membershipType,
       joinedAt: r.joinedAt.getTime(),
     }));
+  }
+
+  // External Slack guests (id `slack:<team>:<user>`) who have posted in this
+  // workspace's channels. They own a `users` row (name + avatar, upserted by the
+  // Slack bridge) but NO membership row, so getMembers (INNER JOIN memberships)
+  // omits them. Returned separately so the UI profile panel can render their real
+  // name + avatar WITHOUT counting them as members/seats (billing reads the
+  // memberships table only, which these users never appear in). Distinct on the
+  // user id so multiple posts by the same guest collapse to one row.
+  async getExternalSlackParticipants(
+    workspaceId: string,
+  ): Promise<Array<{ userId: string; name: string | null; imageUrl: string | null }>> {
+    const rows = await this.db
+      .selectDistinct({
+        userId: schema.users.id,
+        name: schema.users.name,
+        imageUrl: schema.users.imageUrl,
+      })
+      .from(schema.messages)
+      .innerJoin(schema.users, eq(schema.users.id, schema.messages.fromId))
+      .where(
+        and(eq(schema.messages.workspaceId, workspaceId), like(schema.messages.fromId, "slack:%")),
+      );
+    return rows;
   }
 
   async isMember(workspaceId: string, userId: string): Promise<boolean> {

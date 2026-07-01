@@ -17,6 +17,7 @@ import type {
   TypingEvent,
   ReactionEvent,
   WorkspaceMember,
+  ExternalParticipant,
   ScheduledMessage,
   PromptTemplate,
 } from "./types.js";
@@ -1856,11 +1857,14 @@ export class SlackClient<EventMap extends SlackEventMap = SlackEventMap> {
     return resp.updated;
   }
 
-  async listMembers(workspaceId: string): Promise<WorkspaceMember[]> {
-    const resp = await this.request<{ members: WorkspaceMember[] }>("cyborg:list_members", {
-      workspaceId,
-    });
-    return resp.members;
+  async listMembers(
+    workspaceId: string,
+  ): Promise<{ members: WorkspaceMember[]; external: ExternalParticipant[] }> {
+    const resp = await this.request<{
+      members: WorkspaceMember[];
+      external?: ExternalParticipant[];
+    }>("cyborg:list_members", { workspaceId });
+    return { members: resp.members, external: resp.external ?? [] };
   }
 
   // ─── MCP tokens (settings) ───────────────────────────────────────

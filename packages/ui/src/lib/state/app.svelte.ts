@@ -678,8 +678,8 @@ async function reconcileWorkspacePanels(wsId: string): Promise<void> {
     if (workspaceState.current?.id !== wsId) return;
     if (channels) workspaceState.channels = channels;
     if (members) {
-      workspaceState.members = members;
-      authState.setMemberImagesFromMembers(members);
+      workspaceState.members = members.members;
+      authState.setMemberImagesFromMembers([...members.members, ...members.external]);
     }
     if (agents) {
       workspaceState.agents = agents;
@@ -2915,10 +2915,10 @@ export async function selectWorkspace(workspace: Workspace): Promise<void> {
   workspaceState.membersLoading = true;
   client
     .listMembers(workspace.id)
-    .then((members) => {
+    .then((res) => {
       if (activeWorkspaceSelection !== workspace.id) return;
-      workspaceState.members = members;
-      authState.setMemberImagesFromMembers(members);
+      workspaceState.members = res.members;
+      authState.setMemberImagesFromMembers([...res.members, ...res.external]);
       return undefined;
     })
     .catch(() => {
@@ -4442,9 +4442,9 @@ export async function inviteMember(
     role,
     channelIds,
   );
-  const members = await client.listMembers(workspaceState.current.id);
+  const { members, external } = await client.listMembers(workspaceState.current.id);
   workspaceState.members = members;
-  authState.setMemberImagesFromMembers(members);
+  authState.setMemberImagesFromMembers([...members, ...external]);
   return { invitationId, inviteUrl };
 }
 

@@ -1549,7 +1549,7 @@ export async function selectWorkspace(workspace: Workspace): Promise<void> {
   workspaceState.membersLoading = true;
   coreClient
     .listMembers(workspace.id)
-    .then((members) => {
+    .then(({ members }) => {
       workspaceState.members = members;
       return undefined;
     })
@@ -1641,7 +1641,7 @@ export async function inviteMember(
 ): Promise<void> {
   if (!workspaceState.current) throw new Error("No workspace selected");
   await coreClient.inviteMember(workspaceState.current.id, email, role);
-  const members = await coreClient.listMembers(workspaceState.current.id);
+  const { members } = await coreClient.listMembers(workspaceState.current.id);
   workspaceState.members = members;
 }
 

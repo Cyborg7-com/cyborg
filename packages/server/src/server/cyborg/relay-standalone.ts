@@ -5050,7 +5050,10 @@ async function main() {
             break;
           }
           const members = await pg.getMembers(workspaceId);
-          respond("cyborg:list_members_response", { members });
+          // external = Slack guests present in this workspace's channels (name+avatar
+          // for the profile panel), NOT members/seats.
+          const external = await pg.getExternalSlackParticipants(workspaceId);
+          respond("cyborg:list_members_response", { members, external });
           break;
         }
 
