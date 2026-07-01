@@ -785,80 +785,98 @@ describe("relay-offline-agent-rows", () => {
   // the agent_bindings mirror is empty in prod). Fail-closed on owner-less cybo rows.
   describe("filterLiveRowsByAgentSessionOwner", () => {
     const viewer = "cloud-viewer";
-    function sessions(
-      entries: Array<[string, { userId: string | null; cyboId: string | null }]>,
-    ): Map<string, { userId: string | null; cyboId: string | null }> {
+    interface Owner {
+      userId: string | null;
+      cyboId: string | null;
+      cyboOwnerId: string | null;
+    }
+    function sessions(entries: Array<[string, Owner]>): Map<string, Owner> {
       return new Map(entries);
     }
     const row = (agentId: string): Record<string, unknown> => ({ agentId });
 
-    it("DROPS an owner-less cybo session for a non-admin viewer (fail-closed)", () => {
-      const s = sessions([["a1", { userId: null, cyboId: "cybo-1" }]]);
-      expect(
-        filterLiveRowsByAgentSessionOwner([row("a1")], s, viewer),
-      ).toHaveLength(0);
+    it("KEEPS an owner-less cybo session for the CYBO OWNER (autonomous/cron spawn)", () => {
+      const s = sessions([["a1", { userId: null, cyboId: "cybo-1", cyboOwnerId: viewer }]]);
+      expect(filterLiveRowsByAgentSessionOwner([row("a1")], s, viewer)).toHaveLength(1);
     });
 
-    it("DROPS an owner-less cybo session even when viewerGlobalId is null", () => {
-      const s = sessions([["a1", { userId: null, cyboId: "cybo-1" }]]);
+    it("DROPS an owner-less cybo session for a viewer who is NOT the cybo owner", () => {
+      const s = sessions([["a1", { userId: null, cyboId: "cybo-1", cyboOwnerId: "seb" }]]);
+      expect(filterLiveRowsByAgentSessionOwner([row("a1")], s, viewer)).toHaveLength(0);
+    });
+
+    it("DROPS a cybo session when viewerGlobalId is null (fail-closed)", () => {
+      const s = sessions([["a1", { userId: null, cyboId: "cybo-1", cyboOwnerId: viewer }]]);
       expect(filterLiveRowsByAgentSessionOwner([row("a1")], s, null)).toHaveLength(0);
     });
 
-    it("HIDES an owner-less cybo session from everyone (admins use the separate audit endpoint)", () => {
-      const s = sessions([["a1", { userId: null, cyboId: "cybo-1" }]]);
-      expect(
-        filterLiveRowsByAgentSessionOwner([row("a1")], s, viewer),
-      ).toHaveLength(0);
+    it("KEEPS a cybo session the viewer INITIATED (even if the cybo is someone else's)", () => {
+      const s = sessions([["a1", { userId: viewer, cyboId: "cybo-1", cyboOwnerId: "seb" }]]);
+      expect(filterLiveRowsByAgentSessionOwner([row("a1")], s, viewer)).toHaveLength(1);
     });
 
-    it("KEEPS a cybo session owned by the viewer", () => {
-      const s = sessions([["a1", { userId: viewer, cyboId: "cybo-1" }]]);
-      expect(
-        filterLiveRowsByAgentSessionOwner([row("a1")], s, viewer),
-      ).toHaveLength(1);
+    it("KEEPS a cybo session the viewer OWNS (even if someone else initiated it)", () => {
+      const s = sessions([["a1", { userId: "other-user", cyboId: "cybo-1", cyboOwnerId: viewer }]]);
+      expect(filterLiveRowsByAgentSessionOwner([row("a1")], s, viewer)).toHaveLength(1);
     });
 
-    it("DROPS a cybo session owned by someone else for a non-admin viewer", () => {
-      const s = sessions([["a1", { userId: "other-user", cyboId: "cybo-1" }]]);
-      expect(
-        filterLiveRowsByAgentSessionOwner([row("a1")], s, viewer),
-      ).toHaveLength(0);
-    });
-
-    it("DROPS a foreign-owned cybo session from everyone (admins use the separate audit endpoint)", () => {
-      const s = sessions([["a1", { userId: "other-user", cyboId: "cybo-1" }]]);
-      expect(
-        filterLiveRowsByAgentSessionOwner([row("a1")], s, viewer),
-      ).toHaveLength(0);
+    it("DROPS a cybo session the viewer neither initiated nor owns", () => {
+      const s = sessions([["a1", { userId: "other-user", cyboId: "cybo-1", cyboOwnerId: "seb" }]]);
+      expect(filterLiveRowsByAgentSessionOwner([row("a1")], s, viewer)).toHaveLength(0);
     });
 
     it("KEEPS a non-cybo session (cyboId null) — out of scope of this fix", () => {
-      const s = sessions([["a1", { userId: "other-user", cyboId: null }]]);
-      expect(
-        filterLiveRowsByAgentSessionOwner([row("a1")], s, viewer),
-      ).toHaveLength(1);
+      const s = sessions([["a1", { userId: "other-user", cyboId: null, cyboOwnerId: null }]]);
+      expect(filterLiveRowsByAgentSessionOwner([row("a1")], s, viewer)).toHaveLength(1);
     });
 
     it("KEEPS a row absent from agent_sessions — trust the daemon's own scoping", () => {
-      const s = sessions([["a2", { userId: "other-user", cyboId: "cybo-1" }]]);
-      expect(
-        filterLiveRowsByAgentSessionOwner([row("a1")], s, viewer),
-      ).toHaveLength(1);
+      const s = sessions([["a2", { userId: "other-user", cyboId: "cybo-1", cyboOwnerId: "seb" }]]);
+      expect(filterLiveRowsByAgentSessionOwner([row("a1")], s, viewer)).toHaveLength(1);
     });
 
-    it("filters a mixed batch: keeps own + non-cybo + unknown, drops foreign + owner-less", () => {
+    // Mirrors the incident: fabricio owns Sprite; its autonomous sessions are
+    // owner-less (userId null) but must show for fabricio. Seb's Rick, also
+    // owner-less, must NOT.
+    it("incident: owner-less Sprite kept for its owner, owner-less Rick dropped for a non-owner", () => {
+      const fabricio = viewer;
       const s = sessions([
-        ["own", { userId: viewer, cyboId: "cybo-1" }],
-        ["foreign", { userId: "other-user", cyboId: "cybo-1" }],
-        ["ownerless", { userId: null, cyboId: "cybo-1" }],
-        ["human", { userId: "other-user", cyboId: null }],
+        ["sprite", { userId: null, cyboId: "sprite", cyboOwnerId: fabricio }],
+        ["rick", { userId: null, cyboId: "rick", cyboOwnerId: "seb" }],
+      ]);
+      const kept = filterLiveRowsByAgentSessionOwner([row("sprite"), row("rick")], s, fabricio);
+      expect(kept).toEqual([row("sprite")]);
+    });
+
+    it("filters a mixed batch: keeps initiated + owned + non-cybo + unknown, drops foreign", () => {
+      const s = sessions([
+        ["initiated", { userId: viewer, cyboId: "cybo-1", cyboOwnerId: "seb" }],
+        ["owned", { userId: "other-user", cyboId: "cybo-2", cyboOwnerId: viewer }],
+        ["ownerless-mine", { userId: null, cyboId: "cybo-3", cyboOwnerId: viewer }],
+        ["foreign", { userId: "other-user", cyboId: "cybo-4", cyboOwnerId: "seb" }],
+        ["ownerless-foreign", { userId: null, cyboId: "cybo-5", cyboOwnerId: "seb" }],
+        ["human", { userId: "other-user", cyboId: null, cyboOwnerId: null }],
       ]);
       const kept = filterLiveRowsByAgentSessionOwner(
-        [row("own"), row("foreign"), row("ownerless"), row("human"), row("unknown")],
+        [
+          row("initiated"),
+          row("owned"),
+          row("ownerless-mine"),
+          row("foreign"),
+          row("ownerless-foreign"),
+          row("human"),
+          row("unknown"),
+        ],
         s,
         viewer,
       );
-      expect(kept).toEqual([row("own"), row("human"), row("unknown")]);
+      expect(kept).toEqual([
+        row("initiated"),
+        row("owned"),
+        row("ownerless-mine"),
+        row("human"),
+        row("unknown"),
+      ]);
     });
   });
 });

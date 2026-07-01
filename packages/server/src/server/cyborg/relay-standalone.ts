@@ -1386,8 +1386,16 @@ async function main() {
         }
       }
       if (sessionOwners) {
-        const owners = new Map<string, { userId: string | null; cyboId: string | null }>();
-        for (const s of sessionOwners) owners.set(s.agentId, { userId: s.userId, cyboId: s.cyboId });
+        const owners = new Map<
+          string,
+          { userId: string | null; cyboId: string | null; cyboOwnerId: string | null }
+        >();
+        for (const s of sessionOwners)
+          owners.set(s.agentId, {
+            userId: s.userId,
+            cyboId: s.cyboId,
+            cyboOwnerId: s.cyboOwnerId,
+          });
         for (const id of Array.from(agg.agents.keys())) {
           const row = agg.agents.get(id);
           if (

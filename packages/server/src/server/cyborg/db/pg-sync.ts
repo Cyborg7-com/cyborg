@@ -5631,21 +5631,38 @@ export class PgSync {
   // Owner identity per LIVE agent session for a workspace, so the relay can
   // owner-scope its live agent list against the ONE table that is actually
   // populated (agent_bindings mirror is empty in prod). Keyed by agentId
-  // (== agent_sessions.id). userId is the resolved GLOBAL account id, or NULL
-  // for an owner-less session (a scheduler-less autonomous spawn) which the
-  // relay treats as admin-only. One query per list — never N+1.
-  async getAgentSessionOwnersByWorkspace(
-    workspaceId: string,
-  ): Promise<Array<{ agentId: string; userId: string | null; cyboId: string | null }>> {
+  // (== agent_sessions.agent_id). A cybo session is visible to the session
+  // INITIATOR (userId == viewer) OR the CYBO OWNER (cyboOwnerId == viewer). Both
+  // ids are GLOBAL account ids (agent_sessions.user_id -> users.id and
+  // cybos.created_by are the same namespace — a direct compare, no email bridge).
+  // userId is NULL for an owner-less session (an autonomous/cron spawn); such a
+  // session is still visible to its cybo owner via cyboOwnerId. cyboOwnerId is
+  // NULL for a non-cybo session (cyboId == null). One batched query (LEFT JOIN
+  // cybos) — never N+1.
+  async getAgentSessionOwnersByWorkspace(workspaceId: string): Promise<
+    Array<{
+      agentId: string;
+      userId: string | null;
+      cyboId: string | null;
+      cyboOwnerId: string | null;
+    }>
+  > {
     const rows = await this.db
       .select({
         agentId: schema.agentSessions.agentId,
         userId: schema.agentSessions.userId,
         cyboId: schema.agentSessions.cyboId,
+        cyboOwnerId: schema.cybos.createdBy,
       })
       .from(schema.agentSessions)
+      .leftJoin(schema.cybos, eq(schema.agentSessions.cyboId, schema.cybos.id))
       .where(eq(schema.agentSessions.workspaceId, workspaceId));
-    return rows.map((r) => ({ agentId: r.agentId, userId: r.userId, cyboId: r.cyboId }));
+    return rows.map((r) => ({
+      agentId: r.agentId,
+      userId: r.userId,
+      cyboId: r.cyboId,
+      cyboOwnerId: r.cyboOwnerId,
+    }));
   }
 
   // ─── Cybos ───────────────────────────────────────────────────────

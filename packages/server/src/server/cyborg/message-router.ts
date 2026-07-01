@@ -281,9 +281,24 @@ export class MessageRouter {
   // Resolve a binding's local initiator id to an email for the relay's
   // agent_sessions writer (it maps email → global PG account id). Extracted from
   // the agent_state callback to keep that hot path under the complexity budget.
-  private initiatorEmail(initiatedBy: string | null): string | null {
-    if (!initiatedBy) return null;
-    return this.storage.getUserById(initiatedBy)?.email ?? null;
+  // The initiator email the relay resolves to agent_sessions.user_id. PREFER the
+  // binding's stored initiated_by_email — the REAL canonical cloud email threaded
+  // from the opener's auth at spawn (spawnCybo). initiated_by is a daemon-LOCAL id
+  // that, for a cloud opener, only maps to a synthetic `<id>@remote.local`
+  // placeholder in local SQLite, so getUserById(initiated_by).email yields that
+  // placeholder, the relay's getUserByEmail can't resolve it, and user_id lands
+  // NULL — making even an INTERACTIVE cybo open owner-less (privacy incident
+  // 2026-06-30). initiated_by_email is populated for every human-initiated spawn
+  // (schedule, task, AND interactive open/DM); NULL only for a truly autonomous
+  // run, where the local lookup is the right fallback.
+  private initiatorEmail(binding: {
+    initiated_by: string | null;
+    initiated_by_email: string | null;
+  }): string | null {
+    const stored = binding.initiated_by_email;
+    if (stored && !stored.endsWith("@remote.local")) return stored;
+    if (!binding.initiated_by) return null;
+    return this.storage.getUserById(binding.initiated_by)?.email ?? null;
   }
 
   // Best-effort capture of the provider resume id once the agent reveals it (it's
@@ -700,7 +715,7 @@ export class MessageRouter {
         userId: binding.initiated_by,
         // Carry the initiator's email so the relay can resolve the
         // daemon-local userId to the global PG account id before writing.
-        userEmail: this.initiatorEmail(binding.initiated_by),
+        userEmail: this.initiatorEmail(binding),
         sessionType: binding.cybo_id ? "cybo" : "session",
         // Surface WHAT failed alongside the error status — without it the
         // client can only show a bare red badge.

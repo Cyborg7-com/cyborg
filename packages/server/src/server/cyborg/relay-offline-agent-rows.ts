@@ -223,17 +223,25 @@ export function filterLiveRowsForViewer(
 // only; the admin AUDIT view (see-all) is a SEPARATE, admin-gated endpoint
 // (cyborg:list_daemon_sessions -> auditAgentRows/buildAuditAgentRow) that does NOT
 // route through this filter. So there is NO admin bypass here. A CYBO session
-// (cyboId != null) is OWNER-SCOPED:
-//   - owner-less (userId == null)  -> hidden from everyone (fail-closed; never "visible to all")
-//   - owned by the viewer          -> visible
-//   - owned by someone else        -> dropped
+// (cyboId != null) is visible iff the viewer is EITHER:
+//   - the session INITIATOR (userId == viewerGlobalId), OR
+//   - the CYBO OWNER        (cyboOwnerId == viewerGlobalId)
+//   else -> dropped
+// Owner-less (userId == null) is NOT an automatic drop: an autonomous/cron cybo
+// spawn has no initiator, but its OWNER must still see it -- dropped only for a
+// viewer who is neither initiator nor cybo owner. Both ids are GLOBAL account ids
+// (direct compare, no email bridge). This lets a user start their own conversation
+// with a shared cybo and see it, WITHOUT seeing the cybo owner's other sessions.
 // A NON-cybo session (cyboId == null, e.g. a human's own coding session) and any
 // agentId ABSENT from agent_sessions are LEFT to the daemon's own per-user scoping
 // (kept here) — this filter only closes the cybo-session leak.
-// `sessions` maps agentId -> { userId, cyboId }.
+// `sessions` maps agentId -> { userId, cyboId, cyboOwnerId }.
 export function filterLiveRowsByAgentSessionOwner(
   rows: Record<string, unknown>[],
-  sessions: Map<string, { userId: string | null; cyboId: string | null }>,
+  sessions: Map<
+    string,
+    { userId: string | null; cyboId: string | null; cyboOwnerId: string | null }
+  >,
   viewerGlobalId: string | null,
 ): Record<string, unknown>[] {
   return rows.filter((row) => {
@@ -241,8 +249,9 @@ export function filterLiveRowsByAgentSessionOwner(
     const s = id ? sessions.get(id) : undefined;
     if (!s) return true; // not in agent_sessions -> trust daemon scoping
     if (s.cyboId == null) return true; // non-cybo session -> out of scope of this fix
-    if (s.userId == null) return false; // owner-less cybo session -> hidden from everyone (fail-closed)
-    return !!viewerGlobalId && s.userId === viewerGlobalId; // owner-only
+    if (!viewerGlobalId) return false; // fail-closed: no viewer id -> no cybo session
+    // visible to the session initiator OR the cybo owner; else dropped.
+    return s.userId === viewerGlobalId || s.cyboOwnerId === viewerGlobalId;
   });
 }
 

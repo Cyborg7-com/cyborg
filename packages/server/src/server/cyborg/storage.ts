@@ -452,6 +452,13 @@ export interface StoredAgentBinding {
   daemon_id: string | null;
   cybo_id: string | null;
   initiated_by: string | null;
+  // The initiator's REAL (canonical cloud) email — the OPENER on the cloud-
+  // forwarded spawn path. initiated_by is a daemon-LOCAL id that resolves only to
+  // a "<id>@remote.local" placeholder for a cloud opener, so this real email is
+  // what agent_status.userEmail carries and the relay resolves to
+  // agent_sessions.user_id. NULL for a truly autonomous spawn (no human opener)
+  // or a binding created before this column existed.
+  initiated_by_email: string | null;
   cwd: string | null;
   // Best-effort provider resume id. Paseo's on-disk JSON is the real resume
   // source; this is captured opportunistically (turn end) and mirrored to PG so
@@ -712,8 +719,8 @@ export class CyborgStorage {
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     this.insertAgentBindingStmt = this.db.prepare(
-      `INSERT INTO agent_bindings (agent_id, workspace_id, channel_id, provider, model, system_prompt, daemon_id, cybo_id, initiated_by, cwd, ephemeral, autonomous, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO agent_bindings (agent_id, workspace_id, channel_id, provider, model, system_prompt, daemon_id, cybo_id, initiated_by, initiated_by_email, cwd, ephemeral, autonomous, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     this.getAgentBindingStmt = this.db.prepare("SELECT * FROM agent_bindings WHERE agent_id = ?");
     this.getAgentsByWorkspaceStmt = this.db.prepare(
@@ -1375,6 +1382,14 @@ export class CyborgStorage {
     // Uses addColumnIfMissing (a method call, no extra branch) to stay within the
     // migrate() complexity budget.
     this.addColumnIfMissing("agent_bindings", "autonomous", "INTEGER NOT NULL DEFAULT 0");
+    // The initiator's REAL (canonical cloud) email — the OPENER on the cloud-
+    // forwarded spawn path. Without it agent_status.userEmail carries only the
+    // daemon-local "<id>@remote.local" placeholder for a cloud opener, so the relay
+    // resolves agent_sessions.user_id to NULL and the opener can't see their own
+    // interactively-opened cybo session (privacy incident 2026-06-30).
+    // addColumnIfMissing (a method call, no branch) keeps migrate() under the
+    // complexity budget.
+    this.addColumnIfMissing("agent_bindings", "initiated_by_email", "TEXT");
     this.addColumnIfMissing("messages", "from_name", "TEXT");
     this.addColumnIfMissing("messages", "attachments", "TEXT");
     this.addColumnIfMissing("messages", "pinned_at", "INTEGER");
@@ -3907,6 +3922,11 @@ export class CyborgStorage {
     daemonId?: string | null;
     cyboId?: string | null;
     initiatedBy?: string | null;
+    // The initiator's REAL (canonical cloud) email — the opener on the cloud-
+    // forwarded path. Persisted so agent_status.userEmail carries it and the relay
+    // resolves agent_sessions.user_id to the real account (not the daemon-local
+    // "<id>@remote.local" placeholder → NULL). Null for a truly autonomous spawn.
+    initiatedByEmail?: string | null;
     cwd?: string | null;
     ephemeral?: boolean;
     autonomous?: boolean;
@@ -3922,6 +3942,7 @@ export class CyborgStorage {
       opts.daemonId ?? null,
       opts.cyboId ?? null,
       opts.initiatedBy ?? null,
+      opts.initiatedByEmail ?? null,
       opts.cwd ?? null,
       opts.ephemeral ? 1 : 0,
       opts.autonomous ? 1 : 0,

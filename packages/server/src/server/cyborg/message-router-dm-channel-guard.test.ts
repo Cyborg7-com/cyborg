@@ -267,6 +267,54 @@ describe("message-router: DM turn cannot post to a channel", () => {
     expect(status!.payload.autonomous).toBe(false);
   });
 
+  // Incident (2026-06-30): interactively OPENING a cybo (cloud path) stamps
+  // initiated_by = the opener's CLOUD id, which resolves ONLY to a synthetic
+  // "<id>@remote.local" placeholder in local SQLite. agent_status.userEmail must
+  // still carry the opener's REAL email (stored on the binding as
+  // initiated_by_email) so the relay resolves agent_sessions.user_id to the opener
+  // — otherwise user_id lands NULL and the opener can't see their own session.
+  it("agent_status.userEmail is the opener's REAL email, not the <id>@remote.local placeholder", () => {
+    const openAgentId = "agent-open1";
+    // A cloud opener: initiated_by is the cloud id (which would resolve only to a
+    // "<id>@remote.local" placeholder locally — never inserted here, so the local
+    // lookup yields null), but the binding carries the opener's REAL email.
+    storage.createAgentBinding({
+      agentId: openAgentId,
+      workspaceId,
+      channelId,
+      provider: "pi",
+      cyboId: "cybo-sprite",
+      initiatedBy: "cloud-user-42",
+      initiatedByEmail: "fabricio@cyborg7.com",
+    });
+    emitAgentState(openAgentId, "running");
+    const status = broadcasts.find(
+      (b) => b.type === "cyborg:agent_status" && b.payload.agentId === openAgentId,
+    );
+    expect(status).toBeDefined();
+    expect(status!.payload.userEmail).toBe("fabricio@cyborg7.com");
+  });
+
+  // Truly autonomous spawn (no human opener): no stored email → fall back to the
+  // local-id lookup (null here). Proves the fix doesn't fabricate an email.
+  it("agent_status.userEmail falls back to null for an autonomous spawn with no stored email", () => {
+    const autoAgentId = "agent-auto9";
+    storage.createAgentBinding({
+      agentId: autoAgentId,
+      workspaceId,
+      channelId,
+      provider: "pi",
+      cyboId: "cybo-cron",
+      autonomous: true,
+    });
+    emitAgentState(autoAgentId, "running");
+    const status = broadcasts.find(
+      (b) => b.type === "cyborg:agent_status" && b.payload.agentId === autoAgentId,
+    );
+    expect(status).toBeDefined();
+    expect(status!.payload.userEmail).toBeNull();
+  });
+
   // REGRESSION (#1026/#1030 only guarded handleDm — the CLOUD desktop DMG never calls
   // it). The cloud DM-to-cybo path is relay-standalone send_agent_prompt →
   // agent_prompt_forward → daemon bootstrap, which now calls routeDmTurn (NOT bare
