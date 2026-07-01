@@ -29,6 +29,7 @@
   import WorkItemsHeader from "$lib/components/tasks/WorkItemsHeader.svelte";
   import WorkItemFiltersRow from "$lib/components/tasks/WorkItemFiltersRow.svelte";
   import TaskSearch from "$lib/components/tasks/TaskSearch.svelte";
+  import TaskViewsBar from "$lib/components/tasks/TaskViewsBar.svelte";
   import CreateTaskDialog from "$lib/components/tasks/CreateTaskDialog.svelte";
   import TaskDetailDialog from "$lib/components/tasks/TaskDetailDialog.svelte";
   import TasksEmptyState from "$lib/components/tasks/TasksEmptyState.svelte";
@@ -117,6 +118,17 @@
     | undefined
   >(undefined);
 
+  // Label NAMES to pre-tag a created task with — set by the Department Views bar's
+  // empty-state CTA so the first task in a new department materializes its label
+  // on prod (relay resolveLabels). Cleared on every other create path so a normal
+  // "New work item" is never silently tagged.
+  let taskSeedLabels = $state<string[]>([]);
+
+  // The active department's name (null for "All"), bound from the Views bar, so an
+  // empty department shows a department-aware empty state (not the generic
+  // "no matching results / clear filters", which is misleading for a department).
+  let activeDepartment = $state<string | null>(null);
+
   // Per-project catalog (states / labels / cycles / modules), fetched once per
   // project and threaded into the board cards + list rows so their shared inline
   // editors (props-controlled) have their option lists without refetching per card.
@@ -151,6 +163,24 @@
     return () => {
       active = false;
     };
+  });
+
+  // When the create dialog CLOSES, refetch the label catalog: a seeded work item
+  // may have materialized a brand-new department label (relay resolveLabels), and
+  // the Views bar relinks its department to it once the label appears here. Cheap;
+  // fires on cancel too (harmless). Labels aren't in the tasks_changed broadcast.
+  let prevTaskDialogOpen = false;
+  $effect(() => {
+    const open = taskDialogOpen;
+    const id = projectId;
+    if (prevTaskDialogOpen && !open && id) {
+      void client
+        .fetchProjectLabels(id)
+        .then((l) => (projectLabels = l))
+        // intentional: best-effort catalog refresh; the board still renders without it.
+        .catch(() => {});
+    }
+    prevTaskDialogOpen = open;
   });
 
   // The pools every task row resolves its assignee against (members + cybos +
@@ -261,6 +291,100 @@
     }
   }
 
+  // Drag a task card onto a department tab → tag that ONE task with the department's
+  // label (merged with its existing labels; updateTask REPLACES the set, so we resend
+  // the current names). Creates the label if the department is new. The Views bar
+  // owns the tabs + drop; this owns the task + updateTask.
+  async function assignTaskToDepartment(labelName: string, taskId: string): Promise<void> {
+    // Capture the reactive ids before any await — the user could navigate to another
+    // project mid-operation, which would otherwise retarget the RPC / catalog write.
+    const ws = wsId;
+    const pid = projectId;
+    const t = projectTasks.find((x) => x.id === taskId);
+    if (!t) return;
+    const nameById = new Map(projectLabels.map((l) => [l.id, l.name]));
+    // updateTask REPLACES the label set, so we must resend the task's existing label
+    // NAMES. If a label id doesn't resolve (stale catalog), bail instead of dropping
+    // it — the user can retry once the catalog refreshes (no silent data loss).
+    const existing = (t.labelIds ?? []).map((id) => nameById.get(id));
+    if (existing.some((n) => n === undefined)) {
+      toast.error("Label list is out of date — refresh and try again.");
+      return;
+    }
+    const names = existing.filter((n): n is string => Boolean(n));
+    if (names.some((n) => n.toLowerCase() === labelName.toLowerCase())) return; // already there
+    try {
+      await client.updateTask(ws, t.id, { labels: [...names, labelName] });
+      toast.success(`Moved to ${labelName}.`);
+      try {
+        const fresh = await client.fetchProjectLabels(pid);
+        if (pid === projectId) projectLabels = fresh; // ignore a late result after a switch
+      } catch {
+        // intentional: best-effort catalog refresh so a new department label appears.
+      }
+    } catch {
+      toast.error("Couldn't move the work item.");
+    }
+  }
+
+  // Opt-in from the New/Edit-department dialog ("add all N work items"): tag EVERY
+  // work item with the department's label (merged; creates the label if new). The
+  // one-time way to move the legacy "All" tasks in. Batched to spare the relay.
+  let assigningAll = $state(false);
+  async function assignAllToDepartment(labelName: string): Promise<void> {
+    if (assigningAll) return;
+    const tasks = projectTasks;
+    if (tasks.length === 0) return;
+    assigningAll = true;
+    const ws = wsId; // capture before the awaits below (guard against a mid-run switch)
+    const pid = projectId;
+    const nameById = new Map(projectLabels.map((l) => [l.id, l.name]));
+    const target = labelName.toLowerCase();
+    let done = 0;
+    let failed = 0;
+    let skipped = 0;
+    const tid = toast.loading(`Adding ${tasks.length} work items to ${labelName}…`);
+    try {
+      const BATCH = 8;
+      for (let i = 0; i < tasks.length; i += BATCH) {
+        await Promise.all(
+          tasks.slice(i, i + BATCH).map(async (t) => {
+            // Resend the task's existing label NAMES (updateTask REPLACES the set).
+            // Skip a task whose labels don't all resolve, rather than dropping them.
+            const existing = (t.labelIds ?? []).map((id) => nameById.get(id));
+            if (existing.some((n) => n === undefined)) {
+              skipped++;
+              return;
+            }
+            const names = existing.filter((n): n is string => Boolean(n));
+            if (names.some((n) => n.toLowerCase() === target)) {
+              done++;
+              return;
+            }
+            try {
+              await client.updateTask(ws, t.id, { labels: [...names, labelName] });
+              done++;
+            } catch {
+              failed++;
+            }
+          }),
+        );
+      }
+      try {
+        const fresh = await client.fetchProjectLabels(pid);
+        if (pid === projectId) projectLabels = fresh;
+      } catch {
+        // intentional: best-effort catalog refresh after the bulk tag.
+      }
+    } finally {
+      assigningAll = false;
+      toast.dismiss(tid);
+      const tail = skipped > 0 ? ` (${skipped} skipped — refresh + retry)` : "";
+      if (failed === 0) toast.success(`Added ${done} work items to ${labelName}.${tail}`);
+      else toast.error(`Added ${done}, ${failed} failed${tail} — try again.`);
+    }
+  }
+
   // Bulk selection is a LIST-layout affordance and is project-scoped: drop it when
   // the project changes or when the user leaves the list layout, so a stale toolbar
   // never floats over the board/calendar or carries another project's ids.
@@ -319,6 +443,7 @@
       count={filteredTasks.length}
       onnew={() => {
         taskInitialValues = undefined;
+        taskSeedLabels = [];
         taskDialogOpen = true;
       }}
     />
@@ -329,6 +454,21 @@
     <div class="flex items-center border-b border-edge px-4 py-1.5">
       <TaskSearch workspaceId={wsId} />
     </div>
+
+    <!-- Department Views bar: All · <department> · … · ＋ New. A tab click sets the
+         page's `filters` to that department's label ids (or emptyFilters for All),
+         so the board's filteredTasks re-derives. Client-only, persisted per project.
+         Desktop only for now; mobile department views are a follow-up. -->
+    <TaskViewsBar
+      workspaceId={wsId}
+      {projectId}
+      labels={projectLabels}
+      onapply={(next) => (filters = next)}
+      onassigntask={assignTaskToDepartment}
+      workItemCount={projectTasks.length}
+      onassignall={assignAllToDepartment}
+      bind:activeDepartment
+    />
 
     <!-- Rich filter pill row (shown when the header's Filters toggle is on). -->
     {#if filtersOpen}
@@ -364,6 +504,21 @@
             taskInitialValues = undefined;
             taskDialogOpen = true;
           }
+        }}
+      />
+    {:else if filteredTasks.length === 0 && activeDepartment}
+      <!-- An empty DEPARTMENT: one clean message + a seed CTA (no misleading
+           "clear filters", which would just dump the user back to All). -->
+      {@const dept = activeDepartment}
+      <TasksEmptyState
+        icon={LayoutListIcon}
+        heading={`No work items in ${dept} yet.`}
+        description="Add a work item to this department, or drag existing cards from All onto its tab."
+        ctaLabel="Add work item"
+        onCta={() => {
+          taskInitialValues = undefined;
+          taskSeedLabels = [dept];
+          taskDialogOpen = true;
         }}
       />
     {:else if filteredTasks.length === 0}
@@ -488,6 +643,7 @@
     bind:open={taskDialogOpen}
     workspaceId={wsId}
     initialValues={taskInitialValues}
+    initialLabels={taskSeedLabels}
     {projectId}
     states={projectStates}
   />

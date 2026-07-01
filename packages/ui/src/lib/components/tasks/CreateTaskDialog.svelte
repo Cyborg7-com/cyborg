@@ -64,9 +64,14 @@
     initialValues,
     projectId,
     states = [],
+    initialLabels = [],
   }: {
     open?: boolean;
     workspaceId: string;
+    // Label NAMES to pre-tag the new task with (auto-created by the relay's
+    // resolveLabels). The Department Views bar uses this so creating the first
+    // task in a new department MATERIALIZES that department's label on prod.
+    initialLabels?: string[];
     // When the create dialog is opened from a project-scoped view (the Work
     // Items board), the new task is filed into that project. Absent on the
     // workspace-level Tasks tab, where a task lands in the Inbox.
@@ -221,6 +226,8 @@
         // user picks a real state (Status field); the create RPC honors it
         // directly, so the task lands there server-side with no follow-up.
         stateId: (hasStates ? stateId : initialValues?.stateId) || undefined,
+        // Pre-tag with any seeded department label NAMES (relay auto-creates them).
+        labels: initialLabels.length > 0 ? initialLabels : undefined,
       });
       // priority isn't part of create_task, so apply a non-default choice with a
       // follow-up update. The legacy `status` only rides the follow-up when the

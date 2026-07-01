@@ -13,6 +13,7 @@ import type { GroupBy, Layout } from "./view.js";
 
 const PAGES_COLLAPSED_PREFIX = "cyborg7-pages-collapsed";
 const PROJECT_VIEW_PREFIX = "cyborg7-tasks-view";
+const TASK_VIEWS_PREFIX = "cyborg7-tasks-views";
 
 // The starting layout / group-by for a project view with no persisted choice.
 // Colocated with the persistence layer (rather than view.ts) so this fix stays
@@ -104,4 +105,56 @@ export function readProjectView(wsId: string, projectId: string): ProjectViewPre
 
 export function writeProjectView(wsId: string, projectId: string, view: ProjectViewPrefs): void {
   writeJson(keyFor(PROJECT_VIEW_PREFIX, wsId, projectId), view);
+}
+
+// ── Department views ("Views bar") ─────────────────────────────────────────
+// A CLIENT-ONLY saved slice of the board: each view filters the board to tasks
+// carrying any of its `labelIds` (a "department" IS a project label). Persisted
+// per (workspace, project) so the tab strip + active tab survive a reload, keyed
+// separately from ProjectViewPrefs so the two never clobber. `labelIds` may be
+// empty — a brand-new department whose label doesn't exist yet (materialized by
+// tagging the first task); filtering on [] falls back to "All" until it lights up.
+
+export interface TaskView {
+  id: string;
+  name: string;
+  labelIds: string[];
+}
+
+// The persisted blob: the saved views + which one is active (null = "All").
+export interface TaskViewsState {
+  views: TaskView[];
+  activeId: string | null;
+}
+
+// Narrow a parsed value to a TaskView, dropping anything malformed so a corrupt
+// entry can't crash the bar (mirrors the defensive reads above).
+function isTaskView(v: unknown): v is TaskView {
+  if (v == null || typeof v !== "object") return false;
+  const o = v as Record<string, unknown>;
+  return (
+    typeof o.id === "string" &&
+    typeof o.name === "string" &&
+    Array.isArray(o.labelIds) &&
+    o.labelIds.every((x) => typeof x === "string")
+  );
+}
+
+export function readTaskViews(wsId: string, projectId: string): TaskViewsState {
+  const parsed = readJson<Record<string, unknown>>(keyFor(TASK_VIEWS_PREFIX, wsId, projectId));
+  if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { views: [], activeId: null };
+  }
+  const views = Array.isArray(parsed.views) ? parsed.views.filter(isTaskView) : [];
+  // Keep activeId only if it still points at a surviving view (a deleted view or
+  // stale id resets the board to "All" rather than filtering by a ghost).
+  const activeId =
+    typeof parsed.activeId === "string" && views.some((v) => v.id === parsed.activeId)
+      ? parsed.activeId
+      : null;
+  return { views, activeId };
+}
+
+export function writeTaskViews(wsId: string, projectId: string, state: TaskViewsState): void {
+  writeJson(keyFor(TASK_VIEWS_PREFIX, wsId, projectId), state);
 }
