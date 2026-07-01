@@ -3,7 +3,7 @@
   import { SvelteSet } from "svelte/reactivity";
   import type { Message } from "$lib/types.js";
   import { CHANNEL_SLASH_COMMANDS } from "$lib/components/composer/slash-commands.js";
-  import { cn, formatTime, formatSize } from "$lib/utils.js";
+  import { cn, formatTime, formatSize, isExternalSlack } from "$lib/utils.js";
   import Emoji from "$lib/components/Emoji.svelte";
   import { authState, workspaceState, openThread, pinMessage, saveMessage, savedState, retrySendMessage } from "$lib/state/app.svelte.js";
   import { cyboState } from "$lib/plugins/agents/state.svelte.js";
@@ -626,6 +626,11 @@
         {#if isWebhook}
           <!-- Automation marker: posted via an inbound webhook (CI, GitHub, …). -->
           <span class="role-badge" title="Posted via an inbound webhook">webhook</span>
+        {/if}
+
+        {#if !isAgent && isExternalSlack(message.fromId)}
+          <!-- External marker: this author is a mirrored Slack guest user. -->
+          <span class="role-badge" title="From a Slack workspace">Slack</span>
         {/if}
 
         <!-- P4a: 11px timestamp per the redesign type ramp. -->

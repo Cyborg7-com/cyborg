@@ -60,13 +60,42 @@ export interface ParsedInboundMessage {
   files?: ParsedInboundFile[];
 }
 
+// The normalized, provider-agnostic shape of ONE inbound reaction event (Slack
+// reaction_added / reaction_removed). The bridge maps the Slack emoji NAME to Cyborg's
+// Unicode reaction key, resolves the target Cyborg message from (provider, item ts) via
+// message_integrations, and applies/removes the reaction as the synthetic Slack author.
+export interface ParsedInboundReaction {
+  // Whether the reaction was added or removed.
+  action: "added" | "removed";
+  // The provider tenant id (Slack team_id).
+  teamId: string;
+  // The channel the reacted-to message lives in (Slack item.channel).
+  channelId: string;
+  // The Slack user who reacted (event.user) — drives the synthetic author + echo guard.
+  userId: string;
+  // The Slack reaction NAME as delivered (e.g. "thumbsup", "+1", "heart", possibly
+  // skin-toned "thumbsup::skin-tone-2"). Mapped to a Unicode emoji by the bridge.
+  reaction: string;
+  // The reacted-to message's Slack ts (event.item.ts) — the external_id we map.
+  messageTs: string;
+  // The provider envelope id (Slack event_id) for retry dedupe. null when absent.
+  eventId: string | null;
+}
+
 // The outcome of parsing a provider webhook envelope:
 //   - url_verification: a setup handshake whose challenge must be echoed (Slack).
-//   - event: zero or more normalized inbound messages (+ the envelope id to dedupe).
+//   - event: zero or more normalized inbound messages + reactions (+ the envelope id
+//     to dedupe). `reactions` is optional + additive so an existing consumer that only
+//     reads `messages` is unaffected.
 //   - ignored: a payload the bridge takes no action on.
 export type ParsedInbound =
   | { type: "url_verification"; challenge: string }
-  | { type: "event"; eventId: string | null; messages: ParsedInboundMessage[] }
+  | {
+      type: "event";
+      eventId: string | null;
+      messages: ParsedInboundMessage[];
+      reactions?: ParsedInboundReaction[];
+    }
   | { type: "ignored" };
 
 // Arguments for posting a message back to the provider (outbound).
@@ -75,6 +104,10 @@ export interface PostMessageArgs {
   text: string;
   // The provider thread root to reply under (Slack thread_ts), when threading.
   threadTs?: string;
+  // Per-sender identity override (Slack chat:write.customize): post as this display
+  // name / avatar instead of the bot. Omitted → posts as the bot (current behavior).
+  username?: string;
+  iconUrl?: string;
 }
 
 // The result of a successful post — the provider message id (Slack ts) the bridge
@@ -83,9 +116,49 @@ export interface PostMessageResult {
   ts: string;
 }
 
+// Update an already-posted provider message (Slack chat.update).
+export interface UpdateMessageArgs {
+  channelId: string;
+  ts: string;
+  text: string;
+}
+
+// Delete an already-posted provider message (Slack chat.delete).
+export interface DeleteMessageArgs {
+  channelId: string;
+  ts: string;
+}
+
+// Add/remove a reaction on a provider message (Slack reactions.add / reactions.remove).
+// `name` is the PROVIDER-native reaction name (Slack shortname, e.g. "thumbsup") — the
+// bridge maps Cyborg's Unicode key to it before calling the adapter.
+export interface ReactionArgs {
+  channelId: string;
+  // The provider message id / timestamp the reaction is on (Slack ts).
+  ts: string;
+  // The provider reaction name (Slack shortname, no colons).
+  name: string;
+}
+
+// Upload a file into a provider channel (Slack modern external-upload flow:
+// files.getUploadURLExternal → PUT bytes → files.completeUploadExternal). The bytes are
+// supplied by the caller (already size-capped) so the Slack Web API surface stays inside
+// the adapter while the S3 fetch + cap live in the mirror layer.
+export interface UploadFileArgs {
+  channelId: string;
+  // The provider thread root to attach under (Slack thread_ts), when threading.
+  threadTs?: string;
+  // The display filename (Slack file title + name).
+  filename: string;
+  // The raw file bytes to upload. The caller enforces the size cap before this.
+  data: Buffer;
+}
+
 // A resolved provider user's display identity (names the synthetic Cyborg guest).
 export interface ResolvedUser {
   name: string;
+  // The provider avatar URL (Slack profile.image_512/image_192/…), null when absent.
+  imageUrl: string | null;
 }
 
 // The seam every customer-comms provider implements.
@@ -111,8 +184,21 @@ export interface IntegrationAdapter {
   // Throws on a provider error (outbound failures must surface to the caller).
   postMessage(token: string, args: PostMessageArgs): Promise<PostMessageResult>;
 
-  // Resolve a provider user's display identity (Slack users.info → real_name).
-  // Degrades to { name: userId } on a provider error rather than throwing, so a
-  // single lookup failure never blocks mirroring the message.
+  // Add a reaction to a provider message as the bot (Slack reactions.add). Idempotent:
+  // a provider "already reacted" is treated as success, NOT an error.
+  addReaction(token: string, args: ReactionArgs): Promise<void>;
+
+  // Remove the bot's reaction from a provider message (Slack reactions.remove).
+  // Idempotent: a provider "no reaction to remove" is treated as success.
+  removeReaction(token: string, args: ReactionArgs): Promise<void>;
+
+  // Upload a file into a provider channel (Slack external-upload flow). Throws on a
+  // provider error so the caller can log it (best-effort, never blocks the message).
+  uploadFile(token: string, args: UploadFileArgs): Promise<void>;
+
+  // Resolve a provider user's display identity (Slack users.info → real_name + avatar).
+  // Returns both name and imageUrl (provider profile image) when available.
+  // Degrades to { name: userId, imageUrl: null } on a provider error rather than
+  // throwing, so a single lookup failure never blocks mirroring the message.
   resolveUser(token: string, userId: string): Promise<ResolvedUser>;
 }

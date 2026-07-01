@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { resolveAvatarSource } from "./utils.js";
+import { isExternalSlack, resolveAvatarSource } from "./utils.js";
 
 describe("resolveAvatarSource", () => {
   // The ONE rule, so the chat header / agents roster / session avatar never
@@ -73,5 +73,28 @@ describe("resolveAvatarSource", () => {
 
   it("no avatar AND no name → '?' initials (never throws)", () => {
     expect(resolveAvatarSource(null, "")).toEqual({ kind: "initials", value: "?" });
+  });
+});
+
+describe("isExternalSlack", () => {
+  // Synthetic Slack guest users have ids of the form `slack:<team>:<user>`; only
+  // an id that STARTS with the `slack:` prefix is one. Everything else — real
+  // uuid-ish member ids, empty strings, or ids that merely contain "slack:"
+  // somewhere in the middle — is a normal user.
+
+  it("a slack guest id (slack:<team>:<user>) → true", () => {
+    expect(isExternalSlack("slack:T123:U456")).toBe(true);
+  });
+
+  it("a normal uuid-ish id → false", () => {
+    expect(isExternalSlack("9f8b2c1a-4d5e-6789-abcd-ef0123456789")).toBe(false);
+  });
+
+  it("an empty string → false", () => {
+    expect(isExternalSlack("")).toBe(false);
+  });
+
+  it("an id that only CONTAINS 'slack:' (not a prefix) → false", () => {
+    expect(isExternalSlack("user:slack:x")).toBe(false);
   });
 });

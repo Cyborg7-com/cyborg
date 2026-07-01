@@ -32,19 +32,24 @@ import { isSlackConfigured, getSlackClientId, getSlackClientSecret } from "../sl
 const SLACK_PROVIDER = "slack";
 
 // The bot scopes the install requests (WAVE-2 contract). chat:write (outbound post),
-// channels/groups history+read (read public + private channel messages + metadata),
-// users:read (resolve author display names), reactions:read + files:read (WAVE-2a
-// edits/reactions/file mirroring), and conversations.connect:read/write (Slack Connect
-// shared-channel support — the customer-comms use case). Comma-separated per Slack v2.
+// chat:write.customize (per-sender identity: post as the actual human/cybo name+avatar
+// instead of the bot), channels/groups history+read (read public + private channel
+// messages + metadata), users:read (resolve author display names), reactions:read +
+// reactions:write (bidirectional reaction sync), files:read + files:write (bidirectional
+// file mirroring), and conversations.connect:read/write (Slack Connect shared-channel
+// support — the customer-comms use case). Comma-separated per Slack v2.
 const SLACK_BOT_SCOPES = [
   "chat:write",
+  "chat:write.customize",
   "channels:history",
   "channels:read",
   "groups:history",
   "groups:read",
   "users:read",
   "reactions:read",
+  "reactions:write",
   "files:read",
+  "files:write",
   "conversations.connect:read",
   "conversations.connect:write",
 ].join(",");
@@ -172,7 +177,7 @@ export function validateWorkspaceAccess(
 // response (no team id / no bot token). Throws only on a network error — the callback
 // catches it. Extracted from the callback handler so that handler stays under the
 // per-function complexity budget while keeping the same best-effort behavior.
-async function exchangeAndStoreSlackInstall(
+export async function exchangeAndStoreSlackInstall(
   c: Context<RelayEnv>,
   pg: PgSync,
   state: OAuthState,
@@ -191,6 +196,13 @@ async function exchangeAndStoreSlackInstall(
   // A response without a team id or bot token is unusable — don't persist a blank row.
   if (!res.ok || !teamId || !accessToken) return false;
   const botUserId = typeof res.bot_user_id === "string" ? res.bot_user_id : null;
+  // Canary: a bot-token install always carries bot_user_id. If it's ever null, the
+  // authoritative cross-instance echo guard (msg.userId === installation.botUserId) can't
+  // fire and would fall back to the per-process in-memory set — risking a reaction/edit
+  // echo loop on a fresh or load-balanced relay instance. Surface it loudly.
+  if (!botUserId) {
+    console.warn("[slack] oauth completion returned no bot_user_id", { teamId });
+  }
   const scopes = typeof res.scope === "string" ? res.scope : null;
   const teamName = typeof res.team?.name === "string" ? res.team.name : "";
   await pg.upsertIntegrationInstallation({

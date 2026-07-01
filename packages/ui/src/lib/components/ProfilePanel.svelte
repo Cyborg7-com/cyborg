@@ -16,7 +16,7 @@
   import { authState, workspaceState, presenceState, workspaceUserStatusesState, messageFocusState } from "$lib/state/app.svelte.js";
   import { cyboState, daemonState } from "$lib/plugins/agents/state.svelte.js";
   import { profilePanelState } from "$lib/profile-panel.svelte.js";
-  import { cn } from "$lib/utils.js";
+  import { cn, isExternalSlack } from "$lib/utils.js";
   import Emoji from "$lib/components/Emoji.svelte";
   import Avatar from "./Avatar.svelte";
   import HeartbeatCountdown from "./HeartbeatCountdown.svelte";
@@ -89,6 +89,11 @@
   // P2 Item 6: a human who manually set themselves away (a subset of online).
   const away = $derived(
     target?.kind === "human" && target ? presenceState.isAway(target.id) : false,
+  );
+  // A mirrored Slack guest: we have no real presence for them, and DMs don't
+  // route to Slack — so suppress the presence dot and disable the Message button.
+  const isSlackGuest = $derived(
+    target?.kind === "human" && target ? isExternalSlack(target.id) : false,
   );
   // P2 #5-T2: the target human's custom status (emoji + text), synced via
   // fetch_user_statuses / user_status_changed. Self-status isn't in this map, so
@@ -236,7 +241,11 @@
           <h3 class="break-words text-center text-[18px] font-bold text-white">{name}</h3>
         {/if}
         {#if target?.kind === "human"}
-          {#if online && !away}
+          {#if isSlackGuest}
+            <!-- No Slack presence signal — show a muted external marker, not a
+                 misleading Away/Active dot. -->
+            <span class="text-[13px] text-content-muted">Slack</span>
+          {:else if online && !away}
             <span class="h-2.5 w-2.5 shrink-0 rounded-full bg-online" title="Active"></span>
           {:else}
             <!-- Away = manual toggle OR offline (app/laptop closed); one grey dot. -->
@@ -287,11 +296,20 @@
         </button>
       {/if}
       {#if onMessage}
-        <button type="button" onclick={onMessage}
-          class="cursor-pointer rounded-lg px-5 py-2 text-center text-[13px] font-bold text-white transition-colors"
-          style="background-color: var(--bg-elevated);">
-          Message
-        </button>
+        {#if isSlackGuest}
+          <button type="button" disabled
+            title="Replies to Slack users go through the linked channel, not DMs"
+            class="cursor-not-allowed rounded-lg px-5 py-2 text-center text-[13px] font-bold text-white opacity-50"
+            style="background-color: var(--bg-elevated);">
+            Message
+          </button>
+        {:else}
+          <button type="button" onclick={onMessage}
+            class="cursor-pointer rounded-lg px-5 py-2 text-center text-[13px] font-bold text-white transition-colors"
+            style="background-color: var(--bg-elevated);">
+            Message
+          </button>
+        {/if}
       {/if}
     </div>
 

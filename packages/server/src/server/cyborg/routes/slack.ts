@@ -6,9 +6,14 @@ import type { WorkspaceRelay } from "../workspace-relay.js";
 import type { RelayEnv } from "./types.js";
 import { uploadBufferToS3, MAX_ATTACHMENT_BYTES } from "./assets.js";
 import { slackAdapter, SLACK_PROVIDER } from "../integrations/slack-adapter.js";
-import type { ParsedInboundFile, ParsedInboundMessage } from "../integrations/types.js";
+import type {
+  ParsedInboundFile,
+  ParsedInboundMessage,
+  ParsedInboundReaction,
+} from "../integrations/types.js";
+import { slackNameToEmoji } from "../integrations/slack-emoji.js";
 import { getSlackSigningSecret } from "../slack-app.js";
-import { consumePostedTs, isOurBotUserId } from "../slack-outbound.js";
+import { consumePostedReaction, consumePostedTs, isOurBotUserId } from "../slack-outbound.js";
 
 // INBOUND Slack Events receiver (WAVE 2a). A customer's message in a linked Slack
 // (Connect) channel → an injected message in the bound Cyborg channel, authored by a
@@ -218,13 +223,28 @@ export async function handleInboundMessage(
   // Echo guard: never re-mirror an event that is our OWN outbound post bouncing back.
   if (isOurOwnEcho(installation, msg)) return;
 
-  // WAVE 2a mirrors CREATES. Edits/deletes are parsed (deep-extracted) but their
-  // application to an already-mirrored message is deferred — skipping them must not
-  // break the create path.
-  if (msg.kind !== "message") {
-    // TODO(wave2.1): mirror message_changed (update the linked Cyborg message text)
-    // and message_deleted (soft-delete it), resolving the target via
-    // getMessageIntegrationByExternal(SLACK_PROVIDER, msg.ts).
+  // Slack EDIT → update the mirrored Cyborg message's text (WAVE 2.1). Our OWN bot
+  // edits already dropped by isOurOwnEcho above; only a real customer edit reaches here.
+  if (msg.kind === "message_changed") {
+    const map = await pg.getMessageIntegrationByExternal(SLACK_PROVIDER, msg.ts, link.workspaceId);
+    if (!map) return; // an edit of a message we never mirrored — nothing to update.
+    await pg.updateMessageText(map.messageId, msg.text);
+    relay.injectMessage(link.workspaceId, {
+      type: "cyborg:edit_message_broadcast",
+      payload: { workspaceId: link.workspaceId, messageId: map.messageId, text: msg.text },
+    });
+    return;
+  }
+
+  // Slack DELETE → soft-delete the mirrored Cyborg message.
+  if (msg.kind === "message_deleted") {
+    const map = await pg.getMessageIntegrationByExternal(SLACK_PROVIDER, msg.ts, link.workspaceId);
+    if (!map) return;
+    await pg.deleteMessage(map.messageId);
+    relay.injectMessage(link.workspaceId, {
+      type: "cyborg:delete_message_broadcast",
+      payload: { workspaceId: link.workspaceId, messageId: map.messageId },
+    });
     return;
   }
 
@@ -239,16 +259,26 @@ export async function handleInboundMessage(
   // written ONLY after a successful mirror below, so a redelivery of an already-mirrored
   // ts is dropped here — while a redelivery of one that FAILED before recording still
   // re-injects (recovery). Cheapest correct spot: before the resolveUser network call.
-  if (await pg.getMessageIntegrationByExternal(SLACK_PROVIDER, msg.ts)) return;
+  if (await pg.getMessageIntegrationByExternal(SLACK_PROVIDER, msg.ts, link.workspaceId)) return;
 
   const syntheticId = `${SLACK_PROVIDER}:${msg.teamId}:${msg.userId}`;
-  const displayName = await ensureSyntheticAuthor(pg, link, msg, installation?.accessToken ?? null);
+  const displayName = await ensureSyntheticAuthor(
+    pg,
+    link,
+    msg.teamId,
+    msg.userId,
+    installation?.accessToken ?? null,
+  );
 
   // Thread mapping: a Slack threaded reply (thread_ts) posts under the Cyborg message
   // its root was mapped to. An unmapped root → a top-level post (parentId null).
   let parentId: string | null = null;
   if (msg.threadTs) {
-    const parentMap = await pg.getMessageIntegrationByExternal(SLACK_PROVIDER, msg.threadTs);
+    const parentMap = await pg.getMessageIntegrationByExternal(
+      SLACK_PROVIDER,
+      msg.threadTs,
+      link.workspaceId,
+    );
     parentId = parentMap?.messageId ?? null;
   }
 
@@ -292,34 +322,37 @@ export async function handleInboundMessage(
   });
 }
 
-// Ensure the synthetic Cyborg guest that authors this Slack user's messages exists,
-// returning its display name. First sight resolves the real name via the bot token
-// (degrades to the user id) and persists both the user row and the slack_user_map;
-// thereafter the cached map name is reused.
+// Ensure the synthetic Cyborg guest that authors this Slack (team, user)'s messages +
+// reactions exists, returning its display name. First sight resolves the real name via
+// the bot token (degrades to the user id) and persists both the user row and the
+// slack_user_map; thereafter the cached map name is reused. Keyed by primitives so both
+// the message and reaction inbound paths share it.
 async function ensureSyntheticAuthor(
   pg: PgSync,
   link: { workspaceId: string },
-  msg: ParsedInboundMessage,
+  teamId: string,
+  userId: string,
   token: string | null,
 ): Promise<string> {
-  const userId = msg.userId as string; // caller guards non-null.
-  const syntheticId = `${SLACK_PROVIDER}:${msg.teamId}:${userId}`;
-  const existing = await pg.getSlackUserMap(msg.teamId, userId);
+  const syntheticId = `${SLACK_PROVIDER}:${teamId}:${userId}`;
+  const existing = await pg.getSlackUserMap(teamId, userId);
   if (existing) return existing.displayName ?? userId;
 
   let displayName = userId;
+  let imageUrl: string | null = null;
   if (token) {
     const resolved = await slackAdapter.resolveUser(token, userId);
     displayName = resolved.name;
+    imageUrl = resolved.imageUrl;
   }
   // The cloud-guest pattern: a synthetic user row keyed by the Slack identity, with a
   // routable-but-unreachable email so it can never collide with a real account.
-  const email = `slack_${msg.teamId}_${userId}@remote.local`;
-  await pg.ensureUser(syntheticId, email, displayName);
+  const email = `slack_${teamId}_${userId}@remote.local`;
+  await pg.upsertSyntheticUser(syntheticId, email, displayName, imageUrl);
   await pg.upsertSlackUserMap({
     id: `slku_${randomUUID()}`,
     workspaceId: link.workspaceId,
-    slackTeamId: msg.teamId,
+    slackTeamId: teamId,
     slackUserId: userId,
     syntheticUserId: syntheticId,
     displayName,
@@ -327,19 +360,105 @@ async function ensureSyntheticAuthor(
   return displayName;
 }
 
-// Process every normalized message on a verified event envelope. Sequential so an
-// edit can't race its own create; per-message failures are isolated.
+// Mirror ONE inbound Slack reaction (reaction_added / reaction_removed) onto its bound
+// Cyborg message. Resolves the channel link + the target Cyborg message (by Slack ts),
+// applies the echo guard, maps the Slack emoji name to Cyborg's Unicode key, and
+// applies/removes the reaction as the synthetic Slack author — then broadcasts so live
+// clients update. Best-effort per reaction (the receiver has already 200-acked). A
+// reaction on an un-mirrored message, or an uncurated emoji, is a quiet no-op. Exported
+// for unit tests.
+export async function handleInboundReaction(
+  pg: PgSync,
+  relay: WorkspaceRelay,
+  r: ParsedInboundReaction,
+): Promise<void> {
+  // Only a channel WE'RE bound to is mirrored — everything else is silently skipped.
+  const link = await pg.getSlackChannelLinkBySlackChannel(r.channelId);
+  if (!link) return;
+  // An outbound-only link doesn't mirror Slack→Cyborg.
+  if (link.syncDirection === "outbound") return;
+
+  const installation = await pg.getIntegrationInstallationById(link.installationId);
+
+  // Echo guard (authoritative, cross-instance): a reaction_added/removed authored by our
+  // OWN bot is the echo of a Cyborg→Slack mirror — never re-apply it. installation comes
+  // from shared Postgres so this holds even across relay instances.
+  if (installation?.botUserId && r.userId === installation.botUserId) return;
+  if (isOurBotUserId(r.userId)) return;
+
+  // Map the Slack reaction name to Cyborg's Unicode key. A custom/workspace or uncurated
+  // emoji has no key → no-op (a reaction is never dropped destructively).
+  const emoji = slackNameToEmoji(r.reaction);
+  if (!emoji) return;
+
+  // Echo guard (same-instance fast path): drop the bot-echo of our own outbound reaction,
+  // keyed by the Cyborg emoji so it's immune to Slack's reaction-name aliasing.
+  if (consumePostedReaction(r.messageTs, emoji, r.action)) return;
+
+  // Resolve the Cyborg message this Slack ts maps to; an un-mirrored message → nothing to
+  // react on.
+  const map = await pg.getMessageIntegrationByExternal(
+    SLACK_PROVIDER,
+    r.messageTs,
+    link.workspaceId,
+  );
+  if (!map) return;
+
+  const syntheticId = `${SLACK_PROVIDER}:${r.teamId}:${r.userId}`;
+  const displayName = await ensureSyntheticAuthor(
+    pg,
+    link,
+    r.teamId,
+    r.userId,
+    installation?.accessToken ?? null,
+  );
+
+  // Directional + idempotent apply (NOT toggle): a retried reaction_added won't flip a
+  // reaction off. `changed` is false when it's already in the target state → no broadcast.
+  const changed =
+    r.action === "added"
+      ? await pg.addReaction(link.workspaceId, map.messageId, syntheticId, displayName, emoji)
+      : await pg.removeReaction(link.workspaceId, map.messageId, syntheticId, emoji);
+  if (!changed) return;
+
+  // Broadcast so live clients update, matching the guest reaction handler's payload shape.
+  // injectMessage fans out but does NOT re-enter the `cyborg:reaction` websocket handler
+  // (the only outbound-reaction mirror seam), so an inbound-applied reaction can never
+  // loop back out to Slack.
+  relay.injectMessage(link.workspaceId, {
+    type: "cyborg:reaction_broadcast",
+    payload: {
+      workspaceId: link.workspaceId,
+      messageId: map.messageId,
+      userId: syntheticId,
+      userName: displayName,
+      emoji,
+      action: r.action,
+    },
+  });
+}
+
+// Process every normalized message + reaction on a verified event envelope. Sequential so
+// an edit can't race its own create; per-item failures are isolated.
 async function processInboundEvent(
   pg: PgSync,
   relay: WorkspaceRelay,
   deps: SlackRoutesDeps,
   messages: ParsedInboundMessage[],
+  reactions: ParsedInboundReaction[],
 ): Promise<void> {
   for (const msg of messages) {
     try {
       await handleInboundMessage(pg, relay, deps, msg);
     } catch (err) {
       console.error("[slack] failed to mirror inbound message", err);
+    }
+  }
+  for (const reaction of reactions) {
+    try {
+      await handleInboundReaction(pg, relay, reaction);
+    } catch (err) {
+      console.error("[slack] failed to mirror inbound reaction", err);
     }
   }
 }
@@ -384,10 +503,11 @@ export function createSlackRoutes(deps: SlackRoutesDeps): Hono<RelayEnv> {
       return c.json({ ok: true });
     }
     // Without a DB we can't resolve links — still 200-ack so Slack stops retrying.
-    if (pg && parsed.messages.length > 0) {
+    const reactions = parsed.reactions ?? [];
+    if (pg && (parsed.messages.length > 0 || reactions.length > 0)) {
       // 200-ACK now, process AFTER (Slack's 3s ack window). Fire-and-forget; a
       // failure inside is logged, never retried-storm'd back at Slack.
-      void processInboundEvent(pg, relay, deps, parsed.messages).catch((err) =>
+      void processInboundEvent(pg, relay, deps, parsed.messages, reactions).catch((err) =>
         console.error("[slack] async event processing failed", err),
       );
     }

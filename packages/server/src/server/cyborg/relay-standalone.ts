@@ -126,7 +126,12 @@ import { createGithubRoutes } from "./routes/github.js";
 import { emitTaskOutbound, isClosedTaskStatus } from "./github-outbound.js";
 import { createSlackRoutes } from "./routes/slack.js";
 import { createSlackOAuthRoutes } from "./routes/slack-oauth.js";
-import { mirrorChannelMessageToSlack } from "./slack-outbound.js";
+import {
+  mirrorChannelMessageToSlack,
+  mirrorEditToSlack,
+  mirrorDeleteToSlack,
+  mirrorReactionToSlack,
+} from "./slack-outbound.js";
 import { synthesizeReleaseCard } from "./webhook-card.js";
 import { createAuthRoutes } from "./routes/auth.js";
 import { createPasskeyRoutes } from "./routes/passkey.js";
@@ -9151,6 +9156,22 @@ async function main() {
             reactName,
             emoji,
           );
+          // Slack outbound mirror: a Cyborg reaction on a MIRRORED message → reactions.add/
+          // remove on Slack (as the bot). The reactor is always a real guest (never a
+          // `slack:` synthetic — those have no socket), and mirrorReactionToSlack self-gates
+          // on the message_integrations mapping + the channel link, so a reaction on an
+          // unmirrored message is a quiet no-op. Best-effort; never blocks the reaction.
+          if (reactMsg.channelId) {
+            void mirrorReactionToSlack(pg, {
+              workspaceId,
+              cyborgChannelId: reactMsg.channelId,
+              messageId,
+              emoji,
+              action,
+            }).catch((err) =>
+              relayLog.error({ err, messageId }, "slack outbound reaction mirror failed"),
+            );
+          }
           broadcastToGuests(workspaceId, {
             type: "cyborg:reaction_broadcast",
             // Payload envelope: the client reads broadcast data from `payload`.
@@ -9948,6 +9969,18 @@ async function main() {
             break;
           }
           await pg.deleteMessage(messageId);
+          // Slack outbound mirror (WAVE 2.1): a mirrored message deleted in Cyborg →
+          // chat.delete on Slack. Skip inbound-origin (slack:) authors — we don't own
+          // the customer's Slack message. Best-effort; never blocks the delete.
+          if (delMsg.channelId && !delMsg.fromId.startsWith("slack:")) {
+            void mirrorDeleteToSlack(pg, {
+              workspaceId,
+              cyborgChannelId: delMsg.channelId,
+              messageId,
+            }).catch((err) =>
+              relayLog.error({ err, messageId }, "slack outbound delete mirror failed"),
+            );
+          }
           // Payload-wrapped so the client's dispatchBroadcast (which requires
           // `payload`) actually delivers it — was top-level, so live deletes never
           // reached other clients (only a reload hid the soft-deleted row). The
@@ -9996,6 +10029,18 @@ async function main() {
             break;
           }
           await pg.updateMessageText(editMessageId, editText);
+          // Slack outbound mirror (WAVE 2.1): a mirrored message edited in Cyborg →
+          // chat.update on Slack. Skip inbound-origin (slack:) authors. Best-effort.
+          if (editMsg.channelId && !editMsg.fromId.startsWith("slack:")) {
+            void mirrorEditToSlack(pg, {
+              workspaceId,
+              cyborgChannelId: editMsg.channelId,
+              messageId: editMessageId,
+              text: editText,
+            }).catch((err) =>
+              relayLog.error({ err, editMessageId }, "slack outbound edit mirror failed"),
+            );
+          }
           broadcastToGuests(workspaceId, {
             type: "cyborg:edit_message_broadcast",
             payload: { workspaceId, messageId: editMessageId, text: editText },
@@ -10478,8 +10523,13 @@ async function main() {
             messageId,
             fromId,
             fromType: typeof cp?.fromType === "string" ? cp.fromType : "human",
+            fromName: typeof cp?.fromName === "string" ? cp.fromName : null,
             text: typeof cp?.text === "string" ? cp.text : "",
             parentId: typeof cp?.parentId === "string" ? cp.parentId : null,
+            // Outbound file mirror: the attachments ride the same broadcast; the helper
+            // downloads (capped) + uploads each to the linked Slack channel. An inbound-
+            // rehosted message's `slack:` author short-circuits before any upload.
+            attachments: Array.isArray(cp?.attachments) ? cp.attachments : null,
           }).catch((err) => relayLog.error({ err, channelId }, "slack outbound mirror failed"));
         }
       }

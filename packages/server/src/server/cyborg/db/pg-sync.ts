@@ -699,6 +699,29 @@ export class PgSync {
       .onConflictDoNothing();
   }
 
+  // Upsert a synthetic external-identity guest user (Slack bridge), setting BOTH the
+  // display name and avatar so the profile panel + message avatar render. ON CONFLICT
+  // DO UPDATE (not DO NOTHING like ensureUser) so a returning external user's latest
+  // Slack name/avatar refreshes. coalesce keeps an existing value when the new one is
+  // null, so a transient resolve failure never blanks a good name/avatar.
+  async upsertSyntheticUser(
+    id: string,
+    email: string,
+    name: string | null,
+    imageUrl: string | null,
+  ): Promise<void> {
+    await this.db
+      .insert(schema.users)
+      .values({ id, email, name, imageUrl })
+      .onConflictDoUpdate({
+        target: schema.users.id,
+        set: {
+          name: sql`coalesce(excluded.name, ${schema.users.name})`,
+          imageUrl: sql`coalesce(excluded.image_url, ${schema.users.imageUrl})`,
+        },
+      });
+  }
+
   // ─── Workspaces ──────────────────────────────────────────────────
 
   // Create a workspace, its owner membership, and (optionally) the general
@@ -4687,6 +4710,82 @@ export class PgSync {
     return action;
   }
 
+  // Idempotent, DIRECTIONAL reaction apply (distinct from toggleReaction, which flips on
+  // current state). The Slack bridge knows the exact target state from the event kind
+  // (reaction_added / reaction_removed), so a retried or duplicate event must NOT flip the
+  // wrong way — addReaction is a no-op when the (userId, emoji) pair already exists, and
+  // removeReaction is a no-op when it's absent. Returns whether the array actually changed.
+  // The reactions JSONB array is read-modify-write, so two concurrent applies on the same
+  // message (e.g. a Slack reaction_added racing a native web reaction) would both read the
+  // old array and the second UPDATE would clobber the first's append — a lost update under
+  // READ COMMITTED. Do it in a transaction and lock the row with SELECT ... FOR UPDATE so
+  // the second waits for the first to commit and appends onto the fresh array.
+  async addReaction(
+    workspaceId: string,
+    messageId: string,
+    userId: string,
+    userName: string,
+    emoji: string,
+  ): Promise<boolean> {
+    return await this.db.transaction(async (tx) => {
+      const [row] = await tx
+        .select({ reactions: schema.messages.reactions })
+        .from(schema.messages)
+        .where(and(eq(schema.messages.id, messageId), eq(schema.messages.workspaceId, workspaceId)))
+        .for("update");
+      if (!row) return false;
+      const existing = (row.reactions ?? []) as {
+        userId: string;
+        userName?: string;
+        emoji: string;
+        createdAt: number;
+      }[];
+      if (existing.some((r) => r.userId === userId && r.emoji === emoji)) return false;
+      existing.push({ userId, userName, emoji, createdAt: Date.now() });
+      await tx
+        .update(schema.messages)
+        .set({ reactions: existing })
+        .where(
+          and(eq(schema.messages.id, messageId), eq(schema.messages.workspaceId, workspaceId)),
+        );
+      return true;
+    });
+  }
+
+  // See addReaction — same lost-update hazard on the concurrent read-modify-write. Lock the
+  // row before removing so a parallel add/remove can't resurrect or clobber the entry.
+  async removeReaction(
+    workspaceId: string,
+    messageId: string,
+    userId: string,
+    emoji: string,
+  ): Promise<boolean> {
+    return await this.db.transaction(async (tx) => {
+      const [row] = await tx
+        .select({ reactions: schema.messages.reactions })
+        .from(schema.messages)
+        .where(and(eq(schema.messages.id, messageId), eq(schema.messages.workspaceId, workspaceId)))
+        .for("update");
+      if (!row) return false;
+      const existing = (row.reactions ?? []) as {
+        userId: string;
+        userName?: string;
+        emoji: string;
+        createdAt: number;
+      }[];
+      const idx = existing.findIndex((r) => r.userId === userId && r.emoji === emoji);
+      if (idx < 0) return false;
+      existing.splice(idx, 1);
+      await tx
+        .update(schema.messages)
+        .set({ reactions: existing })
+        .where(
+          and(eq(schema.messages.id, messageId), eq(schema.messages.workspaceId, workspaceId)),
+        );
+      return true;
+    });
+  }
+
   async updateMessageText(messageId: string, text: string): Promise<boolean> {
     const result = await this.db
       .update(schema.messages)
@@ -5759,6 +5858,13 @@ export class PgSync {
         lastActiveMs !== null && !Number.isNaN(lastActiveMs) ? lastActiveMs : null;
       return cybo;
     });
+  }
+
+  // Fetch ONE cybo by id (PK, globally unique). Null when absent. Used by the Slack
+  // outbound mirror to resolve a cybo sender's name+avatar without loading the roster.
+  async getCyboById(id: string): Promise<StoredCybo | null> {
+    const [row] = await this.db.select().from(schema.cybos).where(eq(schema.cybos.id, id)).limit(1);
+    return row ? this.mapCybo(row) : null;
   }
 
   async updateCybo(
@@ -11138,12 +11244,16 @@ export class PgSync {
   }
 
   // Reverse lookup: the Cyborg message a (provider, external id / Slack ts) maps to
-  // (inbound dedupe, echo guard, thread-parent resolution). index(provider,
-  // external_id) backs it; returns the most recent on the rare collision. null when
-  // unseen.
+  // (inbound dedupe, echo guard, thread-parent resolution). null when unseen.
+  // Workspace-scoped: the unique index is (provider, external_id, workspace_id)
+  // because a Slack ts is unique per-channel, NOT globally — the same ts can collide
+  // across two workspaces. Resolving by (provider, externalId) alone would return a
+  // non-deterministic, possibly wrong-workspace row, letting an edit/delete/reaction
+  // land on another tenant's message. Always scope by the caller's workspaceId.
   async getMessageIntegrationByExternal(
     provider: string,
     externalId: string,
+    workspaceId: string,
   ): Promise<StoredMessageIntegration | null> {
     const [row] = await this.db
       .select()
@@ -11152,9 +11262,9 @@ export class PgSync {
         and(
           eq(schema.messageIntegrations.provider, provider),
           eq(schema.messageIntegrations.externalId, externalId),
+          eq(schema.messageIntegrations.workspaceId, workspaceId),
         ),
       )
-      .orderBy(desc(schema.messageIntegrations.createdAt))
       .limit(1);
     return row ? mapMessageIntegration(row) : null;
   }

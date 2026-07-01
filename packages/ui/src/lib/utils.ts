@@ -54,6 +54,14 @@ export function isMac(): boolean {
   );
 }
 
+// True for synthetic Slack guest users. Slack customers are mirrored into a
+// workspace as guest members whose id is `slack:<team>:<user>`; the UI uses this
+// to show an "external" marker and suppress affordances that don't apply to them
+// (presence, DMs). Pure id-prefix check — no schema/network dependency.
+export function isExternalSlack(userId: string): boolean {
+  return userId.startsWith("slack:");
+}
+
 // Render a keyboard shortcut with platform-correct modifier glyphs. Pass the
 // "logical" combo with a "Mod" placeholder for the command/control key, e.g.
 // formatShortcut("Mod+K") → "⌘K" on macOS, "Ctrl+K" elsewhere.

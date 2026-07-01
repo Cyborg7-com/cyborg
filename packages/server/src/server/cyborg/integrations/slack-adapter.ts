@@ -16,9 +16,14 @@ import type {
   ParsedInbound,
   ParsedInboundFile,
   ParsedInboundMessage,
+  ParsedInboundReaction,
   PostMessageArgs,
   PostMessageResult,
+  ReactionArgs,
   ResolvedUser,
+  UpdateMessageArgs,
+  UploadFileArgs,
+  DeleteMessageArgs,
 } from "./types.js";
 
 export const SLACK_PROVIDER = "slack";
@@ -80,18 +85,27 @@ export class SlackAdapter implements IntegrationAdapter {
     const event = payload.event;
     if (!isRecord(event)) return { type: "event", eventId, messages: [] };
 
+    // A reaction event (reaction_added / reaction_removed) is a distinct envelope from a
+    // message; parse it into the additive `reactions` array so the message contract is
+    // untouched for existing consumers.
+    const reaction = parseReactionEvent(event, teamId, eventId);
+    if (reaction) return { type: "event", eventId, messages: [], reactions: [reaction] };
+
     const message = parseMessageEvent(event, teamId, eventId);
     return { type: "event", eventId, messages: message ? [message] : [] };
   }
 
-  // Post as the bot via chat.postMessage. Throws on a provider error so the
-  // outbound hook can decide (the post is best-effort there, never blocks).
+  // Post as the bot (or as the specified sender when username/iconUrl are set and the
+  // installation has chat:write.customize) via chat.postMessage. Throws on a provider
+  // error so the outbound hook can decide (the post is best-effort there, never blocks).
   async postMessage(token: string, args: PostMessageArgs): Promise<PostMessageResult> {
     const client = new WebClient(token);
     const params = {
       channel: args.channelId,
       text: args.text,
       ...(args.threadTs ? { thread_ts: args.threadTs } : {}),
+      ...(args.username ? { username: args.username } : {}),
+      ...(args.iconUrl ? { icon_url: args.iconUrl } : {}),
     };
     // oxlint-disable-next-line unicorn/require-post-message-target-origin -- Slack Web API chat.postMessage, NOT the DOM window.postMessage (no targetOrigin exists)
     const res = await client.chat.postMessage(params);
@@ -102,8 +116,97 @@ export class SlackAdapter implements IntegrationAdapter {
     return { ts };
   }
 
-  // Resolve a Slack user's display name (real_name → profile.display_name → name).
-  // Degrades to { name: userId } on a provider error (e.g. missing users:read
+  // Edit an already-posted bot message via chat.update. Throws on a provider error.
+  async updateMessage(token: string, args: UpdateMessageArgs): Promise<void> {
+    const client = new WebClient(token);
+    const res = await client.chat.update({ channel: args.channelId, ts: args.ts, text: args.text });
+    if (!res.ok) throw new Error(`Slack chat.update failed: ${res.error ?? "unknown"}`);
+  }
+
+  // Delete an already-posted bot message via chat.delete. Throws on a provider error.
+  async deleteMessage(token: string, args: DeleteMessageArgs): Promise<void> {
+    const client = new WebClient(token);
+    const res = await client.chat.delete({ channel: args.channelId, ts: args.ts });
+    if (!res.ok) throw new Error(`Slack chat.delete failed: ${res.error ?? "unknown"}`);
+  }
+
+  // Add the bot's reaction via reactions.add. Idempotent: Slack's `already_reacted`
+  // (the bot already added this emoji, e.g. a second Cyborg user reacting the same way)
+  // is treated as success, not an error, so the aggregate Slack state is correct without
+  // the bridge tracking per-user reaction counts. Other provider errors throw.
+  async addReaction(token: string, args: ReactionArgs): Promise<void> {
+    const client = new WebClient(token);
+    try {
+      const res = await client.reactions.add({
+        channel: args.channelId,
+        timestamp: args.ts,
+        name: args.name,
+      });
+      if (!res.ok) throw new Error(`Slack reactions.add failed: ${res.error ?? "unknown"}`);
+    } catch (err) {
+      if (isSlackError(err, "already_reacted")) return;
+      throw err;
+    }
+  }
+
+  // Remove the bot's reaction via reactions.remove. Idempotent: `no_reaction` (nothing
+  // to remove) is treated as success. Other provider errors throw.
+  async removeReaction(token: string, args: ReactionArgs): Promise<void> {
+    const client = new WebClient(token);
+    try {
+      const res = await client.reactions.remove({
+        channel: args.channelId,
+        timestamp: args.ts,
+        name: args.name,
+      });
+      if (!res.ok) throw new Error(`Slack reactions.remove failed: ${res.error ?? "unknown"}`);
+    } catch (err) {
+      if (isSlackError(err, "no_reaction")) return;
+      throw err;
+    }
+  }
+
+  // Upload a file into a Slack channel via the modern external-upload flow (files.upload
+  // is deprecated): getUploadURLExternal → POST the raw bytes to the returned upload_url
+  // (a Slack-hosted endpoint that requires POST, not an S3 presigned PUT) →
+  // completeUploadExternal (which shares it into the channel, optionally as a thread
+  // reply). The caller supplies already-capped bytes; this never buffers beyond them.
+  // Throws on any provider/transport failure so the mirror can log it (best-effort).
+  async uploadFile(token: string, args: UploadFileArgs): Promise<void> {
+    const client = new WebClient(token);
+    const upload = await client.files.getUploadURLExternal({
+      filename: args.filename,
+      length: args.data.length,
+    });
+    if (!upload.ok || !upload.upload_url || !upload.file_id) {
+      throw new Error(
+        `Slack files.getUploadURLExternal failed: ${upload.error ?? "no upload url"}`,
+      );
+    }
+
+    // A plain Uint8Array VIEW over the Buffer (no copy). The cast bridges the DOM lib's
+    // generic ArrayBufferView<ArrayBuffer> vs the runtime Uint8Array<ArrayBufferLike> — a
+    // valid request body at runtime (undici accepts it); the mismatch is types-only.
+    const body = new Uint8Array(args.data.buffer, args.data.byteOffset, args.data.byteLength);
+    const uploadRes = await fetch(upload.upload_url, { method: "POST", body: body as BodyInit });
+    if (!uploadRes.ok) {
+      await uploadRes.body?.cancel(); // don't leak the response stream.
+      throw new Error(`Slack file upload POST failed: ${uploadRes.status}`);
+    }
+
+    const complete = await client.files.completeUploadExternal({
+      files: [{ id: upload.file_id, title: args.filename }],
+      channel_id: args.channelId,
+      ...(args.threadTs ? { thread_ts: args.threadTs } : {}),
+    });
+    if (!complete.ok) {
+      throw new Error(`Slack files.completeUploadExternal failed: ${complete.error ?? "unknown"}`);
+    }
+  }
+
+  // Resolve a Slack user's display name + avatar (real_name → profile.display_name →
+  // name; image_512 → image_192 → image_72 → null). Degrades to
+  // { name: userId, imageUrl: null } on a provider error (e.g. missing users:read
   // scope) so a single lookup failure never blocks mirroring the message.
   async resolveUser(token: string, userId: string): Promise<ResolvedUser> {
     try {
@@ -111,10 +214,13 @@ export class SlackAdapter implements IntegrationAdapter {
       const res = await client.users.info({ user: userId });
       const user = res.user;
       const name = user?.real_name || user?.profile?.display_name || user?.name || userId;
-      return { name };
+      const profile = user?.profile;
+      const imageUrl: string | null =
+        profile?.image_512 || profile?.image_192 || profile?.image_72 || null;
+      return { name, imageUrl };
     } catch (err) {
       logError("slack-adapter", err, { op: "resolveUser", userId });
-      return { name: userId };
+      return { name: userId, imageUrl: null };
     }
   }
 }
@@ -126,6 +232,15 @@ export const slackAdapter = new SlackAdapter();
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+// True when a thrown Slack Web API error carries the given provider error code (Slack
+// surfaces an `ok:false` response as a WebAPIPlatformError whose `data.error` is the
+// code, e.g. "already_reacted" / "no_reaction"). Used to make reactions idempotent.
+function isSlackError(err: unknown, code: string): boolean {
+  if (!isRecord(err)) return false;
+  const data = err.data;
+  return isRecord(data) && data.error === code;
 }
 
 // Map a Slack `message` event to the normalized inbound shape, or null when it is
@@ -190,6 +305,34 @@ function parseMessageEvent(
   // the exact WAVE-1 shape (no empty array, no key).
   if (files.length > 0) parsed.files = files;
   return parsed;
+}
+
+// Map a Slack reaction_added / reaction_removed event to the normalized inbound shape,
+// or null when it isn't a reaction on a message we can map. Only reactions on a `message`
+// item are bridged (reactions on files / file comments have no Cyborg message target).
+function parseReactionEvent(
+  event: Record<string, unknown>,
+  teamId: string,
+  eventId: string | null,
+): ParsedInboundReaction | null {
+  const type = typeof event.type === "string" ? event.type : "";
+  let action: "added" | "removed" | null = null;
+  if (type === "reaction_added") action = "added";
+  else if (type === "reaction_removed") action = "removed";
+  if (!action) return null;
+
+  const item = isRecord(event.item) ? event.item : null;
+  if (!item || item.type !== "message") return null;
+
+  const channelId = asString(item.channel);
+  const messageTs = asString(item.ts);
+  const userId = asString(event.user);
+  const reaction = asString(event.reaction);
+  // Every field is load-bearing (channel + ts locate the message, user drives the
+  // synthetic author + echo guard, reaction is the emoji). A missing one → not mappable.
+  if (!channelId || !messageTs || !userId || !reaction) return null;
+
+  return { action, teamId, channelId, userId, reaction, messageTs, eventId };
 }
 
 // The nested record a message event's content lives in: event.message for an edit,
