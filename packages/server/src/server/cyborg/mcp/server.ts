@@ -369,6 +369,25 @@ export function buildWorkspaceMcpServer(ctx: McpAuthContext, deps: McpDeps): Mcp
           return json(await pg.getPageById(pageId));
         },
       );
+
+      server.registerTool(
+        "list_project_labels",
+        {
+          description:
+            "List a Tasks-project's label catalog (id, name, color). Call this BEFORE assigning labels to a task and reuse an existing label name — the resolver is case-insensitive per project, so passing an existing name reuses that label instead of creating a duplicate.",
+          inputSchema: {
+            projectId: z.string().describe("The Tasks-project id whose labels to list."),
+          },
+        },
+        async (rawArgs) => {
+          const { projectId } = sanitizeToolArgs(rawArgs);
+          if (!(await pg.assertProjectVisible(projectId, ctx.identityId))) {
+            return json({ error: "project not found" });
+          }
+          const labels = await pg.getProjectLabels(projectId);
+          return json(labels.map((l) => ({ id: l.id, name: l.name, color: l.color })));
+        },
+      );
     }
   }
 

@@ -2500,13 +2500,6 @@ export class PgSync {
     // than orphan-create. (createTask/updateTask only ever pass a real project.)
     if (!proj) return [];
 
-    const existing = await tx
-      .select({ id: schema.taskLabels.id, name: schema.taskLabels.name })
-      .from(schema.taskLabels)
-      .where(eq(schema.taskLabels.projectId, projectId));
-    const byName = new Map<string, string>();
-    for (const row of existing) byName.set(row.name.trim().toLowerCase(), row.id);
-
     // Tail of the project's label sort order, so new labels append in order.
     const [tailRow] = await tx
       .select({ maxSort: sql<number | null>`MAX(${schema.taskLabels.sortOrder})` })
@@ -2516,23 +2509,35 @@ export class PgSync {
 
     const ids: string[] = [];
     for (const name of wanted) {
-      const found = byName.get(name.toLowerCase());
-      if (found) {
-        ids.push(found);
+      // Atomic get-or-create keyed by (project_id, lower(name)), race-safe against
+      // the ux_task_labels_project_lower_name unique index. INSERT … ON CONFLICT DO
+      // NOTHING never overwrites, so the FIRST writer's casing is preserved; a
+      // concurrent/duplicate insert returns no row and we SELECT the existing id.
+      const inserted = await tx.execute(sql`
+        INSERT INTO task_labels (id, project_id, workspace_id, name, color, sort_order)
+        VALUES (${randomUUID()}, ${projectId}, ${proj.workspaceId}, ${name}, '#94a3b8', ${nextSort})
+        ON CONFLICT (project_id, lower(name)) DO NOTHING
+        RETURNING id
+      `);
+      const insertedId = (inserted.rows as { id: string }[])[0]?.id;
+      if (insertedId) {
+        nextSort += 1;
+        ids.push(insertedId);
         continue;
       }
-      const id = randomUUID();
-      await tx.insert(schema.taskLabels).values({
-        id,
-        projectId,
-        workspaceId: proj.workspaceId,
-        name,
-        color: "#94a3b8",
-        sortOrder: nextSort,
-      });
-      nextSort += 1;
-      byName.set(name.toLowerCase(), id);
-      ids.push(id);
+      // Conflict → the label already exists (this batch or a concurrent writer);
+      // fetch the incumbent id by the same case-insensitive key.
+      const [row] = await tx
+        .select({ id: schema.taskLabels.id })
+        .from(schema.taskLabels)
+        .where(
+          and(
+            eq(schema.taskLabels.projectId, projectId),
+            sql`lower(${schema.taskLabels.name}) = ${name.toLowerCase()}`,
+          ),
+        )
+        .limit(1);
+      if (row) ids.push(row.id);
     }
     return ids;
   }

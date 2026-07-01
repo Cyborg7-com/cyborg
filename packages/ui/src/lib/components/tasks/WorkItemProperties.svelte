@@ -430,11 +430,16 @@
        raw label.color. The detail row keeps the full editor so labels stay
        settable there. -->
   {#if shown("labels") && (!compact || hasLabels)}
-    {#if editLabels && !compact}
+    {#if editLabels}
+      <!-- On the compact board card the label chip must be CLICKABLE (open the
+           picker) exactly like State/Priority/Assignee. maxRender preserves the
+           board's Plane-parity 3-then-summary collapse inside the trigger; the
+           uncapped detail row (variant="row") renders every label. -->
       <LabelDropdown
         value={labelIds}
         options={labels}
         variant="chip"
+        maxRender={compact ? LABEL_MAX_RENDER : undefined}
         onChange={(ids) => onLabelsChange?.(ids)}
         onCreate={onLabelCreate}
       />

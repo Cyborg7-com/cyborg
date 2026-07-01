@@ -1406,7 +1406,14 @@ export const taskLabels = pgTable(
     // Fractional ordering for drag-reorder in the label list.
     sortOrder: real("sort_order").notNull(),
   },
-  (t) => [index("idx_task_labels_project").on(t.projectId)],
+  (t) => [
+    index("idx_task_labels_project").on(t.projectId),
+    // Django get_or_create semantics: one label per (project, case-insensitive name).
+    // The resolver's INSERT … ON CONFLICT (project_id, lower(name)) DO NOTHING relies
+    // on this expression index as its conflict target, so every caller (UI, agents,
+    // relay RPC, concurrent requests) reuses the existing label instead of duplicating.
+    uniqueIndex("ux_task_labels_project_lower_name").on(t.projectId, sql`lower(${t.name})`),
+  ],
 );
 
 // Join table: which labels are on which task.

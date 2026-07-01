@@ -614,9 +614,9 @@ export class CyborgStorage {
   private getTaskStateGroupStmt!: Statement;
   // Tasks Redesign P0 — label catalog + many-to-many join writers (SQLite mirrors
   // of the PG task_label_assignees / task_modules tables).
-  private getTaskLabelsByProjectStmt!: Statement;
   private getTaskLabelsTailSortStmt!: Statement;
   private insertTaskLabelStmt!: Statement;
+  private getTaskLabelByLowerNameStmt!: Statement;
   private deleteTaskLabelAssigneesStmt!: Statement;
   private insertTaskLabelAssigneeStmt!: Statement;
   private deleteTaskModulesStmt!: Statement;
@@ -885,14 +885,18 @@ export class CyborgStorage {
     // the task_label_assignees / task_modules replace-set join writers. Mirrors
     // pg-sync.resolveLabels / updateTask's delete-then-insert join semantics so the
     // solo/daemon SQLite path carries labels/modules identically to the cloud.
-    this.getTaskLabelsByProjectStmt = this.db.prepare(
-      "SELECT id, name FROM task_labels WHERE project_id = ?",
-    );
     this.getTaskLabelsTailSortStmt = this.db.prepare(
       "SELECT MAX(sort_order) AS maxSort FROM task_labels WHERE project_id = ?",
     );
+    // Atomic get-or-create keyed by (project_id, lower(name)), race-safe against the
+    // ux_task_labels_project_lower_name unique index. ON CONFLICT DO NOTHING never
+    // overwrites, so the FIRST writer's casing is preserved; a duplicate returns no
+    // row and we fall back to the case-insensitive lookup below.
     this.insertTaskLabelStmt = this.db.prepare(
-      "INSERT INTO task_labels (id, project_id, workspace_id, name, color, sort_order) VALUES (?, ?, ?, ?, ?, ?)",
+      "INSERT INTO task_labels (id, project_id, workspace_id, name, color, sort_order) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (project_id, lower(name)) DO NOTHING RETURNING id",
+    );
+    this.getTaskLabelByLowerNameStmt = this.db.prepare(
+      "SELECT id FROM task_labels WHERE project_id = ? AND lower(name) = lower(?) LIMIT 1",
     );
     this.deleteTaskLabelAssigneesStmt = this.db.prepare(
       "DELETE FROM task_label_assignees WHERE task_id = ?",
@@ -1831,6 +1835,88 @@ export class CyborgStorage {
       `CREATE INDEX IF NOT EXISTS idx_archived_sessions_resumed_agent
          ON archived_sessions(resumed_agent_id)`,
     );
+
+    // Task labels were previously created by a non-atomic "look up by name else
+    // INSERT" with no unique constraint, so the same name could land many times in
+    // one project. Enforce Django get_or_create semantics keyed by
+    // (project_id, lower(name)) with a unique expression index. A plain unique index
+    // FAILS while duplicates exist, so dedup first (canonical = earliest by
+    // (sort_order, id), matching PG migration 0049): collapse duplicate assignee rows
+    // to one per (task, canonical group) — a task on two dups of the same group with
+    // no canonical assignment would otherwise self-collide on the (task_id, label_id)
+    // PK when repointed — then repoint the survivors, then delete the orphaned dup
+    // labels. Guarded on the index not existing yet, so the pass runs at most once.
+    const labelIdx = this.db.pragma("index_list(task_labels)") as Array<{ name: string }>;
+    if (!labelIdx.some((i) => i.name === "ux_task_labels_project_lower_name")) {
+      const dedup = this.db.transaction((): void => {
+        // Step 1 — keep one assignee per (task, canonical group); delete the rest
+        // (prefer the one already on the canonical label, else the earliest-sorted).
+        this.db.exec(`
+          DELETE FROM task_label_assignees
+           WHERE (task_id, label_id) IN (
+             SELECT task_id, label_id FROM (
+               SELECT
+                 tla.task_id AS task_id,
+                 tla.label_id AS label_id,
+                 row_number() OVER (
+                   PARTITION BY tla.task_id, c.canonical_id
+                   ORDER BY (tla.label_id = c.canonical_id) DESC, c.sort_order, c.id
+                 ) AS rn
+               FROM task_label_assignees tla
+               JOIN (
+                 SELECT id, sort_order,
+                        first_value(id) OVER (
+                          PARTITION BY project_id, lower(name) ORDER BY sort_order, id
+                        ) AS canonical_id
+                 FROM task_labels
+               ) c ON c.id = tla.label_id
+             ) WHERE rn > 1
+           )
+        `);
+        // Step 2 — repoint the surviving dup assignees to the canonical label id (at
+        // most one survivor per (task, canonical group), so no PK self-collision).
+        this.db.exec(`
+          UPDATE task_label_assignees
+             SET label_id = (
+               SELECT c.canonical_id FROM (
+                 SELECT id,
+                        first_value(id) OVER (
+                          PARTITION BY project_id, lower(name) ORDER BY sort_order, id
+                        ) AS canonical_id
+                 FROM task_labels
+               ) c WHERE c.id = task_label_assignees.label_id
+             )
+           WHERE label_id IN (
+             SELECT id FROM (
+               SELECT id,
+                      first_value(id) OVER (
+                        PARTITION BY project_id, lower(name) ORDER BY sort_order, id
+                      ) AS canonical_id
+               FROM task_labels
+             ) WHERE id <> canonical_id
+           )
+        `);
+        // Step 3 — delete the now-unreferenced duplicate label rows.
+        this.db.exec(`
+          DELETE FROM task_labels
+           WHERE id IN (
+             SELECT id FROM (
+               SELECT id,
+                      first_value(id) OVER (
+                        PARTITION BY project_id, lower(name) ORDER BY sort_order, id
+                      ) AS canonical_id
+               FROM task_labels
+             ) WHERE id <> canonical_id
+           )
+        `);
+        // Step 4 — the unique constraint (the resolver's ON CONFLICT target).
+        this.db.exec(
+          `CREATE UNIQUE INDEX IF NOT EXISTS ux_task_labels_project_lower_name
+             ON task_labels(project_id, lower(name))`,
+        );
+      });
+      dedup();
+    }
   }
 
   // ─── Sequence ────────────────────────────────────────────────────
@@ -2811,35 +2897,32 @@ export class CyborgStorage {
     // orphan-create (matches pg-sync). create/update only ever pass a real project.
     if (!proj) return [];
 
-    const existing = this.getTaskLabelsByProjectStmt.all(projectId) as Array<{
-      id: string;
-      name: string;
-    }>;
-    const byName = new Map<string, string>();
-    for (const row of existing) byName.set(row.name.trim().toLowerCase(), row.id);
-
     const tail = this.getTaskLabelsTailSortStmt.get(projectId) as { maxSort: number | null };
     let nextSort = (tail?.maxSort ?? -1) + 1;
 
     const ids: string[] = [];
     for (const name of wanted) {
-      const found = byName.get(name.toLowerCase());
-      if (found) {
-        ids.push(found);
-        continue;
-      }
-      const labelId = randomUUID();
-      this.insertTaskLabelStmt.run(
-        labelId,
+      // Atomic get-or-create: the upsert returns the new id, or nothing on conflict
+      // (label already exists in this batch/project), in which case we look it up by
+      // the same case-insensitive key. `wanted` is already lower-dedup'd, so this is
+      // conflict-safe within the batch too.
+      const inserted = this.insertTaskLabelStmt.get(
+        randomUUID(),
         projectId,
         proj.workspace_id,
         name,
         "#94a3b8",
         nextSort,
-      );
-      nextSort += 1;
-      byName.set(name.toLowerCase(), labelId);
-      ids.push(labelId);
+      ) as { id: string } | undefined;
+      if (inserted) {
+        nextSort += 1;
+        ids.push(inserted.id);
+        continue;
+      }
+      const existing = this.getTaskLabelByLowerNameStmt.get(projectId, name) as
+        | { id: string }
+        | undefined;
+      if (existing) ids.push(existing.id);
     }
     return ids;
   }

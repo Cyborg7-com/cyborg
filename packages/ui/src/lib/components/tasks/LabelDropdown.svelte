@@ -35,6 +35,8 @@
     labelChipAdd,
     checkBoxBase,
     checkBoxChecked,
+    workLabelChip,
+    workLabelDot,
   } from "$lib/tasks/ui.js";
   import { haptic } from "$lib/mobile/haptics.js";
   import { cn } from "$lib/utils.js";
@@ -57,6 +59,7 @@
     onCreate,
     placeholder = "Labels",
     variant = "chip",
+    maxRender,
     class: className,
   }: {
     // The currently-selected label ids. Controlled — never mutated here.
@@ -77,6 +80,12 @@
     // directly (no trigger/popover) for the mobile picker sheet. Multi-select:
     // tapping a row toggles it and the sheet stays open.
     variant?: "chip" | "row" | "inline";
+    // Board-parity cap for the CHIP trigger: when set, render up to N bordered
+    // board chips (workLabelChip: a color dot + name) then collapse the rest to a
+    // single "{n} Labels" summary chip — Plane's all-properties.tsx behaviour. Left
+    // unset (the detail row / default) renders every selected label as a full
+    // color-triad pill. Only affects the trigger's rendering, never the catalog.
+    maxRender?: number;
     class?: string;
   } = $props();
 
@@ -94,6 +103,14 @@
 
   const selected = $derived(options.filter((l) => value.includes(l.id)));
   const triggerClass = $derived(variant === "row" ? propertyEditor : inlineRowControl);
+
+  // Board-parity (Plane all-properties.tsx): when maxRender is set, the chip
+  // trigger shows up to N board chips then a single "{n} Labels" summary. `shown`
+  // is the visible slice; `labelSummary` is the collapse label (empty = no collapse).
+  const shownLabels = $derived(maxRender == null ? selected : selected.slice(0, maxRender));
+  const labelSummary = $derived(
+    maxRender != null && selected.length > maxRender ? `${selected.length} Labels` : "",
+  );
 
   // Filter state for the in-menu search + create-by-name affordance.
   let query = $state("");
@@ -202,8 +219,25 @@
         <!-- chip variant with nothing set: a quiet dashed "+ label" stub -->
         <span class={cn(labelChipAdd)}>{placeholder}</span>
       {/if}
+    {:else if maxRender != null}
+      <!-- Board card: bordered board chips (workLabelChip: a color dot + name) up
+           to maxRender, then a single "{n} Labels" summary chip — Plane parity. -->
+      <span class="flex min-w-0 flex-wrap items-center gap-1.5">
+        {#each shownLabels as l (l.id)}
+          <span class={workLabelChip}>
+            <span class={cn(workLabelDot, dotFill(l.color))}></span>
+            <span class="max-w-[200px] truncate">{l.name}</span>
+          </span>
+        {/each}
+        {#if labelSummary}
+          <span class={workLabelChip} title={selected.map((l) => l.name).join(", ")}>
+            <span class="size-2 shrink-0 rounded-full bg-accent"></span>
+            {labelSummary}
+          </span>
+        {/if}
+      </span>
     {:else}
-      <!-- Render the picked labels as their color chips, both variants. -->
+      <!-- Detail row (no cap): each picked label as its full color-triad pill. -->
       <span class="flex min-w-0 flex-wrap items-center gap-1">
         {#each selected as l (l.id)}
           <span class={cn(labelChip, triad(l.color))}>
@@ -241,7 +275,10 @@
       >
         <span class={cn(checkBoxBase, checked && checkBoxChecked)}>
           {#if checked}
-            <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <!-- size-[9px] opts the checkmark OUT of DropdownMenuItem's
+                 [&_svg:not([class*='size-'])]:size-4 rule, which would otherwise
+                 force it to 16px and overflow the 12px checkbox. -->
+            <svg class="size-[9px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="m5 12 5 5 9-11" />
             </svg>
           {/if}
@@ -257,7 +294,9 @@
         class={cn(filterOption, "cursor-pointer text-accent")}
         onSelect={() => create()}
       >
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <!-- size-[14px] keeps the "+" at its intended 14px inside DropdownMenuItem
+             (the :not([class*='size-']) rule would otherwise force it to 16px). -->
+        <svg class="size-[14px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <path d="M12 5v14M5 12h14" />
         </svg>
         <span class="truncate">Create “{query.trim()}”</span>
