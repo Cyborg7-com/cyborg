@@ -18,6 +18,7 @@
   import RecipeIcon from "$lib/components/integrations/RecipeIcon.svelte";
   import { client, recipesState } from "$lib/state/app.svelte.js";
   import { RECIPE_CATALOG } from "$lib/integrations/recipes-catalog.js";
+  import { openExternalUrl } from "$lib/desktop-terminal.js";
   import type { GithubInstallation, SlackInstallation } from "$lib/ws-client.js";
 
   const workspaceId = $derived(page.params.id ?? "");
@@ -185,7 +186,7 @@
       {:else if connected}
         <Button href={detailHref} size="sm" variant="outline">Configure</Button>
       {:else if installUrl}
-        <Button href={installUrl} size="sm">Connect GitHub</Button>
+        <Button size="sm" onclick={() => { if (installUrl) openExternalUrl(installUrl); }}>Connect GitHub</Button>
       {:else}
         <Button
           size="sm"
@@ -236,7 +237,7 @@
       {:else if slackConnected}
         <Button href={slackDetailHref} size="sm" variant="outline">Configure</Button>
       {:else if slackInstallUrl}
-        <Button href={slackInstallUrl} size="sm">Connect Slack</Button>
+        <Button size="sm" onclick={() => { if (slackInstallUrl) openExternalUrl(slackInstallUrl); }}>Connect Slack</Button>
       {:else}
         <Button size="sm" disabled title="Slack is not configured yet">Connect Slack</Button>
       {/if}

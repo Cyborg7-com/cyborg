@@ -19,6 +19,7 @@
   import SlackIcon from "$lib/components/SlackIcon.svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
   import { Button } from "$lib/components/ui/button/index.js";
+  import { openExternalUrl } from "$lib/desktop-terminal.js";
   import { Input } from "$lib/components/ui/input/index.js";
   import * as Select from "$lib/components/ui/select/index.js";
   import type { SlackInstallation, SlackChannelLink } from "$lib/ws-client.js";
@@ -267,7 +268,7 @@
           </p>
         </div>
         {#if installUrl}
-          <Button href={installUrl} size="sm">Connect Slack</Button>
+          <Button size="sm" onclick={() => { if (installUrl) openExternalUrl(installUrl); }}>Connect Slack</Button>
         {:else}
           <Button size="sm" disabled title="Checking Slack configuration…">Connect Slack</Button>
         {/if}

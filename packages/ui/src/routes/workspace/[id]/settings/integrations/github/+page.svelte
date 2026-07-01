@@ -19,6 +19,7 @@
   import GitHubIcon from "$lib/components/GitHubIcon.svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
   import { Button } from "$lib/components/ui/button/index.js";
+  import { openExternalUrl } from "$lib/desktop-terminal.js";
   import LinkGithubRepoModal from "$lib/components/integrations/LinkGithubRepoModal.svelte";
   import GithubProjectSyncList from "$lib/components/integrations/GithubProjectSyncList.svelte";
   import GithubPrStateMapping from "$lib/components/integrations/GithubPrStateMapping.svelte";
@@ -131,7 +132,7 @@
     try {
       const res = await client.startGithubOAuth(workspaceId, page.url.pathname);
       if (res.configured && res.url) {
-        window.location.href = res.url;
+        openExternalUrl(res.url);
         return;
       }
       personalNotConfigured = true;
@@ -221,7 +222,7 @@
         </p>
       </div>
       {#if installUrl}
-        <Button href={installUrl} size="sm">Connect Organization</Button>
+        <Button size="sm" onclick={() => { if (installUrl) openExternalUrl(installUrl); }}>Connect Organization</Button>
       {:else}
         <Button
           size="sm"
