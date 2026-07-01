@@ -5628,6 +5628,26 @@ export class PgSync {
     }));
   }
 
+  // Owner identity per LIVE agent session for a workspace, so the relay can
+  // owner-scope its live agent list against the ONE table that is actually
+  // populated (agent_bindings mirror is empty in prod). Keyed by agentId
+  // (== agent_sessions.id). userId is the resolved GLOBAL account id, or NULL
+  // for an owner-less session (a scheduler-less autonomous spawn) which the
+  // relay treats as admin-only. One query per list — never N+1.
+  async getAgentSessionOwnersByWorkspace(
+    workspaceId: string,
+  ): Promise<Array<{ agentId: string; userId: string | null; cyboId: string | null }>> {
+    const rows = await this.db
+      .select({
+        agentId: schema.agentSessions.agentId,
+        userId: schema.agentSessions.userId,
+        cyboId: schema.agentSessions.cyboId,
+      })
+      .from(schema.agentSessions)
+      .where(eq(schema.agentSessions.workspaceId, workspaceId));
+    return rows.map((r) => ({ agentId: r.agentId, userId: r.userId, cyboId: r.cyboId }));
+  }
+
   // ─── Cybos ───────────────────────────────────────────────────────
 
   async createCybo(opts: {

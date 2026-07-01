@@ -434,6 +434,17 @@ export class ScheduleRunner {
     }
   }
 
+  // Resolve the schedule/task CREATOR's real email (daemon-local id -> users.email)
+  // so an autonomous spawn stamps the initiator on its binding and the relay
+  // owner-scopes agent_sessions to the scheduler (privacy: no owner-less sessions).
+  // Never returns the synthetic "<id>@remote.local" placeholder — that can't match
+  // a real cloud email, so return null and let the mirror's own fallback handle it.
+  private resolveCreatorEmail(localId: string): string | null {
+    const email = this.storage.getUserById(localId)?.email ?? null;
+    if (email && email.toLowerCase().endsWith("@remote.local")) return null;
+    return email;
+  }
+
   private async isLicensePaused(workspaceId: string): Promise<boolean> {
     const pg = this.storage.pg;
     if (!pg) return false; // solo / unbilled daemon — no license to pause
@@ -525,6 +536,7 @@ export class ScheduleRunner {
           workspaceId: schedule.workspace_id,
           cyboIdOrSlug: schedule.cybo_id,
           userId: schedule.created_by,
+          initiatedByEmail: this.resolveCreatorEmail(schedule.created_by),
           serverId: this.serverId,
           cyborg7McpBaseUrl: this.cyborg7McpBaseUrl,
           // A scheduled run is UNATTENDED — no human to answer a permission prompt —

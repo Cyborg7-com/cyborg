@@ -216,6 +216,36 @@ export function filterLiveRowsForViewer(
   });
 }
 
+// Live-list owner scoping via agent_sessions (the table that is ACTUALLY
+// populated; the agent_bindings mirror is empty in prod so filterLiveRowsForViewer
+// is a no-op there). This is the REGULAR sidebar list, which is OWNER-SCOPED for
+// EVERYONE — admins included. An admin's personal sidebar shows THEIR sessions
+// only; the admin AUDIT view (see-all) is a SEPARATE, admin-gated endpoint
+// (cyborg:list_daemon_sessions -> auditAgentRows/buildAuditAgentRow) that does NOT
+// route through this filter. So there is NO admin bypass here. A CYBO session
+// (cyboId != null) is OWNER-SCOPED:
+//   - owner-less (userId == null)  -> hidden from everyone (fail-closed; never "visible to all")
+//   - owned by the viewer          -> visible
+//   - owned by someone else        -> dropped
+// A NON-cybo session (cyboId == null, e.g. a human's own coding session) and any
+// agentId ABSENT from agent_sessions are LEFT to the daemon's own per-user scoping
+// (kept here) — this filter only closes the cybo-session leak.
+// `sessions` maps agentId -> { userId, cyboId }.
+export function filterLiveRowsByAgentSessionOwner(
+  rows: Record<string, unknown>[],
+  sessions: Map<string, { userId: string | null; cyboId: string | null }>,
+  viewerGlobalId: string | null,
+): Record<string, unknown>[] {
+  return rows.filter((row) => {
+    const id = row.agentId as string | undefined;
+    const s = id ? sessions.get(id) : undefined;
+    if (!s) return true; // not in agent_sessions -> trust daemon scoping
+    if (s.cyboId == null) return true; // non-cybo session -> out of scope of this fix
+    if (s.userId == null) return false; // owner-less cybo session -> hidden from everyone (fail-closed)
+    return !!viewerGlobalId && s.userId === viewerGlobalId; // owner-only
+  });
+}
+
 // Daemon-owner AUDIT row from a mirrored binding (sessions-daemon-audit-visibility
 // / #993). Same projection as buildOfflineAgentRow PLUS the `ephemeral`/`internal`
 // badges. internal is always false offline (no live agent to read it from), and

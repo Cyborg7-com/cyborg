@@ -213,6 +213,12 @@ export interface DispatchTaskOptions {
  * The claim is taken FIRST so the create/update immediate path and the
  * schedule-runner tick can both call this without double-firing.
  */
+function resolveTaskCreatorEmail(storage: DualStorage, createdBy: string): string | null {
+  const email = storage.getUserById(createdBy)?.email ?? null;
+  if (email && email.toLowerCase().endsWith("@remote.local")) return null;
+  return email;
+}
+
 export async function dispatchTaskToAgent(opts: DispatchTaskOptions): Promise<boolean> {
   const { storage, agentManager, task, reason, logger } = opts;
 
@@ -240,6 +246,11 @@ export async function dispatchTaskToAgent(opts: DispatchTaskOptions): Promise<bo
       workspaceId: task.workspace_id,
       cyboIdOrSlug: cybo.id,
       userId: task.created_by,
+      // Stamp the task CREATOR's real email so this autonomous dispatch is
+      // owner-scoped to whoever created the task (privacy: no owner-less sessions).
+      // Skip the synthetic "<id>@remote.local" placeholder (never matches a real
+      // cloud email) — let the binding mirror's fallback handle those.
+      initiatedByEmail: resolveTaskCreatorEmail(opts.storage, task.created_by),
       serverId: opts.serverId,
       cyborg7McpBaseUrl: opts.cyborg7McpBaseUrl,
       context: {

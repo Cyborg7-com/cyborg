@@ -67,6 +67,7 @@ import {
 import {
   offlineAgentRows,
   filterLiveRowsForViewer,
+  filterLiveRowsByAgentSessionOwner,
   auditAgentRows,
   shouldGcOwnerBindings,
   canClearAgentBinding,
@@ -1366,6 +1367,35 @@ async function main() {
         for (const row of offline) {
           const id = row.agentId as string | undefined;
           if (id && !agg.agents.has(id)) agg.agents.set(id, row);
+        }
+      }
+      // agent_sessions is the table that's actually populated (the agent_bindings
+      // mirror above is empty in prod), so owner-scope the live cybo rows here too —
+      // this is the load-bearing filter. Batched: ONE read per list.
+      let sessionOwners: Awaited<
+        ReturnType<NonNullable<typeof pg>["getAgentSessionOwnersByWorkspace"]>
+      > | null = null;
+      if (pg) {
+        try {
+          sessionOwners = await pg.getAgentSessionOwnersByWorkspace(agg.workspaceId);
+        } catch (err) {
+          relayLog.error(
+            { err, workspaceId: agg.workspaceId },
+            "getAgentSessionOwnersByWorkspace failed -- agent_sessions owner-scope skipped this list",
+          );
+        }
+      }
+      if (sessionOwners) {
+        const owners = new Map<string, { userId: string | null; cyboId: string | null }>();
+        for (const s of sessionOwners) owners.set(s.agentId, { userId: s.userId, cyboId: s.cyboId });
+        for (const id of Array.from(agg.agents.keys())) {
+          const row = agg.agents.get(id);
+          if (
+            row &&
+            filterLiveRowsByAgentSessionOwner([row], owners, agg.guestUserId).length === 0
+          ) {
+            agg.agents.delete(id);
+          }
         }
       }
     }
