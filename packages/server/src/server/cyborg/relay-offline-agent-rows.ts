@@ -73,26 +73,23 @@ export function buildOfflineAgentRow(b: OfflineAgentBinding): Record<string, unk
 // `isOwner`; the rule — which sessions are owner-scoped vs shared — lives here so
 // the live and offline lists can never disagree.
 //
-// A session is visible to the requesting user when:
+// PRIVACY (2026-06-30): EVERY cybo agent SESSION is OWNER-SCOPED (private to its
+// initiator). A session is visible to the requesting user ONLY when:
 //   - it has NO initiator (legacy / system session — visible to all), OR
-//   - the user IS its initiator (their own session, channel-bound or DM), OR
-//   - it is a NON-ephemeral channel-bound session (a deliberately SHARED channel
-//     agent — everyone in the channel sees it).
+//   - the user IS its initiator (their own session, channel-bound or DM).
 //
-// EPHEMERAL sessions (@-mention / slash-command summons) are OWNER-SCOPED even when
-// channel-bound: they belong to the user who triggered them and must appear ONLY in
-// that user's list. Letting a channel-bound ephemeral through the "shared channel"
-// branch is exactly the 2026-06-12 ghost-session leak (a member saw — and could
-// resume — every other member's mention summons).
+// A channel-bound session is NO LONGER shared with the whole channel. It was: a
+// human-spawned, non-ephemeral, non-autonomous channel cybo used to short-circuit
+// to `return true` for every channel member — so all members saw (and could resume
+// / archive) each other's cybo sessions. That is the privacy incident this fixes.
+// The cybo still POSTS to its channel; only the agent-session LIST visibility is
+// scoped. This does NOT touch channel messages / message routing.
 //
-// AUTONOMOUS sessions (cron / scheduled / webhook fires — spawnCybo with
-// autonomous:true) are LIKEWISE owner-scoped: a scheduled cybo (e.g. a per-user
-// "market brief" cron) is a PRIVATE session of whoever scheduled it, not a shared
-// channel resource — even though it is non-ephemeral and channel-bound (it posts
-// its output INTO the channel). Without this an autonomous binding leaked into
-// EVERY workspace member's sidebar via the channel short-circuit. So the channel
-// short-circuit is reached ONLY for non-ephemeral, NON-autonomous bindings — i.e. a
-// genuinely human-spawned, deliberately SHARED interactive channel agent.
+// EPHEMERAL (@-mention / slash summons) and AUTONOMOUS (cron / scheduled / webhook)
+// sessions were already owner-scoped by the removed short-circuit's guards; they
+// stay owner-scoped here via the same isOwner gate. The `ephemeral`/`autonomous`
+// flags no longer change the outcome (all channel sessions are owner-scoped now)
+// but are kept in the signature for compat with #1077's plumbing and callers.
 export function agentBindingVisibleCore(
   b: {
     channelId: string | null;
@@ -104,12 +101,29 @@ export function agentBindingVisibleCore(
 ): boolean {
   if (!b.initiatedBy) return true;
   if (isOwner()) return true;
-  // A non-ephemeral, NON-autonomous channel agent is shared with the whole channel.
-  // Ephemeral (mention/slash) and autonomous (cron/scheduled/webhook) channel
-  // sessions are private to their initiator (already admitted by the isOwner check
-  // above) and must NOT take this shared short-circuit.
-  if (b.channelId && !b.ephemeral && !b.autonomous) return true;
+  // Fail-closed: a channel-bound session is NOT shared — only its initiator (above)
+  // or a legacy/system no-initiator session (above) is visible.
   return false;
+}
+
+// The ONE initiator-equality check, shared by every "is the caller the session's
+// initiator?" gate (dispatcher's canReadLiveSession / handleArchiveAgent /
+// handleSendAgentPrompt, and any relay-side sibling). Two identities can name the
+// same person: the raw account id (same id-space) OR the canonical email (bridged
+// across the local/cloud id namespaces — initiated_by is a LOCAL SQLite id while a
+// cloud caller's id is a CLOUD id). The email match is CASE-INSENSITIVE (a
+// mixed-case `Seb@x.com` must not be denied against a stored `seb@x.com`), and
+// NULL-guarded on BOTH sides so two null emails never collide into a false match.
+export function isAuthorizedInitiator(
+  initiator: { id: string | null; email: string | null },
+  caller: { id: string | null; email: string | null },
+): boolean {
+  if (!!initiator.id && !!caller.id && initiator.id === caller.id) return true;
+  return (
+    !!initiator.email &&
+    !!caller.email &&
+    initiator.email.toLowerCase() === caller.email.toLowerCase()
+  );
 }
 
 // OFFLINE-path (relay) visibility. Ownership is matched two ways, so BOTH new and
@@ -154,16 +168,22 @@ export function offlineBindingVisible(
 
 // Re-filter the relay's MERGED LIVE list_agents rows for per-user visibility
 // (live-list IDOR gap). The daemon already scopes its OWN list (handleListAgents),
-// but it matches `initiated_by` (a daemon-LOCAL id) against the GLOBAL guestId, so
-// when the email->local-id bridge misses an AUTONOMOUS (cron/scheduled) live session
-// can slip through -- and the relay merges live rows VERBATIM. Cross-reference the
-// PG mirror (the SAME `autonomous` flag #1077 persists) and drop any autonomous row
-// the viewer doesn't own (by canonical email OR global account id). Intentionally
-// CONSERVATIVE: ONLY rows the mirror marks `autonomous` are re-checked, so a shared
-// channel agent -- or the viewer's own private session the daemon legitimately
-// included -- is NEVER wrongly hidden (no false-negative on the common path). Rows
-// absent from the mirror (a fresh live spawn not yet mirrored) are kept and left to
-// the daemon's own scoping. `mirror` maps agentId -> its owner-identity fields.
+// but it matches `initiated_by` (a daemon-LOCAL id) against the GLOBAL guestId, so a
+// live session the email->local-id bridge misses slips through -- and the relay
+// merges live rows VERBATIM. Worse, an OWNING DAEMON still on OLD code returns
+// UNSCOPED rows entirely, so a non-owner sees a peer's session until every daemon
+// updates. So the RELAY enforces the SAME owner rule (agentBindingVisibleCore, via
+// offlineBindingVisible) here, the moment IT deploys -- no waiting on the daemon.
+//
+// For EVERY row the PG mirror knows, drop it unless the viewer is its owner (matched
+// by canonical email OR global account id) or it has no initiator (legacy/system).
+// This scopes channel-bound + non-ephemeral rows regardless of `autonomous` --
+// closing the non-autonomous channel-session hole the earlier autonomous-only check
+// left open. The viewer's OWN session is kept (no false-positive), a peer's is
+// dropped (no false-negative). Rows ABSENT from the mirror are kept and left to the
+// daemon's own scoping: that's a fresh live spawn not yet mirrored, OR an EPHEMERAL
+// session (never mirrored) whose one-turn ownership the daemon already gates.
+// `mirror` maps agentId -> its owner-identity fields.
 export function filterLiveRowsForViewer(
   rows: Record<string, unknown>[],
   mirror: Map<
@@ -181,14 +201,14 @@ export function filterLiveRowsForViewer(
   return rows.filter((row) => {
     const id = row.agentId as string | undefined;
     const b = id ? mirror.get(id) : undefined;
-    // Not a mirrored autonomous session -> trust the daemon's own per-user scoping.
-    if (!b || !b.autonomous) return true;
+    // Not mirrored (fresh spawn or ephemeral) -> trust the daemon's per-user scoping.
+    if (!b) return true;
     return offlineBindingVisible(
       {
         channelId: b.channelId,
         initiatedBy: b.initiatedBy,
         initiatedByEmail: b.initiatedByEmail,
-        autonomous: true,
+        autonomous: b.autonomous,
       },
       guestEmail,
       viewerGlobalId,
@@ -244,19 +264,20 @@ export function shouldGcOwnerBindings(opts: {
 }
 
 // Authorization for CLEARING / ARCHIVING an agent session from the relay (the PG
-// mirror). The SAME rule the daemon's handleArchiveAgent enforces: a SHARED channel
-// agent (channel-bound; the PG mirror only ever holds NON-ephemeral bindings, so a
-// channelId ⇒ shared) is clearable by ANY member. Otherwise the session is PRIVATE
-// and clearable only by its INITIATOR (matched by canonical email, case-insensitive,
-// OR by the global account id == initiated_by) OR a workspace OWNER/ADMIN. Shared by
-// the relay's ONLINE owner-archive bypass and its OFFLINE clear path so the two can
-// never disagree.
+// mirror). The SAME rule the daemon's handleArchiveAgent enforces.
+//
+// PRIVACY (2026-06-30): a channel-bound session is NO LONGER clearable by any
+// member. It was — a channelId short-circuited to `return true`, so any member
+// could globally archive+kill another user's channel cybo session. Now EVERY
+// session (channel-bound or DM) is clearable ONLY by its INITIATOR (matched by
+// canonical email, case-insensitive, OR by the global account id == initiated_by)
+// OR a workspace OWNER/ADMIN. Fail-closed: a non-owner/non-initiator is DENIED.
+// Shared by the relay's ONLINE owner-archive bypass and its OFFLINE clear path so
+// the two can never disagree.
 export function canClearAgentBinding(
   b: { channelId: string | null; initiatedBy: string | null; initiatedByEmail: string | null },
   caller: { userId: string; email: string | null; role: string | null },
 ): boolean {
-  const isSharedChannelAgent = !!b.channelId;
-  if (isSharedChannelAgent) return true;
   const isAdmin = caller.role === "owner" || caller.role === "admin";
   const isInitiator =
     (!!b.initiatedByEmail &&
@@ -266,18 +287,50 @@ export function canClearAgentBinding(
   return isAdmin || isInitiator;
 }
 
+// Authorization for DRIVING (prompting) a session over the cloud relay forward
+// (`cyborg:agent_prompt_forward`). The cloud relay gates send_agent_prompt on
+// workspace-membership + `chat` scope only (NO initiator check), so the OWNING
+// DAEMON is the sole initiator gate — this is that gate. The relay-parity of the
+// local handleSendAgentPrompt drive check.
+//
+// PRIVACY (2026-06-30): EVERY cybo session is owner-scoped now — channel-bound ones
+// included. A channel-bound session used to short-circuit to `return true` (any
+// member with chat scope could drive another user's channel cybo — the incident
+// hijack); that short-circuit is GONE. A session with an initiator is drivable ONLY
+// by that initiator, matched by the forwarded cloud id (== initiated_by) OR by the
+// initiator's canonical email (case-insensitive). initiated_by is a LOCAL SQLite id
+// and the forward's fromUserId is a CLOUD id for the same person, so the caller
+// resolves the initiator's email (via storage) and passes it as `initiatorEmail`.
+// FAIL-CLOSED: a forward that can't prove it's the initiator (no fromUserId AND no
+// matching email) is DENIED. A session with NO recorded initiator has nobody to
+// restrict against ⇒ allowed (mirrors handleSendAgentPrompt).
+export function isPromptFromInitiatorForward(
+  binding: { initiatedBy: string | null },
+  initiatorEmail: string | null,
+  fwd: { fromUserId?: string; fromEmail?: string | null },
+): boolean {
+  if (!binding.initiatedBy) return true;
+  if (fwd.fromUserId && binding.initiatedBy === fwd.fromUserId) return true;
+  return (
+    !!initiatorEmail &&
+    !!fwd.fromEmail &&
+    initiatorEmail.toLowerCase() === fwd.fromEmail.toLowerCase()
+  );
+}
+
 // Authorization for READING a session's transcript / injected context from the
-// relay (IDOR fix). STRICTER than canClearAgentBinding for the channel case: a
-// transcript read requires ACTUAL channel MEMBERSHIP (the caller-supplied
-// `isChannelMember`, a PG lookup), not mere workspace membership — a non-member
-// must never read a private channel's cybo transcript. Beyond that the rule
-// matches: the session INITIATOR (email- or id-bridged) OR a workspace OWNER/ADMIN
-// may always read. Fail-closed: no channel membership AND not initiator/admin ⇒ deny.
+// relay (IDOR fix). Cybo sessions are OWNER-SCOPED now — channel-bound included
+// (privacy incident 2026-06-30) — so a transcript is readable ONLY by the session
+// INITIATOR (email- or id-bridged) OR a workspace OWNER/ADMIN. Channel membership
+// NO LONGER grants a read: a channel-bound session is one user's private
+// conversation, not the channel's. Fail-closed: not initiator/admin ⇒ deny.
+// `isChannelMember` is retained in the signature for call-site compatibility but is
+// deliberately unused now that membership no longer authorizes a read (the relay
+// caller passes `false` and skips the getChannelMemberRole lookup entirely).
 export function canReadAgentSession(
   b: { channelId: string | null; initiatedBy: string | null; initiatedByEmail: string | null },
   caller: { userId: string; email: string | null; role: string | null; isChannelMember: boolean },
 ): boolean {
-  if (b.channelId && caller.isChannelMember) return true;
   const isAdmin = caller.role === "owner" || caller.role === "admin";
   const isInitiator =
     (!!b.initiatedByEmail &&

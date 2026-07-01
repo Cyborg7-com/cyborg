@@ -213,7 +213,7 @@ import {
   resolveLocalCybo,
 } from "./cybo-manager.js";
 import { mentionInvocationGuard, watchInvocationGuard } from "./cybo-mention-invoke.js";
-import { agentBindingVisibleCore } from "./relay-offline-agent-rows.js";
+import { agentBindingVisibleCore, isAuthorizedInitiator } from "./relay-offline-agent-rows.js";
 import {
   runDaemonSelfUpdate,
   latestDaemonVersion,
@@ -5486,19 +5486,20 @@ export class CyborgDispatcher {
       return;
     }
 
-    // A session is PRIVATE (promptable only by its initiator) unless it is a SHARED
-    // channel agent — i.e. channel-bound AND non-ephemeral. DM agents (no channel)
-    // and EPHEMERAL channel summons (@-mentions / slash commands) are private to the
-    // user who started them: a non-initiator must not be able to drive someone
-    // else's mention session (the ownership leak this guard also protects on read).
-    const isSharedChannelAgent = !!binding.channel_id && binding.ephemeral !== 1;
-    if (!isSharedChannelAgent && binding.initiated_by && binding.initiated_by !== auth.user.id) {
+    // A session is PRIVATE — promptable only by its initiator. Every cybo session
+    // (including a channel-bound one) is a per-user conversation, owner-scoped for
+    // visibility + archive, so a non-initiator must not be able to DRIVE someone
+    // else's session. DM and @-mention/slash summons were always private; channel
+    // cybo sessions are private too now (privacy incident 2026-06-30).
+    if (binding.initiated_by && binding.initiated_by !== auth.user.id) {
       // binding.initiated_by is a LOCAL SQLite id; auth.user.id can be a CLOUD id
       // for the same person (divergent namespaces). Bridge by email — only reject
       // when it's genuinely a different account.
       const initiator = this.storage.getUserById(binding.initiated_by);
-      const sameUser =
-        !!initiator?.email && !!auth.user.email && initiator.email === auth.user.email;
+      const sameUser = isAuthorizedInitiator(
+        { id: initiator?.id ?? null, email: initiator?.email ?? null },
+        { id: auth.user.id, email: auth.user.email ?? null },
+      );
       if (!sameUser) {
         emit({
           type: "cyborg:error",
@@ -8893,18 +8894,17 @@ export class CyborgDispatcher {
 
   // Read-authorization for a LIVE session's transcript/context (IDOR fix). The
   // hole: handleFetchAgentTimeline ignored `auth` on the live path, so ANY
-  // workspace member could read ANY session by agentId. A session is readable by:
+  // workspace member could read ANY session by agentId. Now that cybo sessions are
+  // OWNER-SCOPED (private, incl. channel-bound — privacy incident 2026-06-30), the
+  // read gate matches: a session is readable ONLY by:
   //   • its INITIATOR (binding.initiated_by, bridged by email — initiated_by is a
   //     LOCAL SQLite id, auth.user.id can be a CLOUD id for the same person; the
-  //     same #810 bridge handleArchiveAgent / the prompt path use), OR
-  //   • a MEMBER of the binding's channel (channel-bound sessions are collaborative;
-  //     a non-member must NOT read a private channel's cybo transcript), OR
+  //     same #810 bridge handleSendAgentPrompt / handleArchiveAgent use), OR
   //   • an audit-visible admin (isAuditVisible — the daemon owner / #993 grant).
-  // FAIL-CLOSED: when the daemon can't resolve channel membership (no PG / not a
-  // channel session) the channel clause is simply false, so only initiator/admin
-  // pass. getChannelMembers returns CLOUD ids + emails (innerJoins users), so match
-  // the caller by either to survive the local/cloud id divergence. Solo mode (no PG)
-  // is single-tenant — the local caller IS the host (isAuditVisible returns true).
+  // A channel member is NO LONGER allowed just by membership — a channel-bound
+  // session is one user's private conversation, not the channel's. FAIL-CLOSED: only
+  // initiator/admin pass. Solo mode (no PG) is single-tenant — the local caller IS
+  // the host (isAuditVisible returns true).
   private async canReadLiveSession(
     binding: { initiated_by: string | null; channel_id: string | null },
     workspaceId: string,
@@ -8912,29 +8912,14 @@ export class CyborgDispatcher {
   ): Promise<boolean> {
     // Initiator (email-bridged across the local/cloud id namespaces).
     if (binding.initiated_by) {
-      if (binding.initiated_by === auth.user.id) return true;
       const initiator = this.storage.getUserById(binding.initiated_by);
-      if (initiator?.email && auth.user.email && initiator.email === auth.user.email) return true;
-    }
-    // Channel member (PG-only; getChannelMembers drops cybos, returns humans).
-    const pg = this.storage.pg;
-    if (binding.channel_id && pg) {
-      try {
-        const members = await pg.getChannelMembers(binding.channel_id);
-        const email = auth.user.email?.toLowerCase();
-        if (
-          members.some(
-            (m) => m.userId === auth.user.id || (!!email && m.email?.toLowerCase() === email),
-          )
-        ) {
-          return true;
-        }
-      } catch (err) {
-        // Fail closed on a membership lookup error — fall through to the admin gate.
-        this.logger?.warn(
-          { err, channelId: binding.channel_id },
-          "[timeline] channel-membership check failed — denying channel-member access",
-        );
+      if (
+        isAuthorizedInitiator(
+          { id: binding.initiated_by, email: initiator?.email ?? null },
+          { id: auth.user.id, email: auth.user.email ?? null },
+        )
+      ) {
+        return true;
       }
     }
     // Auditor (admin scope on this daemon) — also the solo/single-tenant allow.
@@ -9258,50 +9243,44 @@ export class CyborgDispatcher {
     }
 
     // Ownership guard (#810 security fix; previously _auth was unused, so any
-    // member could archive anyone's private session). The SAME rule the relay's
-    // offline-clear path uses: a SHARED channel agent (channel-bound AND
-    // non-ephemeral) is archivable by ANY member; otherwise the session is PRIVATE
-    // and archivable only by its INITIATOR (bridged by email/id) OR a workspace
-    // OWNER/ADMIN (so an owner can clear members' clutter). Applied REGARDLESS of
-    // whether a binding row exists — a LIVE agent with a null/orphaned binding must
-    // NOT bypass the check. Identity is derived from the binding when present, else
-    // the live agent's labels (which never carry the initiator), so a null-binding
-    // PRIVATE session is archivable only by an owner/admin, never a random member.
+    // member could archive anyone's private session). PRIVACY (2026-06-30): the
+    // SHARED-channel-skips-the-check branch is REMOVED — it let ANY member globally
+    // archive+kill another user's channel cybo session. The check now ALWAYS runs,
+    // regardless of channelId. The SAME rule the relay's offline-clear path
+    // (canClearAgentBinding) enforces: a session is archivable ONLY by its INITIATOR
+    // (bridged by email/id) OR a workspace OWNER/ADMIN (so an owner can clear a
+    // member's clutter). Fail-closed: a non-owner/non-initiator is DENIED. Applied
+    // REGARDLESS of whether a binding row exists — a LIVE agent with a null/orphaned
+    // binding must NOT bypass the check. Identity is derived from the binding when
+    // present, else the live agent's labels (which never carry the initiator), so a
+    // null-binding session is archivable only by an owner/admin, never a random
+    // member.
     {
-      const channelId = binding?.channel_id ?? agent?.labels?.channelId ?? null;
-      // PG/SQLite ephemeral bindings are torn down with their agent, so a non-null
-      // binding tells us ephemeral-ness; a null binding ⇒ treat as non-ephemeral.
-      const isEphemeral = binding ? binding.ephemeral === 1 : false;
-      const isSharedChannelAgent = !!channelId && !isEphemeral;
-      if (!isSharedChannelAgent) {
-        // PRIVATE: allow the initiator OR a workspace owner/admin.
-        const initiatorId = binding?.initiated_by ?? null;
-        let isInitiator = false;
-        if (initiatorId) {
-          // initiatorId is a LOCAL SQLite id; auth.user.id can be a CLOUD id for
-          // the same person (divergent namespaces). Bridge by email when the raw
-          // ids differ — only a genuinely different account fails the match.
-          if (initiatorId === auth.user.id) {
-            isInitiator = true;
-          } else {
-            const initiator = this.storage.getUserById(initiatorId);
-            isInitiator =
-              !!initiator?.email && !!auth.user.email && initiator.email === auth.user.email;
-          }
-        }
-        const role = this.workspaceManager.getMemberRole(parsed.workspaceId, auth.user.id);
-        const isAdmin = role === "owner" || role === "admin";
-        if (!isInitiator && !isAdmin) {
-          emit({
-            type: "cyborg:error",
-            payload: {
-              requestId: parsed.requestId,
-              code: "forbidden",
-              message: "Cannot archive another user's private agent session",
-            },
-          });
-          return;
-        }
+      // PRIVATE: allow the initiator OR a workspace owner/admin.
+      const initiatorId = binding?.initiated_by ?? null;
+      let isInitiator = false;
+      if (initiatorId) {
+        // initiatorId is a LOCAL SQLite id; auth.user.id can be a CLOUD id for
+        // the same person (divergent namespaces). Bridge by email when the raw
+        // ids differ — only a genuinely different account fails the match.
+        const initiator = this.storage.getUserById(initiatorId);
+        isInitiator = isAuthorizedInitiator(
+          { id: initiatorId, email: initiator?.email ?? null },
+          { id: auth.user.id, email: auth.user.email ?? null },
+        );
+      }
+      const role = this.workspaceManager.getMemberRole(parsed.workspaceId, auth.user.id);
+      const isAdmin = role === "owner" || role === "admin";
+      if (!isInitiator && !isAdmin) {
+        emit({
+          type: "cyborg:error",
+          payload: {
+            requestId: parsed.requestId,
+            code: "forbidden",
+            message: "Cannot archive another user's private agent session",
+          },
+        });
+        return;
       }
     }
 

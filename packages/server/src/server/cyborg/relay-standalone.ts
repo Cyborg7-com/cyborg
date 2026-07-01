@@ -1323,9 +1323,11 @@ async function main() {
         mirrorBindings = null;
       }
       if (mirrorBindings) {
-        // (a) Drop any merged LIVE row the viewer must not see (an AUTONOMOUS
-        // session the daemon's local-id owner match let slip). Conservative --
-        // see filterLiveRowsForViewer (only mirrored-autonomous rows are dropped).
+        // (a) Drop any merged LIVE row the viewer must not see -- the relay enforces
+        // the SAME owner rule as the daemon (agentBindingVisibleCore) on every
+        // mirrored row, so a peer's session is scoped even if the owning daemon is on
+        // old code. See filterLiveRowsForViewer (rows absent from the mirror --
+        // fresh/ephemeral -- stay trusted to the daemon).
         const mirror = new Map<
           string,
           {
@@ -2758,23 +2760,21 @@ async function main() {
         const readBinding = await pg.getAgentBinding(readAgentId);
         // EPHEMERAL sessions (mention/slash summons) are NEVER mirrored to PG, so a
         // missing PG binding here is EXPECTED for them — the relay can't authorize
-        // and MUST NOT blanket-deny (that would break the legit initiator/channel-
-        // member reading their own live mention session). Forward and let the
-        // OWNING DAEMON's canReadLiveSession (it has the SQLite binding incl.
-        // initiated_by + channel_id, and resolves channel membership) be the
+        // and MUST NOT blanket-deny (that would break the legit INITIATOR reading
+        // their own live mention session). Forward and let the OWNING DAEMON's
+        // canReadLiveSession (it has the SQLite binding incl. initiated_by) be the
         // authoritative gate. When a PG binding DOES exist (non-ephemeral), enforce
-        // here too as defense-in-depth — deny a caller who is neither initiator,
-        // channel member, nor owner/admin BEFORE the forward.
+        // here too as defense-in-depth — deny a caller who is neither initiator nor
+        // owner/admin BEFORE the forward. Cybo sessions are OWNER-SCOPED now (privacy
+        // incident 2026-06-30): channel membership NO LONGER grants a read, so we
+        // pass isChannelMember:false and skip the getChannelMemberRole round-trip.
         if (readBinding && readBinding.workspaceId === targetWorkspace) {
-          const isChannelMember = readBinding.channelId
-            ? !!(await pg.getChannelMemberRole(readBinding.channelId, guest.userId))
-            : false;
           if (
             !canReadAgentSession(readBinding, {
               userId: guest.userId,
               email: guest.email,
               role: callerRole,
-              isChannelMember,
+              isChannelMember: false,
             })
           ) {
             relayLog.error(
@@ -2784,7 +2784,7 @@ async function main() {
                 agentId: readAgentId,
                 channelId: readBinding.channelId,
               },
-              "session-read denied — not initiator, channel member, or admin",
+              "session-read denied — not initiator or admin",
             );
             respondError("Not authorized to read this session");
             return;
@@ -3120,17 +3120,15 @@ async function main() {
             return;
           }
           // SAME rule as the daemon's handleArchiveAgent (shared via
-          // canClearAgentBinding): a SHARED channel agent (channel-bound; the PG
-          // mirror only ever holds NON-ephemeral bindings, so channelId ⇒ shared)
-          // is clearable by any member. Otherwise PRIVATE: the INITIATOR (real email
-          // OR the GLOBAL account id — a cloud-forwarded session stamps initiated_by
-          // = the global id, even on old rows whose mirrored email is the synthetic
-          // <id>@remote.local placeholder) OR a workspace OWNER/ADMIN. Role is looked
-          // up only for a private session (the helper short-circuits on channelId).
-          const isSharedChannelAgent = !!binding.channelId;
-          const archiverRole = isSharedChannelAgent
-            ? null
-            : await pg.getMemberRole(targetWorkspace, guest.userId);
+          // canClearAgentBinding). PRIVACY (2026-06-30): a channel-bound session is
+          // NO LONGER clearable by any member — EVERY session is clearable ONLY by
+          // its INITIATOR (real email OR the GLOBAL account id — a cloud-forwarded
+          // session stamps initiated_by = the global id, even on old rows whose
+          // mirrored email is the synthetic <id>@remote.local placeholder) OR a
+          // workspace OWNER/ADMIN. The role must ALWAYS be resolved now (canClear no
+          // longer short-circuits on channelId), else a channel-bound owner/admin
+          // would be wrongly denied.
+          const archiverRole = await pg.getMemberRole(targetWorkspace, guest.userId);
           if (
             !canClearAgentBinding(binding, {
               userId: guest.userId,

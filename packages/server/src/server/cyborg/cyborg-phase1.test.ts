@@ -281,12 +281,12 @@ describe("Cyborg7 Phase 1 — direct agent lifecycle (no bridge)", () => {
   });
 
   // Ghost-session regression (2026-06-12) + ephemeral mention-session ownership
-  // (problem 3): mention/slash summons are channel-bound EPHEMERAL bindings. They
-  // must be OWNER-SCOPED — the user who triggered the summon sees their OWN
-  // ephemeral session, but it NEVER leaks into another member's sidebar the way it
-  // used to (the channel_id short-circuit let every channel-bound ephemeral
-  // through, visible + joinable to ALL members).
-  it("list_agents scopes ephemeral bindings to their initiator", async () => {
+  // (problem 3) + PRIVACY (2026-06-30): mention/slash summons are channel-bound
+  // EPHEMERAL bindings, and now EVERY channel-bound session (ephemeral or not) is
+  // OWNER-SCOPED. The initiator sees their OWN sessions; NOTHING leaks into another
+  // member's sidebar (the channel_id short-circuit that let every member see each
+  // other's channel cybo sessions was removed).
+  it("list_agents scopes ALL channel bindings (ephemeral AND interactive) to their initiator", async () => {
     const ctx = auth.validateToken(auth.createToken("alice@test.com", "Alice"))!;
     const bystander = auth.validateToken(auth.createToken("bob@test.com", "Bob"))!;
     const workspaceId = await createWorkspace(ctx);
@@ -329,11 +329,12 @@ describe("Cyborg7 Phase 1 — direct agent lifecycle (no bridge)", () => {
       return agents.map((a) => a.agentId).sort();
     };
 
-    // The initiator sees BOTH their ephemeral summon and the shared channel agent.
+    // The initiator sees BOTH their ephemeral summon and their interactive channel
+    // agent (they own both).
     expect(await listFor(ctx)).toEqual(["agent-ephemeral", "agent-visible"]);
-    // A bystander sees ONLY the shared (non-ephemeral) channel agent — the
-    // ephemeral summon never leaks into their list.
-    expect(await listFor(bystander)).toEqual(["agent-visible"]);
+    // A bystander sees NEITHER — every channel-bound session is now owner-scoped, so
+    // no member sees another member's cybo sessions (privacy fix).
+    expect(await listFor(bystander)).toEqual([]);
   });
 
   // The agent_status broadcast is what populates other members' clients and

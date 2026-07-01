@@ -10,11 +10,12 @@ import { MessageRouter, type BroadcastFn } from "./message-router.js";
 import { CyborgDispatcher } from "./dispatcher.js";
 import type { CyborgAuthContext } from "./auth.js";
 
-// Problem (3): ephemeral mention-session ownership. When a user @mentions a cybo in
-// a channel, the daemon spawns an EPHEMERAL, channel-bound agent session. Those
-// sessions must be OWNER-SCOPED — visible (and promptable) ONLY by the user who
-// triggered them — never leaking into every other member's Agents list the way a
-// deliberately SHARED (non-ephemeral) channel agent does.
+// Problem (3): ephemeral mention-session ownership + PRIVACY (2026-06-30). When a
+// user @mentions a cybo in a channel, the daemon spawns an EPHEMERAL, channel-bound
+// agent session. Those sessions are OWNER-SCOPED in the list — visible ONLY by the
+// user who triggered them. As of the 2026-06-30 privacy fix EVERY channel-bound
+// session (ephemeral OR non-ephemeral/interactive) is owner-scoped in the LIST: a
+// member no longer sees another member's channel cybo sessions.
 
 interface Emitted {
   type: string;
@@ -115,11 +116,13 @@ describe("ephemeral mention-session ownership (problem 3)", () => {
     expect(listAgentIds(out)).toEqual([]);
   });
 
-  it("a NON-ephemeral channel cybo session stays SHARED (visible to all members)", async () => {
-    // Regression guard: the deliberate collaborative channel-agent feature must NOT
-    // be broken by the ephemeral scoping.
+  it("a NON-ephemeral channel cybo session is OWNER-SCOPED — a bystander does NOT see it (privacy)", async () => {
+    // PRIVACY (2026-06-30): the shared-channel short-circuit was removed. A
+    // channel-bound cybo session is now private to its initiator — a member no
+    // longer sees another member's channel cybo session in the list. (The cybo still
+    // POSTS to its channel; only the session-LIST visibility is scoped.)
     sqlite.createAgentBinding({
-      agentId: "shared-chan-1",
+      agentId: "chan-1-session",
       workspaceId,
       provider: "claude",
       cyboId: null,
@@ -128,11 +131,18 @@ describe("ephemeral mention-session ownership (problem 3)", () => {
       daemonId: "daemon-D",
       channelId: "chan-1",
     });
-    const out = await dispatch(
-      { type: "cyborg:list_agents", requestId: "l3", workspaceId },
+    // The initiator sees their own channel session…
+    const forOwner = await dispatch(
+      { type: "cyborg:list_agents", requestId: "l3a", workspaceId },
+      mentioner,
+    );
+    expect(listAgentIds(forOwner)).toContain("chan-1-session");
+    // …but a bystander in the same workspace does NOT.
+    const forBystander = await dispatch(
+      { type: "cyborg:list_agents", requestId: "l3b", workspaceId },
       bystander,
     );
-    expect(listAgentIds(out)).toContain("shared-chan-1");
+    expect(listAgentIds(forBystander)).toEqual([]);
   });
 
   it("a non-initiator cannot prompt another user's mention session", async () => {

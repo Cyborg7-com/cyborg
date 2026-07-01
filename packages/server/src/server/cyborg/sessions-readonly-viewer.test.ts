@@ -516,12 +516,25 @@ describe("IDOR gate: live session timeline/context reads", () => {
     expect(msgs.find((m) => m.type === "cyborg:fetch_agent_timeline_response")).toBeUndefined();
   });
 
-  it("ALLOWS a member of the session's channel", async () => {
-    await seedLiveSession(h, "live-ch2", { channelId: "chan-Y", initiatedBy: null });
+  // PRIVACY (2026-06-30): channel-bound cybo sessions are OWNER-SCOPED. A plain
+  // channel MEMBER who is neither the initiator nor an admin can NO LONGER read the
+  // transcript just by being in the channel. (Reverses the earlier "channel member
+  // can read" assertion — intended behavior change now that sessions are private.)
+  it("DENIES a non-initiator, non-admin channel MEMBER (owner-scoped now)", async () => {
+    await seedLiveSession(h, "live-ch2", { channelId: "chan-Y", initiatedBy: "someone-else" });
     const member = h.auth.validateToken(h.auth.createToken("member@test.com", "Member"));
     channelMembers.set("chan-Y", [{ userId: member.user.id, email: "member@test.com" }]);
 
     const msgs = await fetchTimeline(h, "live-ch2", member);
+    expect(msgs.find((m) => m.type === "cyborg:error")?.payload.code).toBe("forbidden");
+    expect(msgs.find((m) => m.type === "cyborg:fetch_agent_timeline_response")).toBeUndefined();
+  });
+
+  it("ALLOWS the initiator of a channel-bound session (email-bridged)", async () => {
+    const initiator = h.auth.validateToken(h.auth.createToken("chinit@test.com", "ChInit"));
+    await seedLiveSession(h, "live-ch3", { channelId: "chan-Y2", initiatedBy: initiator.user.id });
+    // Initiator is NOT in the channel-members map — read is granted by ownership, not membership.
+    const msgs = await fetchTimeline(h, "live-ch3", initiator);
     const resp = msgs.find((m) => m.type === "cyborg:fetch_agent_timeline_response");
     expect(resp).toBeDefined();
     expect(resp.payload.items.map((i: any) => i.text)).toEqual(["secret transcript"]);
@@ -550,8 +563,9 @@ describe("IDOR gate: live session timeline/context reads", () => {
     expect(msgs.find((m) => m.type === "cyborg:error")?.payload.code).toBe("forbidden");
   });
 
-  it("gates fetch_session_context the same way (non-member denied, member allowed)", async () => {
-    await seedLiveSession(h, "live-ctx", { channelId: "chan-Z", initiatedBy: null });
+  it("gates fetch_session_context the same way (channel member denied, initiator allowed)", async () => {
+    const initiator = h.auth.validateToken(h.auth.createToken("ctxowner@test.com", "CtxOwner"));
+    await seedLiveSession(h, "live-ctx", { channelId: "chan-Z", initiatedBy: initiator.user.id });
     h.storage.saveEphemeralSessionContext({
       agentId: "live-ctx",
       workspaceId: h.workspaceId,
@@ -559,22 +573,23 @@ describe("IDOR gate: live session timeline/context reads", () => {
       cyboId: "cybo-z",
       systemPrompt: "You are Z.",
     });
+    // A plain channel MEMBER is now DENIED (owner-scoped, privacy 2026-06-30).
     const member = h.auth.validateToken(h.auth.createToken("cm@test.com", "CM"));
     channelMembers.set("chan-Z", [{ userId: member.user.id, email: "cm@test.com" }]);
-    const stranger = h.auth.validateToken(h.auth.createToken("out@test.com", "Out"));
 
     const denied = collect();
     await h.dispatcher.dispatch(
       { type: "cyborg:fetch_session_context", requestId: "x1", workspaceId: h.workspaceId, agentId: "live-ctx" } as any,
-      stranger,
+      member,
       denied.emit,
     );
     expect(denied.messages.find((m) => m.type === "cyborg:error")?.payload.code).toBe("forbidden");
 
+    // The INITIATOR reads their own context.
     const allowed = collect();
     await h.dispatcher.dispatch(
       { type: "cyborg:fetch_session_context", requestId: "x2", workspaceId: h.workspaceId, agentId: "live-ctx" } as any,
-      member,
+      initiator,
       allowed.emit,
     );
     expect(

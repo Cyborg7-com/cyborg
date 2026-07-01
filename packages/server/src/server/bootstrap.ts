@@ -42,6 +42,7 @@ import {
   honestHelloProviders,
 } from "./cyborg/hello-provider-list.js";
 import { runMigrations } from "./cyborg/db/migrate.js";
+import { isPromptFromInitiatorForward } from "./cyborg/relay-offline-agent-rows.js";
 import { resolveDaemonEdition } from "./cyborg/daemon-edition.js";
 import { countActiveSessions } from "./cyborg/daemon-usage.js";
 
@@ -1027,11 +1028,16 @@ export async function createPaseoDaemon(
     process.env.CYBORG_RELAY_TOKEN ??
     cyborgAuth.createDaemonToken(serverId, daemonOwnerId ?? "unclaimed");
 
-  // A PRIVATE agent session may only be prompted by the user who started it. A
-  // session is private unless it is a SHARED channel agent (channel-bound AND
-  // non-ephemeral). DM agents (no channel) and EPHEMERAL channel summons
-  // (@-mentions / slash commands) are owner-scoped, so a non-initiator must not be
-  // able to drive someone else's mention session over the relay forward. The
+  // A PRIVATE agent session may only be prompted by the user who started it. EVERY
+  // cybo session is private now — channel-bound ones included (privacy incident
+  // 2026-06-30): a channel-bound session is a per-user conversation, owner-scoped
+  // for visibility + archive, so a non-initiator must NOT be able to drive it over
+  // the cloud relay forward. This is the cloud parity of the local handleSendAgentPrompt
+  // gate (dispatcher.ts) — same email-bridged initiator predicate. FAIL-CLOSED: when
+  // the session HAS an initiator, only that initiator (matched by local id OR bridged
+  // email) may drive it; a forward with no identifiable sender (fromUserId/fromEmail
+  // absent) can't prove it's the initiator → denied. A session with no recorded
+  // initiator has nobody to restrict against (mirrors handleSendAgentPrompt). The
   // daemon's local SQLite and the cloud PG assign DIFFERENT user ids to the same
   // account, so binding.initiated_by (local id) can't be compared to a forwarded
   // cloud id directly — bridge by email.
@@ -1039,11 +1045,14 @@ export async function createPaseoDaemon(
     binding: { channel_id?: string | null; initiated_by?: string | null; ephemeral?: number },
     fwd: { fromUserId?: string; fromEmail?: string | null },
   ): boolean => {
-    const isSharedChannelAgent = !!binding.channel_id && binding.ephemeral !== 1;
-    if (isSharedChannelAgent || !binding.initiated_by || !fwd.fromUserId) return true;
-    if (binding.initiated_by === fwd.fromUserId) return true;
-    const initiator = cyborgStorage?.getUserById(binding.initiated_by);
-    return !!initiator?.email && !!fwd.fromEmail && initiator.email === fwd.fromEmail;
+    const initiatorEmail = binding.initiated_by
+      ? (cyborgStorage?.getUserById(binding.initiated_by)?.email ?? null)
+      : null;
+    return isPromptFromInitiatorForward(
+      { initiatedBy: binding.initiated_by ?? null },
+      initiatorEmail,
+      fwd,
+    );
   };
 
   // Route a forwarded prompt to its agent. A DM/agent-session prompt (dmRecipient set)

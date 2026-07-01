@@ -15,6 +15,7 @@
   import SessionResumePicker from "$lib/components/channel/SessionResumePicker.svelte";
   import { profilePanelState } from "$lib/profile-panel.svelte.js";
   import { resolveCyboChatIdentity } from "$lib/cybo-chat-identity.js";
+  import { isMine } from "$lib/session-scope.js";
   import { toast } from "svelte-sonner";
   import { cn } from "$lib/utils.js";
   import { viewportState } from "$lib/state/viewport.svelte.js";
@@ -74,6 +75,31 @@
     sessionDaemon?.label ||
       sessionDaemonOwnerName ||
       (agent?.daemonLocal === false ? "Remote daemon" : "Local daemon"),
+  );
+
+  // Whose session is this? The transcript's human turns are the SESSION OWNER's
+  // prompts (agent.initiatedBy), NOT the viewer's — on a shared daemon a user can
+  // open a session someone else launched. Rendering those turns as "You" + the
+  // viewer's avatar is an identity-exposure bug (another user's prompts appear
+  // under your name/face). Resolve the real owner from workspaceState.members the
+  // same way sessionDaemonOwnerName does.
+  const isOwnSession = $derived(isMine(agent ?? {}, authState.user?.id));
+  const sessionOwner = $derived(
+    agent?.initiatedBy
+      ? workspaceState.members?.find((m) => m.userId === agent.initiatedBy)
+      : undefined,
+  );
+  // On a session I don't own: label the human turns with the owner's real name +
+  // avatar. If the owner can't be resolved (legacy/absent initiatedBy, or a
+  // non-member), fall back to a neutral "User" with NO avatar — NEVER "You" + the
+  // viewer's face.
+  const humanTurnName = $derived(
+    isOwnSession ? "You" : (sessionOwner?.name ?? "User"),
+  );
+  const humanTurnImage = $derived(
+    isOwnSession
+      ? (authState.user?.imageUrl ?? authState.profileImage)
+      : (sessionOwner?.imageUrl ?? sessionOwner?.image ?? null),
   );
 
   // In-flight guard, keyed by the session's daemonId, so rapid double-clicks on
@@ -390,7 +416,7 @@
     {/if}
     {/if}
 
-    <AgentStreamView agentId={agent.agentId} agentName={agentDisplayName} provider={agent.provider} providerLabel={agent.provider} daemonLabel={daemonName} onRecheck={recheckSessionProviders} agentImage={agentAvatar} agentEmoji={chatIdentity.emoji} isCybo={isCyboSession} onRewind={(messageId) => handleRewind(agent.agentId, messageId)} {isRewinding} userImage={authState.user?.imageUrl ?? authState.profileImage} userStatusEmoji={userStatusState.emoji} userStatusTooltip={userStatusState.tooltip || null} />
+    <AgentStreamView agentId={agent.agentId} agentName={agentDisplayName} provider={agent.provider} providerLabel={agent.provider} daemonLabel={daemonName} onRecheck={recheckSessionProviders} agentImage={agentAvatar} agentEmoji={chatIdentity.emoji} isCybo={isCyboSession} onRewind={(messageId) => handleRewind(agent.agentId, messageId)} {isRewinding} userName={humanTurnName} userImage={humanTurnImage} userStatusEmoji={isOwnSession ? userStatusState.emoji : null} userStatusTooltip={isOwnSession ? (userStatusState.tooltip || null) : null} />
 
     {#if pendingPermissions.length > 0}
       <div class="bg-surface px-6 py-3 shrink-0 max-h-64 overflow-y-auto">

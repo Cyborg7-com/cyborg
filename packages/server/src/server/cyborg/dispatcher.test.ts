@@ -284,11 +284,12 @@ describe("cyborg:list_daemon_sessions (dispatcher audit)", () => {
   });
 });
 
-// handleArchiveAgent ownership guard (#810 security fix): archive must mirror
-// handleSendAgentPrompt's ownership rule — a PRIVATE (DM / ephemeral) session is
-// archivable ONLY by its initiator; a SHARED (non-ephemeral channel) agent is
-// archivable by any member. Previously _auth was unused, so any member could
-// archive anyone's private session.
+// handleArchiveAgent ownership guard (#810 security fix + 2026-06-30 privacy fix):
+// EVERY session — DM, ephemeral, OR channel-bound — is archivable ONLY by its
+// INITIATOR or a workspace OWNER/ADMIN. The shared-channel bypass (any member could
+// archive a channel agent) was REMOVED so a non-owner can no longer globally
+// archive+kill another user's channel cybo session. Previously _auth was unused, so
+// any member could archive anyone's private session.
 describe("cyborg:archive_agent ownership guard (#810)", () => {
   let storage: DualStorage;
   let sqlite: CyborgStorage;
@@ -403,14 +404,42 @@ describe("cyborg:archive_agent ownership guard (#810)", () => {
     expect(sqlite.getAgentBinding("dm-by-member")).toBeUndefined();
   });
 
-  it("allows any member to archive a SHARED (non-ephemeral channel) agent", async () => {
+  it("rejects a non-initiator member archiving another user's CHANNEL agent (privacy: no global teardown)", async () => {
+    // PRIVACY (2026-06-30): a channel-bound session no longer skips the ownership
+    // check. `owner` initiated chan-agent; a plain `member` (non-initiator, non-admin)
+    // must NOT be able to globally archive+kill it.
     bindSession("chan-agent", owner.user.id, "chan-1");
     const out = await dispatch(
       { type: "cyborg:archive_agent", requestId: "ar4", workspaceId, agentId: "chan-agent" },
       member,
     );
+    const err = out.find((m) => m.type === "cyborg:error");
+    expect(err?.payload.code).toBe("forbidden");
+    expect(out.find((m) => m.type === "cyborg:archive_agent_response")).toBeUndefined();
+    // The rejected attempt must NOT have cleared the binding.
+    expect(sqlite.getAgentBinding("chan-agent")).toBeDefined();
+  });
+
+  it("allows the INITIATOR to archive their own CHANNEL agent", async () => {
+    bindSession("chan-mine", member.user.id, "chan-1");
+    const out = await dispatch(
+      { type: "cyborg:archive_agent", requestId: "ar4b", workspaceId, agentId: "chan-mine" },
+      member,
+    );
     expect(out.find((m) => m.type === "cyborg:archive_agent_response")).toBeDefined();
     expect(out.find((m) => m.type === "cyborg:error")).toBeUndefined();
+    expect(sqlite.getAgentBinding("chan-mine")).toBeUndefined();
+  });
+
+  it("allows a workspace OWNER/ADMIN to archive another user's CHANNEL agent (clear clutter)", async () => {
+    bindSession("chan-by-member", member.user.id, "chan-1");
+    const out = await dispatch(
+      { type: "cyborg:archive_agent", requestId: "ar4c", workspaceId, agentId: "chan-by-member" },
+      owner,
+    );
+    expect(out.find((m) => m.type === "cyborg:archive_agent_response")).toBeDefined();
+    expect(out.find((m) => m.type === "cyborg:error")).toBeUndefined();
+    expect(sqlite.getAgentBinding("chan-by-member")).toBeUndefined();
   });
 
   it("a LIVE agent with a NULL binding does NOT bypass the guard — a non-admin member is rejected", async () => {
