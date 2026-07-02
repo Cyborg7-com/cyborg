@@ -746,6 +746,19 @@ export const scheduleDispatchClaims = pgTable(
   (t) => [primaryKey({ columns: [t.scheduleId, t.scheduledFor] })],
 );
 
+// ─── Invocation dispatch claims (@mention + channel-watch, #16) ───
+// Twin of scheduleDispatchClaims for the mention/watch paths. claim_key is the
+// invocation guard's own key ("<messageId>:<cyboId>" for a mention,
+// "watch:<messageId>" for a watcher — disjoint namespaces share one table). The
+// winning daemon INSERTs the row; every other daemon conflicts on the PK and skips
+// the double-fire.
+export const invocationDispatchClaims = pgTable("invocation_dispatch_claims", {
+  claimKey: text("claim_key").primaryKey(),
+  claimedAt: timestamp("claimed_at", { withTimezone: true }).notNull().defaultNow(),
+  // The serverId of the winning daemon (diagnostics only; not load-bearing).
+  claimedBy: text("claimed_by"),
+});
+
 // ─── Scheduled messages (user "send later", #607) ────────────────
 // A user-facing "schedule this message to send at a time" feature — distinct from
 // `schedules` above (which is recurring CYBO automation, cronExpr). A row is a

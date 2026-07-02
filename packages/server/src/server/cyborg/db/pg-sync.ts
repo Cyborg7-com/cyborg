@@ -4122,6 +4122,20 @@ export class PgSync {
     return rows.length > 0;
   }
 
+  // Cross-daemon exactly-once claim for the @mention / channel-watch paths (#16) —
+  // twin of claimScheduleDispatch. INSERT…ON CONFLICT DO NOTHING on the claim_key
+  // primary key: a RETURNING row proves the winner, 0 rows => another daemon already
+  // claimed it. The AUTHORITATIVE cross-daemon guard (each daemon has its own SQLite;
+  // only the shared PG row dedupes across daemons).
+  async claimInvocationDispatch(claimKey: string, claimedBy?: string | null): Promise<boolean> {
+    const rows = await this.db
+      .insert(schema.invocationDispatchClaims)
+      .values({ claimKey, claimedBy: claimedBy ?? null })
+      .onConflictDoNothing()
+      .returning({ claimKey: schema.invocationDispatchClaims.claimKey });
+    return rows.length > 0;
+  }
+
   async markScheduleRun(
     id: string,
     lastRunAt: number,

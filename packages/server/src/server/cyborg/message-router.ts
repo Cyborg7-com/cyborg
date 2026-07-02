@@ -74,8 +74,10 @@ import {
   buildWatcherPrompt,
   formatMentionTranscript,
   MAX_MENTION_FANOUT,
+  mentionClaimKey,
   mentionInvocationGuard,
   resolveMentionedCybos,
+  watchClaimKey,
   watchInvocationGuard,
   type WatcherOpenTask,
 } from "./cybo-mention-invoke.js";
@@ -848,6 +850,28 @@ export class MessageRouter {
   // return), mirroring the relay path (cybo-mention-invoke.ts) — so the anti-loop
   // invariant survives a future caller that isn't the human path, instead of
   // resting on a topological accident.
+  // One invocation per (messageId, cyboId), exactly once ACROSS DAEMONS: the
+  // in-process guard is a cheap first-line; the shared atomic claim (#16, twin of
+  // the cron claimScheduleDispatch) is the cross-daemon authority — it survives a
+  // relay reconnect/replay or a worker restart that cleared the in-process Set. No
+  // messageId (legacy sender) can't be deduped → allow the invoke.
+  private async claimMentionInvocationSlot(
+    messageId: string | undefined,
+    cyboId: string,
+  ): Promise<boolean> {
+    if (!mentionInvocationGuard.shouldInvoke(messageId, cyboId)) return false;
+    if (
+      messageId &&
+      !(await this.storage.claimInvocationDispatch(
+        mentionClaimKey(messageId, cyboId),
+        this.serverId,
+      ))
+    ) {
+      return false;
+    }
+    return true;
+  }
+
   private async invokeMentionedCybos(
     channel: { id: string; name: string; workspace_id: string },
     auth: CyborgAuthContext,
@@ -962,10 +986,10 @@ export class MessageRouter {
     }
 
     for (const cyboId of capped) {
-      // One invocation per (messageId, cyboId): the guard is shared with the
-      // dispatcher's relay-forwarded path, so the same mention can't summon
-      // the cybo twice when both paths see the message.
-      if (!mentionInvocationGuard.shouldInvoke(currentMessageId, cyboId)) continue;
+      // One invocation per (messageId, cyboId), exactly once across the fleet:
+      // in-process guard (cheap) + shared atomic DB claim (#16). Extracted to a
+      // helper so this loop stays under the lint complexity cap.
+      if (!(await this.claimMentionInvocationSlot(currentMessageId, cyboId))) continue;
       // Per-workspace spawn rate-limit (agent_spawn bucket): a mention storm
       // can't outrun the workspace's spawn budget. Over budget → notice + stop.
       if (!this.mentionRateLimiter.check(channel.workspace_id, "agent_spawn").allowed) {
@@ -1113,6 +1137,15 @@ export class MessageRouter {
     // One watcher spawn per message — namespace "watch:<messageId>", DISTINCT
     // from the mention guard, shared with the dispatcher's relay-forwarded path.
     if (!watchInvocationGuard.shouldWatch(currentMessageId)) return;
+    // Cross-daemon exactly-once (#16): shared atomic claim so the same message can't
+    // spawn the watcher on two daemons — or across a reconnect/restart that cleared
+    // the in-process Set. No messageId (legacy sender) → can't claim, fall through.
+    if (
+      currentMessageId &&
+      !(await this.storage.claimInvocationDispatch(watchClaimKey(currentMessageId), this.serverId))
+    ) {
+      return;
+    }
 
     // Watcher is past the cheap gates and is now actually evaluating this post.
     this.broadcastTaskEvent({

@@ -212,7 +212,12 @@ import {
   resolveCyboHarness,
   resolveLocalCybo,
 } from "./cybo-manager.js";
-import { mentionInvocationGuard, watchInvocationGuard } from "./cybo-mention-invoke.js";
+import {
+  mentionClaimKey,
+  mentionInvocationGuard,
+  watchClaimKey,
+  watchInvocationGuard,
+} from "./cybo-mention-invoke.js";
 import { agentBindingVisibleCore, isAuthorizedInitiator } from "./relay-offline-agent-rows.js";
 import {
   runDaemonSelfUpdate,
@@ -7151,6 +7156,19 @@ export class CyborgDispatcher {
     // message-router path, so a replayed/duplicated forward — or a daemon that
     // sees the message through both paths — can't summon the cybo twice.
     if (!mentionInvocationGuard.shouldInvoke(parsed.messageId, parsed.cyboId)) return;
+    // Cross-daemon exactly-once (#16): the in-process guard above only dedupes within
+    // THIS process. The shared atomic claim (twin of the cron claimScheduleDispatch)
+    // makes a replayed/duplicated forward — or a message seen by two daemons — summon
+    // the cybo AT MOST ONCE across the fleet. No messageId → can't claim, fall through.
+    if (
+      parsed.messageId &&
+      !(await this.storage.claimInvocationDispatch(
+        mentionClaimKey(parsed.messageId, parsed.cyboId),
+        this.serverId,
+      ))
+    ) {
+      return;
+    }
     // Per-workspace spawn rate-limit: the @-mention path was previously
     // UNTHROTTLED (a mention storm → unbounded ephemeral spawns). Share the
     // slash path's agent_spawn bucket (same RateLimiter instance, keyed by
@@ -7253,6 +7271,15 @@ export class CyborgDispatcher {
     // local message-router path, so a replayed/duplicated forward (or a daemon that
     // sees the message via both paths) can't spawn the watcher twice.
     if (!watchInvocationGuard.shouldWatch(parsed.messageId)) return;
+    // Cross-daemon exactly-once (#16): shared atomic claim so a replayed/duplicated
+    // forward — or a message seen by two daemons — spawns the watcher AT MOST ONCE
+    // across the fleet. No messageId → can't claim, fall through.
+    if (
+      parsed.messageId &&
+      !(await this.storage.claimInvocationDispatch(watchClaimKey(parsed.messageId), this.serverId))
+    ) {
+      return;
+    }
     // Native-harness login gate (same as the mention path): a native cybo on a
     // signed-out daemon would spawn and auth-fail into the silent ephemeral drain.
     // The watcher is silent anyway, so just skip the dead spawn (no notice).

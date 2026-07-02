@@ -1226,6 +1226,24 @@ export class CyborgStorage {
         PRIMARY KEY (schedule_id, scheduled_for)
       );
 
+      -- Cross-daemon exactly-once claim for the @MENTION + channel-WATCHER paths
+      -- (#16 mention-dup). Twin of schedule_dispatch_claims (the cron path): the
+      -- mention/watch invocation guards were in-PROCESS only (a per-process Set), so
+      -- the SAME channel message reaching two daemons — or the same daemon across a
+      -- relay reconnect/replay or a worker restart that clears the Set — double-fired
+      -- the cybo → duplicate ephemeral sessions. A daemon claims (claim_key) by
+      -- INSERTing; the PK makes it atomic, losers conflict and skip. claim_key is the
+      -- guard's own key: "<messageId>:<cyboId>" for a mention, "watch:<messageId>"
+      -- for a watcher (disjoint namespaces, so both share one table). In SOLO mode
+      -- the single daemon always wins; the table just makes the path cross-daemon.
+      -- ponytail: unbounded (one row per invoked message, no parent to cascade);
+      -- prune rows older than a few days on a periodic tick if it ever grows large.
+      CREATE TABLE IF NOT EXISTS invocation_dispatch_claims (
+        claim_key TEXT PRIMARY KEY,
+        claimed_at INTEGER NOT NULL,
+        claimed_by TEXT
+      );
+
       -- User "send later" scheduled posts (#607). A single deferred human message
       -- (channel OR DM). The ScheduledMessageRunner tick fires due+unprocessed rows
       -- via the normal message path and stamps processed_at; a failed send sets a
@@ -3584,6 +3602,21 @@ export class CyborgStorage {
          VALUES (?, ?, ?, ?)`,
       )
       .run(scheduleId, scheduledFor, Date.now(), claimedBy ?? null);
+    return res.changes > 0;
+  }
+
+  // Cross-daemon exactly-once claim for the @mention / channel-watch paths (#16) —
+  // the SQLite mirror of pg.claimInvocationDispatch, and the AUTHORITATIVE claim in
+  // solo mode. Twin of claimScheduleDispatch: wins the right to invoke a given
+  // claim_key iff no row exists yet. INSERT OR IGNORE is atomic against other
+  // in-process callers. Returns true iff THIS call inserted the claim (won it).
+  claimInvocationDispatch(claimKey: string, claimedBy?: string | null): boolean {
+    const res = this.db
+      .prepare(
+        `INSERT OR IGNORE INTO invocation_dispatch_claims (claim_key, claimed_at, claimed_by)
+         VALUES (?, ?, ?)`,
+      )
+      .run(claimKey, Date.now(), claimedBy ?? null);
     return res.changes > 0;
   }
 

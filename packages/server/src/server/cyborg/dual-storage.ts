@@ -924,6 +924,23 @@ export class DualStorage {
     return this.sqlite.claimScheduleDispatch(scheduleId, scheduledFor, claimedBy);
   }
 
+  // Cross-daemon exactly-once claim for the @mention / channel-watch paths (#16) —
+  // twin of claimScheduleDispatch. Connected mode awaits the SHARED PG claim (the
+  // only store that dedupes across daemons) and returns its verdict; on a transient
+  // PG error fall back to the local SQLite claim (the in-process guard still bounds
+  // it to one fire per daemon). Solo mode (no PG) uses the SQLite claim it always wins.
+  async claimInvocationDispatch(claimKey: string, claimedBy?: string | null): Promise<boolean> {
+    if (this._pg) {
+      try {
+        return await this._pg.claimInvocationDispatch(claimKey, claimedBy);
+      } catch (err) {
+        this.logSyncError("claimInvocationDispatch")(err);
+        return this.sqlite.claimInvocationDispatch(claimKey, claimedBy);
+      }
+    }
+    return this.sqlite.claimInvocationDispatch(claimKey, claimedBy);
+  }
+
   setScheduleEnabled(id: string, enabled: boolean, nextRunAt?: number | null): void {
     this.sqlite.setScheduleEnabled(id, enabled, nextRunAt);
     if (this._pg) {

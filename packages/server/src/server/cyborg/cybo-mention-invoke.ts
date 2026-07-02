@@ -259,6 +259,13 @@ export interface MentionInvocationGuard {
 
 const MENTION_DEDUP_CAP = 500;
 
+// The mention invocation key: one invocation per (messageId, cyboId). Exported so the
+// cross-daemon DB claim (claimInvocationDispatch, #16) and the in-process guard below
+// use the SAME key — they must never diverge.
+export function mentionClaimKey(messageId: string, cyboId: string): string {
+  return `${messageId}:${cyboId}`;
+}
+
 export function createMentionInvocationGuard(): MentionInvocationGuard {
   // Insertion-ordered Map as a FIFO window — old message ids age out naturally.
   const seen = new Set<string>();
@@ -266,7 +273,7 @@ export function createMentionInvocationGuard(): MentionInvocationGuard {
     shouldInvoke(messageId: string | undefined, cyboId: string): boolean {
       // Senders predating the messageId field can't be deduped — invoke.
       if (!messageId) return true;
-      const key = `${messageId}:${cyboId}`;
+      const key = mentionClaimKey(messageId, cyboId);
       if (seen.has(key)) return false;
       seen.add(key);
       if (seen.size > MENTION_DEDUP_CAP) {
@@ -300,13 +307,20 @@ export interface WatchInvocationGuard {
 
 const WATCH_DEDUP_CAP = 500;
 
+// The watcher invocation key: one watcher spawn per message. "watch:" namespace keeps
+// it disjoint from mention keys so one table/guard serves both (#16). Exported so the
+// DB claim and the in-process guard use the SAME key.
+export function watchClaimKey(messageId: string): string {
+  return `watch:${messageId}`;
+}
+
 export function createWatchInvocationGuard(): WatchInvocationGuard {
   const seen = new Set<string>();
   return {
     shouldWatch(messageId: string | undefined): boolean {
       // Senders predating the messageId field can't be deduped — allow.
       if (!messageId) return true;
-      const key = `watch:${messageId}`;
+      const key = watchClaimKey(messageId);
       if (seen.has(key)) return false;
       seen.add(key);
       if (seen.size > WATCH_DEDUP_CAP) {
