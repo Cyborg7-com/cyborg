@@ -17,6 +17,13 @@ asarUnpack:
 extraResources:
   - from: ../ui/build
     to: ui
+  # The Markdown docs corpus the bundled daemon's cyborg7_read_docs MCP tool reads
+  # at runtime (via @cyborg7/docs-lib). The daemon bundle lives under
+  # Contents/Resources/daemon and has no packages/docs/ tree, so resolveDocsDir()'s
+  # walk-up can't find it — daemon-manager.ts sets CYBORG7_DOCS_DIR to this
+  # Contents/Resources/docs path when launching the packaged daemon.
+  - from: ../docs/src/content/docs
+    to: docs
 # Auto-update source. The code repo is private, so releases (latest-mac.yml +
 # .zip + blockmap) are published to a SEPARATE PUBLIC repo that electron-updater
 # can read without an embedded token. CI publishes here with a PAT (PUBLIC_RELEASE_TOKEN).

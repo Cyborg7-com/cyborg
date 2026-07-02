@@ -554,6 +554,14 @@ async function startDaemon(): Promise<CyborgDaemonStatus> {
   // explicitly so propagation never depends on the invocation env filter.
   const nativeDir = process.env.CYBORG7_NATIVE_DIR;
   if (nativeDir) envOverlay.CYBORG7_NATIVE_DIR = nativeDir;
+  // Point the daemon's cyborg7_read_docs MCP tool at the Markdown corpus shipped
+  // via electron-builder extraResources (Contents/Resources/docs). The daemon
+  // bundle has no packages/docs/ tree for @cyborg7/docs-lib's walk-up to find, so
+  // set the override explicitly. Only in the packaged app — a dev run resolves the
+  // corpus from the monorepo via the walk-up. Don't clobber an explicit override.
+  if (app.isPackaged && !process.env.CYBORG7_DOCS_DIR) {
+    envOverlay.CYBORG7_DOCS_DIR = path.join(process.resourcesPath, "docs");
+  }
 
   const child: ChildProcess = spawnProcess(invocation.command, invocation.args, {
     detached: true,

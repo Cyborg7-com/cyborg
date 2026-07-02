@@ -1,7 +1,8 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { computeNextRunAt, validateScheduleCadence } from "../schedule/cron.js";
-import { getDoc, listDocs, searchDocs } from "./docs-index.js";
+import { getDoc, getNav, listDocs, searchDocs } from "./docs-index.js";
+import { hasSourceAccess, listSource, readSource } from "./source-index.js";
 import type { DualStorage } from "./dual-storage.js";
 import type { MessageRouter } from "./message-router.js";
 import type { WorkspaceManager } from "./workspace-manager.js";
@@ -449,6 +450,51 @@ export function composeCyboSoul(
   }
 
   return next.trim();
+}
+
+// Register the repo-scoped, read-only self-source tool (task CYBO-78) — but only
+// when the daemon runs from a git checkout of the monorepo (hasSourceAccess()),
+// so a packaged install never exposes it. Every path passes through the docs-lib
+// guard that rejects `..` escapes, absolute paths outside the root, and symlink
+// escapes. Module-scope (not inline) so it adds no branch to
+// createCyborg7McpServer's cyclomatic complexity.
+function registerReadSourceTool(server: McpServer): void {
+  if (!hasSourceAccess()) return;
+  const text = (s: string) => ({ content: [{ type: "text" as const, text: s }] });
+  server.tool(
+    "cyborg7_read_source",
+    "Read Cyborg7's OWN source code (repo-scoped, read-only). Use this only when the " +
+      "published docs (cyborg7_read_docs) don't cover a deep implementation/config " +
+      "question — e.g. how a specific behavior is actually coded. `list` a directory " +
+      "then `get` a file. Access is HARD-restricted to files under the repository root; " +
+      "paths that escape it are rejected.",
+    {
+      mode: z
+        .enum(["list", "get"])
+        .describe("'list' = directory entries; 'get' = file contents (size-capped)"),
+      path: z
+        .string()
+        .optional()
+        .describe(
+          "Repo-relative path. For 'list' a directory ('' or omitted = repo root, e.g. " +
+            "'packages/server/src/server/cyborg'); for 'get' a file, e.g. " +
+            "'packages/server/src/server/cyborg/docs-index.ts'. `..` / absolute escapes rejected.",
+        ),
+      maxBytes: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("For 'get': byte cap on the returned file body (default 65536)."),
+    },
+    async ({ mode, path, maxBytes }) => {
+      if (mode === "get") {
+        if (!path) return text(JSON.stringify({ error: "mode 'get' requires a path" }));
+        return text(JSON.stringify(readSource(path, maxBytes), null, 2));
+      }
+      return text(JSON.stringify(listSource(path ?? ""), null, 2));
+    },
+  );
 }
 
 export function createCyborg7McpServer(deps: Cyborg7McpDeps, ctx: Cyborg7McpContext): McpServer {
@@ -2153,42 +2199,60 @@ export function createCyborg7McpServer(deps: Cyborg7McpDeps, ctx: Cyborg7McpCont
 
   server.tool(
     "cyborg7_read_docs",
-    "Read the Cyborg7 end-user how-to guides (the same docs published at " +
+    "Read the Cyborg7 end-user documentation (the same docs published at " +
       'docs.cyborg7.com). Use this to answer a user\'s "how do I…?" question: first ' +
-      "`list` (or `search` by keyword) to find the relevant guide, then `get` its slug to " +
-      "read the full step-by-step content, and relay the user-facing steps back to them. " +
-      "Read-only; covers tasks, mentions, channel membership, scheduling, cybos, and sign-up.",
+      "`nav` (browse the doc hierarchy) or `search` (keyword) to find the relevant guide, " +
+      "then `get` its slug to read the full step-by-step content, and relay the user-facing " +
+      "steps back to them. Read-only; covers the WHOLE corpus — getting started, how-to " +
+      "guides, cybos, architecture, self-hosting, contributing, and per-integration connect " +
+      "guides (Composio, Slack, Google/Gmail, Jira, ClickUp).",
     {
       mode: z
-        .enum(["list", "get", "search"])
+        .enum(["list", "nav", "get", "search"])
         .describe(
-          "'list' = index of all guides; 'get' = one guide by slug; 'search' = keyword match",
+          "'nav' = ordered section→doc tree (browse the hierarchy); 'list' = flat index of " +
+            "every doc; 'get' = one doc by slug; 'search' = keyword match",
         ),
       slug: z
         .string()
         .optional()
-        .describe("For mode='get': the guide slug, e.g. 'how-to/schedule-a-recurring-job'"),
+        .describe(
+          "For mode='get': the doc slug, e.g. 'how-to/schedule-a-recurring-job' or " +
+            "'integrations/gmail'; also accepts 'integration:<id>' (e.g. 'integration:slack')",
+        ),
       query: z
         .string()
         .optional()
         .describe(
-          "For mode='search': keywords matched against guide titles, summaries, and headings",
+          "For mode='search': keywords matched against doc titles, summaries, and headings",
         ),
     },
     async ({ mode, slug, query }) => {
       if (mode === "get") {
         if (!slug) return mcpText(JSON.stringify({ error: "mode 'get' requires a slug" }));
-        const doc = getDoc(slug);
+        // Convenience: 'integration:<id>' → the integrations/<id> connect guide.
+        const normalized = slug.startsWith("integration:")
+          ? `integrations/${slug.slice("integration:".length).trim()}`
+          : slug;
+        const doc = getDoc(normalized);
         // Unknown slug → a graceful result object, never a throw.
-        return mcpText(JSON.stringify(doc ?? { slug, found: false }, null, 2));
+        return mcpText(JSON.stringify(doc ?? { slug: normalized, found: false }, null, 2));
       }
       if (mode === "search") {
         if (!query) return mcpText(JSON.stringify({ error: "mode 'search' requires a query" }));
         return mcpText(JSON.stringify({ results: searchDocs(query) }, null, 2));
       }
+      if (mode === "nav") {
+        return mcpText(JSON.stringify({ nav: getNav() }, null, 2));
+      }
       return mcpText(JSON.stringify({ docs: listDocs() }, null, 2));
     },
   );
+
+  // Self-source access (task CYBO-78): registered only when running from a git
+  // checkout. Extracted to a module-scope helper so this function gains no extra
+  // branch (keeps createCyborg7McpServer's cyclomatic complexity in budget).
+  registerReadSourceTool(server);
 
   // ─── Schedules (recurring cybo runs) ────────────────────────────
 

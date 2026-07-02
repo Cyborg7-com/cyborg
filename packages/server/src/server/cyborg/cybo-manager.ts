@@ -8,6 +8,8 @@ import type { AgentSessionConfig, McpServerConfig } from "../agent/agent-sdk-typ
 import { CYBO_CODEX_APPROVAL_POLICY } from "./cybo-types.js";
 import type { StoredCybo } from "./cybo-types.js";
 import type { AuditSink } from "./audit-sink.js";
+import { getNav } from "./docs-index.js";
+import { hasSourceAccess } from "./source-index.js";
 
 // The context/tool snapshot the spawn audit captures (#995) — the ONE new emit.
 // Computed from the values spawnCybo already built (the systemPrompt + mcpServers
@@ -135,6 +137,47 @@ export interface SpawnCyboContext {
   cwd?: string;
 }
 
+// Always-on docs-awareness contribution (mirrors OpenClaw's "read local docs
+// first" system-prompt section). Tells every cybo the product documentation is
+// reachable at runtime via the `cyborg7_read_docs` MCP tool and that it should
+// consult it BEFORE answering "how do I…?" from memory. The section labels are
+// embedded (fail-soft) so the cybo can jump straight to a relevant area; when the
+// corpus can't be resolved the labels line is simply omitted. The tool itself is
+// always registered, so the guidance is safe to include unconditionally.
+export function buildDocsAwarenessSection(): string {
+  const lines = [
+    "## Product documentation",
+    "The Cyborg7 product documentation is available to you at runtime through the " +
+      "`cyborg7_read_docs` MCP tool (the same guides published at docs.cyborg7.com).",
+    'When the user asks "how do I…?" — or anything about using Cyborg7 (tasks, mentions, ' +
+      "channels, scheduling, cybos, connecting an integration, sign-up) — call " +
+      "`cyborg7_read_docs` FIRST (mode 'nav' or 'search' to find the guide, then 'get' its " +
+      "slug) and answer from the guide's steps before relying on memory.",
+  ];
+
+  // Embed the section labels so the cybo can browse straight to an area. Fail-soft:
+  // getNav() returns [] when the corpus can't be resolved.
+  const sections = getNav()
+    .map((s) => s.label)
+    .filter(Boolean);
+  if (sections.length > 0) {
+    lines.push(`Doc sections: ${sections.join(", ")}.`);
+  }
+  lines.push(
+    "To connect an integration (Composio, Slack, Google/Gmail, Jira, ClickUp), read its " +
+      "connect guide: mode 'get' with slug 'integration:<id>' (e.g. 'integration:gmail').",
+  );
+
+  // Self-source access is only offered when the daemon runs from a git checkout.
+  if (hasSourceAccess()) {
+    lines.push(
+      "For deep questions about Cyborg7's own implementation that the docs don't cover, the " +
+        "`cyborg7_read_source` tool can read repository files (read-only).",
+    );
+  }
+  return lines.join("\n");
+}
+
 export function buildCyboPrompt(cybo: StoredCybo, context?: SpawnCyboContext): string {
   const parts: string[] = [];
 
@@ -164,6 +207,12 @@ export function buildCyboPrompt(cybo: StoredCybo, context?: SpawnCyboContext): s
         `not post to another channel or DM unless explicitly asked.`,
     );
   }
+
+  // Always-on: point the cybo at the product docs (and, in a checkout, its source)
+  // so it consults them proactively. Kept LAST so it never shifts the identity/
+  // soul/context ordering the spawn contract (and tests) depend on.
+  parts.push("");
+  parts.push(buildDocsAwarenessSection());
 
   return parts.join("\n");
 }
