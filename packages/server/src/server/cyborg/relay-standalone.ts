@@ -124,8 +124,13 @@ import { createIapRoutes } from "./routes/iap.js";
 import { createWebhookRoutes } from "./routes/webhooks.js";
 import { createGithubRoutes } from "./routes/github.js";
 import { emitTaskOutbound, isClosedTaskStatus } from "./github-outbound.js";
+import { emitTaskOutboundToProviders } from "./task-outbound.js";
 import { createSlackRoutes } from "./routes/slack.js";
 import { createSlackOAuthRoutes } from "./routes/slack-oauth.js";
+import { createJiraRoutes } from "./routes/jira.js";
+import { createClickUpRoutes } from "./routes/clickup.js";
+import { startJiraPersonalDataReportScheduler } from "./jira-personal-data.js";
+import { startJiraWebhookRefreshScheduler } from "./jira-webhook-refresh.js";
 import {
   mirrorChannelMessageToSlack,
   mirrorEditToSlack,
@@ -9582,6 +9587,29 @@ async function main() {
               prevCompleted: isClosedTaskStatus(utPrev.status),
               nextCompleted: isClosedTaskStatus(task.status),
             }).catch((err) => relayLog.warn({ err, taskId }, "github outbound write-back failed"));
+            // Generic OUTBOUND write-back (Jira / ClickUp): mirror the same task change to
+            // every bidirectional/outbound provider link. Best-effort + echo-guarded per
+            // (provider, action) inside emitTaskOutboundToProviders (a no-op unless the task
+            // has a writable provider binding), so it never blocks the response or the edit
+            // the human already committed. The state move is carried as both the precise
+            // state id (reverse-mapped via status_mappings) and the group mirror (fallback).
+            void emitTaskOutboundToProviders(pg, {
+              taskId,
+              prevTitle: utPrev.title ?? null,
+              nextTitle: task.title ?? null,
+              prevDescription: utPrev.description ?? null,
+              nextDescription: task.description ?? null,
+              prevPriority: utPrev.priority ?? null,
+              nextPriority: task.priority ?? null,
+              prevDueAt: utPrev.due_at ?? null,
+              nextDueAt: task.due_at ?? null,
+              prevStartAt: utPrev.start_date ?? null,
+              nextStartAt: task.start_date ?? null,
+              prevStateId: utPrev.state_id ?? null,
+              nextStateId: task.state_id ?? null,
+              prevStatus: utPrev.status ?? null,
+              nextStatus: task.status ?? null,
+            }).catch((err) => relayLog.warn({ err, taskId }, "task outbound write-back failed"));
           }
           // Per-task scheduling — denormalize the task's bound schedule summary onto
           // the wire Task so a non-schedule edit's broadcast/response keeps the
@@ -9849,6 +9877,30 @@ async function main() {
               nextCompleted: isClosedTaskStatus(buRow.status),
             }).catch((err) =>
               relayLog.warn({ err, taskId: buRow.id }, "github outbound write-back failed"),
+            );
+            // Generic OUTBOUND write-back (Jira / ClickUp) for the bulk path: a bulk edit can
+            // move status/priority/due for a bidirectionally-synced task. Best-effort +
+            // echo-guarded per task inside emitTaskOutboundToProviders (a no-op for non-synced
+            // tasks); title/description/start aren't part of a bulk update, so those pairs are
+            // equal and never patch.
+            void emitTaskOutboundToProviders(pg, {
+              taskId: buRow.id,
+              prevTitle: buPrev.title ?? null,
+              nextTitle: buRow.title ?? null,
+              prevDescription: buPrev.description ?? null,
+              nextDescription: buRow.description ?? null,
+              prevPriority: buPrev.priority ?? null,
+              nextPriority: buRow.priority ?? null,
+              prevDueAt: buPrev.due_at ?? null,
+              nextDueAt: buRow.due_at ?? null,
+              prevStartAt: buPrev.start_date ?? null,
+              nextStartAt: buRow.start_date ?? null,
+              prevStateId: buPrev.state_id ?? null,
+              nextStateId: buRow.state_id ?? null,
+              prevStatus: buPrev.status ?? null,
+              nextStatus: buRow.status ?? null,
+            }).catch((err) =>
+              relayLog.warn({ err, taskId: buRow.id }, "task outbound write-back failed"),
             );
           }
           // Per-task scheduling — one BATCHED lookup over the applied set, so each
@@ -10904,6 +10956,14 @@ async function main() {
   // SLACK_* env is unset. See ./routes/slack-oauth.ts.
   app.route("/", createSlackOAuthRoutes({ pg, requireAuth }));
 
+  // ─── Jira + ClickUp task-sync integrations (extracted) ────────
+  // OAuth connect + PUBLIC webhook receivers + binding/status-mapping/import.
+  // Bidirectional task sync (their board ↔ Cyborg tasks). Credential-gated to
+  // {configured:false} when JIRA_OAUTH_*/CLICKUP_OAUTH_* is unset, so a partial
+  // config never half-wires it. See ./routes/jira.ts + ./routes/clickup.ts.
+  app.route("/", createJiraRoutes({ pg, requireAuth }));
+  app.route("/", createClickUpRoutes({ pg, requireAuth }));
+
   // ─── Frontend telemetry proxy (extracted) ─────────────────────
   // POST /api/cyborg/client-log — frontends beacon client-side errors here so the
   // Logfire write token never ships to the browser; the relay emits the exception
@@ -11297,6 +11357,14 @@ async function main() {
     }
   }, GUEST_PING_INTERVAL_MS);
   guestPingSweep.unref();
+
+  // ─── Jira task-sync background jobs ───────────────────────────
+  // Both self-gate on isJiraConfigured() (no-op when JIRA_OAUTH_* is unset) and
+  // unref their own timers. (1) Personal Data Reporting: weekly outbound poll of
+  // Atlassian's report-accounts API + erasure of closed accounts. (2) Webhook
+  // refresh: extends auto-registered Jira webhooks before their 30-day expiry.
+  startJiraPersonalDataReportScheduler(pg);
+  startJiraWebhookRefreshScheduler(pg);
 
   // ─── Guest WebSocket handler ──────────────────────────────────
 

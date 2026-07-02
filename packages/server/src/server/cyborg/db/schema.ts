@@ -2686,3 +2686,175 @@ export type IntegrationInstallation = typeof integrationInstallations.$inferSele
 export type SlackChannelLink = typeof slackChannelLinks.$inferSelect;
 export type SlackUserMap = typeof slackUserMap.$inferSelect;
 export type MessageIntegration = typeof messageIntegrations.$inferSelect;
+
+// ─── Provider-generic task integrations (Jira / ClickUp foundation) ──────
+// The GENERIC counterpart of the github_* sync tables (0034/0039), for the next
+// wave of external task providers (Jira, ClickUp, and later GitHub re-homed here).
+// Every table carries a `provider` discriminator so one set of tables serves all
+// providers. These are PURELY ADDITIVE — the live github_* tables are left
+// untouched (explicit decision: don't migrate live GitHub sync). Mirrors the
+// github_* conventions: installationId as loose text (no FK), workspace FK cascade,
+// UNIQUE indexes that key the receiver's hot lookups. The sync ENGINE (adapters,
+// webhook routes, echo guard) is built on top of this data layer by a second change.
+
+// The binding of a Cyborg tasks-project to an external provider project (Jira
+// project/board or ClickUp list). `provider` discriminates. installationId is loose
+// text (no FK) — parity with github_repo_syncs: a de-authorized install doesn't
+// cascade-drop a binding the user may re-authorize; the engine resolves-or-skips a
+// stale install at event time. UNIQUE(tasks_project_id, provider, external_project_id):
+// a given external project binds to a given (project, provider) at most once (a
+// project MAY still bind more than one external project, or the same external project
+// under different providers). index(provider, external_project_id) serves the inbound
+// webhook binding lookup (webhooks arrive with only provider + external ids).
+export const projectSyncs = pgTable(
+  "project_syncs",
+  {
+    id: text("id").primaryKey(),
+    workspaceId: text("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    // Provider discriminator: 'jira' | 'clickup' (github stays in github_* for now).
+    provider: text("provider").notNull(),
+    // The install that grants access. Plain text (no FK) — see github_repo_syncs.
+    // Nullable: not every provider models a discrete install (some bind by API token).
+    installationId: text("installation_id"),
+    tasksProjectId: text("tasks_project_id")
+      .notNull()
+      .references((): AnyPgColumn => tasksProjects.id, { onDelete: "cascade" }),
+    // The provider's project key/id (Jira projectKey or cloudId, ClickUp list id).
+    externalProjectId: text("external_project_id").notNull(),
+    externalProjectName: text("external_project_name"),
+    externalUrl: text("external_url"),
+    // 'inbound' (provider → Tasks one-way) default; 'bidirectional' write-back = wave 2.
+    syncDirection: text("sync_direction").notNull().default("inbound"),
+    createdBy: text("created_by").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("idx_project_syncs_workspace").on(t.workspaceId),
+    index("idx_project_syncs_installation").on(t.installationId),
+    index("idx_project_syncs_project").on(t.tasksProjectId),
+    // A given external project binds to a given (project, provider) at most once.
+    uniqueIndex("idx_project_syncs_project_provider_external").on(
+      t.tasksProjectId,
+      t.provider,
+      t.externalProjectId,
+    ),
+    // The inbound webhook binding lookup: (provider, external_project_id) → binding(s).
+    // Its own composite because `provider` alone is low-cardinality (jira/clickup).
+    index("idx_project_syncs_provider_external").on(t.provider, t.externalProjectId),
+  ],
+);
+
+// One row per synced external item, back-linking it to the Cyborg task it maps to.
+// The generic analog of github_issue_syncs. itemNumber is TEXT (Jira "PROJ-123" /
+// ClickUp task id — not integers, unlike GitHub). providerItemId is the opaque stable
+// id for disambiguation. lastSyncedHash is the durable echo backstop the engine sets:
+// a content hash of the last-synced field set, so a mirrored write it just made
+// doesn't bounce back as an inbound change. ON DELETE CASCADE on both FKs.
+// UNIQUE(project_sync_id, task_id): one link per (binding, task).
+// UNIQUE(project_sync_id, item_type, item_number): the receiver's hot inbound key —
+// so concurrent webhooks for the same item can't create duplicate tasks.
+export const taskItemSyncs = pgTable(
+  "task_item_syncs",
+  {
+    id: text("id").primaryKey(),
+    projectSyncId: text("project_sync_id")
+      .notNull()
+      .references(() => projectSyncs.id, { onDelete: "cascade" }),
+    taskId: text("task_id")
+      .notNull()
+      .references(() => tasks.id, { onDelete: "cascade" }),
+    provider: text("provider").notNull(),
+    // 'issue' | 'task' (provider's item kind).
+    itemType: text("item_type").notNull(),
+    // The external human key (Jira PROJ-123 / ClickUp task id). TEXT, not integer.
+    itemNumber: text("item_number").notNull(),
+    // The provider's opaque, stable item id.
+    providerItemId: text("provider_item_id").notNull(),
+    itemUrl: text("item_url"),
+    // Content hash of the last-synced field set — the engine's durable echo backstop.
+    lastSyncedHash: text("last_synced_hash"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    // One link per (binding, task).
+    uniqueIndex("idx_task_item_syncs_projectsync_task").on(t.projectSyncId, t.taskId),
+    // The receiver's hot path: find the task for an inbound (binding, type, number).
+    uniqueIndex("idx_task_item_syncs_projectsync_item").on(
+      t.projectSyncId,
+      t.itemType,
+      t.itemNumber,
+    ),
+  ],
+);
+
+// Per-binding source-status → Cyborg taskState map (the generic analog of
+// github_pr_state_mappings). sourceStatusName is the provider's status label;
+// sourceStatusId its opaque id (nullable — not every provider exposes one).
+// taskStateId is loose text (no FK) — parity with github mappings: the engine
+// resolve-or-falls-back at event time. skipBackward prevents an update from moving a
+// task to an earlier phase group. ON DELETE CASCADE on workspace + binding.
+// UNIQUE(project_sync_id, source_status_name): each source status maps once per binding.
+export const statusMappings = pgTable(
+  "status_mappings",
+  {
+    id: text("id").primaryKey(),
+    workspaceId: text("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    projectSyncId: text("project_sync_id")
+      .notNull()
+      .references(() => projectSyncs.id, { onDelete: "cascade" }),
+    provider: text("provider").notNull(),
+    // The provider's status id (nullable — some providers key by name only).
+    sourceStatusId: text("source_status_id"),
+    sourceStatusName: text("source_status_name").notNull(),
+    // The Cyborg task state this source status maps to. Plain text (no FK) —
+    // resolve-or-fallback at event time. NULL = mapping not chosen yet (no-op row).
+    taskStateId: text("task_state_id"),
+    skipBackward: boolean("skip_backward").notNull().default(false),
+    createdBy: text("created_by").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("idx_status_mappings_workspace").on(t.workspaceId),
+    index("idx_status_mappings_projectsync").on(t.projectSyncId),
+    // Each source status maps at most once per binding.
+    uniqueIndex("idx_status_mappings_projectsync_source").on(t.projectSyncId, t.sourceStatusName),
+  ],
+);
+
+// Reverse user map for OUTBOUND assignee write-back (wave 2): a Cyborg user → the
+// provider user to set as assignee. The generic analog of github_user_connections,
+// but a plain (workspace, provider, cyborg user) → external user map (no OAuth token
+// here — provider tokens live on the install). UNIQUE(workspace_id, provider,
+// cyborg_user_id): one mapping per (workspace, provider, cyborg user).
+export const providerUserConnections = pgTable(
+  "provider_user_connections",
+  {
+    id: text("id").primaryKey(),
+    workspaceId: text("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    provider: text("provider").notNull(),
+    cyborgUserId: text("cyborg_user_id").notNull(),
+    externalUserId: text("external_user_id").notNull(),
+    externalEmail: text("external_email"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("idx_provider_user_connections_workspace").on(t.workspaceId),
+    // One mapping per (workspace, provider, cyborg user).
+    uniqueIndex("idx_provider_user_connections_ws_provider_user").on(
+      t.workspaceId,
+      t.provider,
+      t.cyborgUserId,
+    ),
+  ],
+);
+
+export type ProjectSync = typeof projectSyncs.$inferSelect;
+export type TaskItemSync = typeof taskItemSyncs.$inferSelect;
+export type StatusMapping = typeof statusMappings.$inferSelect;
+export type ProviderUserConnection = typeof providerUserConnections.$inferSelect;

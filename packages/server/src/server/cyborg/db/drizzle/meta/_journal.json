@@ -372,6 +372,13 @@
       "when": 1783200028000,
       "tag": "0052_backfill_identity_merge",
       "breakpoints": true
+    },
+    {
+      "idx": 53,
+      "version": "7",
+      "when": 1783200029000,
+      "tag": "0053_task_integration_foundation",
+      "breakpoints": true
     }
   ]
 }

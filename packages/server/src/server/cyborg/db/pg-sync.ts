@@ -11373,6 +11373,420 @@ export class PgSync {
       .limit(1);
     return row ? mapMessageIntegration(row) : null;
   }
+
+  // ─── Provider-generic task integrations (Jira/ClickUp foundation) ─────────
+  // The generic counterpart of the github_* DAL above, for Jira/ClickUp task sync.
+  // `provider` discriminates. PG-side only (relay/daemon share PG; no SQLite cache
+  // for these). These methods generate ids internally (prefix + randomUUID) and
+  // return them, and let errors throw — matching the rest of PgSync. All are
+  // workspace-scoped, except getProjectSyncByExternal (inbound webhooks arrive with
+  // only provider + external ids — see its note). The sync ENGINE is built on top.
+
+  // Bind a Cyborg tasks-project to an external provider project. Idempotent on
+  // UNIQUE(tasks_project_id, provider, external_project_id) — re-binding refreshes the
+  // install/name/url and returns the existing binding id. syncDirection is only
+  // written on conflict when the caller supplies it (so a plain re-bind doesn't
+  // clobber a direction the user configured), mirroring bindRepoSync. Returns the id.
+  async upsertProjectSync(opts: {
+    workspaceId: string;
+    provider: string;
+    installationId?: string | null;
+    tasksProjectId: string;
+    externalProjectId: string;
+    externalProjectName?: string | null;
+    externalUrl?: string | null;
+    syncDirection?: string;
+    createdBy: string;
+  }): Promise<string> {
+    const conflictSet: Partial<typeof schema.projectSyncs.$inferInsert> = {
+      installationId: opts.installationId ?? null,
+      externalProjectName: opts.externalProjectName ?? null,
+      externalUrl: opts.externalUrl ?? null,
+    };
+    if (opts.syncDirection !== undefined) conflictSet.syncDirection = opts.syncDirection;
+    const [row] = await this.db
+      .insert(schema.projectSyncs)
+      .values({
+        id: `psync_${randomUUID()}`,
+        workspaceId: opts.workspaceId,
+        provider: opts.provider,
+        installationId: opts.installationId ?? null,
+        tasksProjectId: opts.tasksProjectId,
+        externalProjectId: opts.externalProjectId,
+        externalProjectName: opts.externalProjectName ?? null,
+        externalUrl: opts.externalUrl ?? null,
+        syncDirection: opts.syncDirection ?? "inbound",
+        createdBy: opts.createdBy,
+      })
+      .onConflictDoUpdate({
+        target: [
+          schema.projectSyncs.tasksProjectId,
+          schema.projectSyncs.provider,
+          schema.projectSyncs.externalProjectId,
+        ],
+        set: conflictSet,
+      })
+      .returning({ id: schema.projectSyncs.id });
+    return row.id;
+  }
+
+  // The binding for an inbound (provider, external project id) — the webhook
+  // receiver's first lookup. NOT workspace-scoped on purpose: a provider webhook
+  // arrives with only provider + external ids, so the row (which carries workspaceId)
+  // IS how the engine learns the workspace. Newest-first, limit 1. NOTE: the UNIQUE is
+  // per (tasks_project_id, provider, external_project_id), so one external project MAY
+  // be bound to more than one Cyborg project — this returns the most-recent binding
+  // only; a plural fan-out variant is a one-line add if the engine needs all bindings.
+  async getProjectSyncByExternal(
+    provider: string,
+    externalProjectId: string,
+  ): Promise<StoredProjectSync | null> {
+    const [row] = await this.db
+      .select()
+      .from(schema.projectSyncs)
+      .where(
+        and(
+          eq(schema.projectSyncs.provider, provider),
+          eq(schema.projectSyncs.externalProjectId, externalProjectId),
+        ),
+      )
+      .orderBy(desc(schema.projectSyncs.createdAt))
+      .limit(1);
+    return row ? mapProjectSync(row) : null;
+  }
+
+  // ALL bindings for an inbound (provider, external project id) — the plural fan-out
+  // variant of getProjectSyncByExternal. The UNIQUE is per (tasks_project_id, provider,
+  // external_project_id), so ONE external project may be bound to MORE THAN ONE Cyborg
+  // tasks-project (even across workspaces). An inbound webhook must fan out to EVERY such
+  // binding, not just the newest — so the sync engine resolves targets from this. NOT
+  // workspace-scoped on purpose (a webhook arrives with only provider + external ids; each
+  // row carries its own workspaceId). Newest first.
+  async getProjectSyncsByExternal(
+    provider: string,
+    externalProjectId: string,
+  ): Promise<StoredProjectSync[]> {
+    const rows = await this.db
+      .select()
+      .from(schema.projectSyncs)
+      .where(
+        and(
+          eq(schema.projectSyncs.provider, provider),
+          eq(schema.projectSyncs.externalProjectId, externalProjectId),
+        ),
+      )
+      .orderBy(desc(schema.projectSyncs.createdAt));
+    return rows.map(mapProjectSync);
+  }
+
+  // One binding by its id. The outbound write-back (task-outbound.ts) resolves each
+  // task_item_syncs row's project_sync by id (the item points at its binding directly),
+  // so it can read the binding's provider / external project / installation / sync
+  // direction. No workspace scope: the caller already reached this id THROUGH the task's
+  // own item-sync rows, not an untrusted client input.
+  async getProjectSyncById(id: string): Promise<StoredProjectSync | null> {
+    const [row] = await this.db
+      .select()
+      .from(schema.projectSyncs)
+      .where(eq(schema.projectSyncs.id, id))
+      .limit(1);
+    return row ? mapProjectSync(row) : null;
+  }
+
+  // Every binding for a Cyborg tasks-project — drives the settings panel's
+  // "connected to <provider project>" state. Newest first.
+  async getProjectSyncsForTasksProject(tasksProjectId: string): Promise<StoredProjectSync[]> {
+    const rows = await this.db
+      .select()
+      .from(schema.projectSyncs)
+      .where(eq(schema.projectSyncs.tasksProjectId, tasksProjectId))
+      .orderBy(desc(schema.projectSyncs.createdAt));
+    return rows.map(mapProjectSync);
+  }
+
+  // Delete a binding (and its item-sync + status-mapping rows, via cascade).
+  // BOLA-guarded: scoped by BOTH id AND workspaceId so a caller can't unbind another
+  // workspace's project sync by guessing its id. A wrong-workspace id is a no-op.
+  async deleteProjectSync(id: string, workspaceId: string): Promise<void> {
+    await this.db
+      .delete(schema.projectSyncs)
+      .where(and(eq(schema.projectSyncs.id, id), eq(schema.projectSyncs.workspaceId, workspaceId)));
+  }
+
+  // Record (or refresh) the external-item ↔ task back-link. Idempotent on
+  // UNIQUE(project_sync_id, task_id) — re-syncing the same task refreshes its
+  // type/number/id/url and (when supplied) the echo-backstop hash. The engine creates
+  // the task first, then calls this. Returns the item-sync id. NOTE: the second UNIQUE
+  // (project_sync_id, item_type, item_number) still throws if a DIFFERENT task tries to
+  // claim an item already linked — the intended guard against duplicate task creation.
+  async upsertTaskItemSync(opts: {
+    projectSyncId: string;
+    taskId: string;
+    provider: string;
+    itemType: string;
+    itemNumber: string;
+    providerItemId: string;
+    itemUrl?: string | null;
+    lastSyncedHash?: string | null;
+  }): Promise<string> {
+    const conflictSet: Partial<typeof schema.taskItemSyncs.$inferInsert> = {
+      itemType: opts.itemType,
+      itemNumber: opts.itemNumber,
+      providerItemId: opts.providerItemId,
+      itemUrl: opts.itemUrl ?? null,
+    };
+    // Only overwrite the hash when the caller supplies one, so a re-link that doesn't
+    // recompute the hash doesn't blank the echo backstop.
+    if (opts.lastSyncedHash !== undefined) conflictSet.lastSyncedHash = opts.lastSyncedHash;
+    const [row] = await this.db
+      .insert(schema.taskItemSyncs)
+      .values({
+        id: `tisync_${randomUUID()}`,
+        projectSyncId: opts.projectSyncId,
+        taskId: opts.taskId,
+        provider: opts.provider,
+        itemType: opts.itemType,
+        itemNumber: opts.itemNumber,
+        providerItemId: opts.providerItemId,
+        itemUrl: opts.itemUrl ?? null,
+        lastSyncedHash: opts.lastSyncedHash ?? null,
+      })
+      .onConflictDoUpdate({
+        target: [schema.taskItemSyncs.projectSyncId, schema.taskItemSyncs.taskId],
+        set: conflictSet,
+      })
+      .returning({ id: schema.taskItemSyncs.id });
+    return row.id;
+  }
+
+  // The task an inbound external item already maps to, by (binding, type, number) —
+  // the receiver's de-dup key on every subsequent webhook. No row → first time seen,
+  // create a task. Served by UNIQUE(project_sync_id, item_type, item_number).
+  async getTaskItemByExternal(
+    projectSyncId: string,
+    itemType: string,
+    itemNumber: string,
+  ): Promise<StoredTaskItemSync | null> {
+    const [row] = await this.db
+      .select()
+      .from(schema.taskItemSyncs)
+      .where(
+        and(
+          eq(schema.taskItemSyncs.projectSyncId, projectSyncId),
+          eq(schema.taskItemSyncs.itemType, itemType),
+          eq(schema.taskItemSyncs.itemNumber, itemNumber),
+        ),
+      )
+      .limit(1);
+    return row ? mapTaskItemSync(row) : null;
+  }
+
+  // Every external-item link for a task (a task may sync to more than one provider
+  // item across bindings). Drives outbound write-back fan-out. Newest first.
+  async getTaskItemsForTask(taskId: string): Promise<StoredTaskItemSync[]> {
+    const rows = await this.db
+      .select()
+      .from(schema.taskItemSyncs)
+      .where(eq(schema.taskItemSyncs.taskId, taskId))
+      .orderBy(desc(schema.taskItemSyncs.createdAt));
+    return rows.map(mapTaskItemSync);
+  }
+
+  // Set (or clear) the echo-backstop content hash for an item-sync row. The engine
+  // writes this after a successful mirror so the resulting inbound bounce is detected
+  // as its own write and skipped. Scoped to the row id.
+  async setTaskItemLastSyncedHash(id: string, hash: string | null): Promise<void> {
+    await this.db
+      .update(schema.taskItemSyncs)
+      .set({ lastSyncedHash: hash })
+      .where(eq(schema.taskItemSyncs.id, id));
+  }
+
+  // Upsert one source-status → task-state mapping. Idempotent on
+  // UNIQUE(project_sync_id, source_status_name) — re-saving the same source status
+  // refreshes its id/target-state/skip-backward flag. Returns the mapping id.
+  async upsertStatusMapping(opts: {
+    workspaceId: string;
+    projectSyncId: string;
+    provider: string;
+    sourceStatusId?: string | null;
+    sourceStatusName: string;
+    taskStateId?: string | null;
+    skipBackward?: boolean;
+    createdBy: string;
+  }): Promise<string> {
+    const [row] = await this.db
+      .insert(schema.statusMappings)
+      .values({
+        id: `stmap_${randomUUID()}`,
+        workspaceId: opts.workspaceId,
+        projectSyncId: opts.projectSyncId,
+        provider: opts.provider,
+        sourceStatusId: opts.sourceStatusId ?? null,
+        sourceStatusName: opts.sourceStatusName,
+        taskStateId: opts.taskStateId ?? null,
+        skipBackward: opts.skipBackward ?? false,
+        createdBy: opts.createdBy,
+      })
+      .onConflictDoUpdate({
+        target: [schema.statusMappings.projectSyncId, schema.statusMappings.sourceStatusName],
+        set: {
+          sourceStatusId: opts.sourceStatusId ?? null,
+          taskStateId: opts.taskStateId ?? null,
+          skipBackward: opts.skipBackward ?? false,
+        },
+      })
+      .returning({ id: schema.statusMappings.id });
+    return row.id;
+  }
+
+  // The mapping for an inbound (binding, source status name), if any — the engine's
+  // lookup to resolve which Cyborg state an inbound status change lands in. Served by
+  // UNIQUE(project_sync_id, source_status_name).
+  async getStatusMapping(
+    projectSyncId: string,
+    sourceStatusName: string,
+  ): Promise<StoredStatusMapping | null> {
+    const [row] = await this.db
+      .select()
+      .from(schema.statusMappings)
+      .where(
+        and(
+          eq(schema.statusMappings.projectSyncId, projectSyncId),
+          eq(schema.statusMappings.sourceStatusName, sourceStatusName),
+        ),
+      )
+      .limit(1);
+    return row ? mapStatusMapping(row) : null;
+  }
+
+  // All status mappings for a binding — drives the mapping config panel. Newest first.
+  async listStatusMappings(projectSyncId: string): Promise<StoredStatusMapping[]> {
+    const rows = await this.db
+      .select()
+      .from(schema.statusMappings)
+      .where(eq(schema.statusMappings.projectSyncId, projectSyncId))
+      .orderBy(desc(schema.statusMappings.createdAt));
+    return rows.map(mapStatusMapping);
+  }
+
+  // Upsert a Cyborg-user → provider-user mapping (outbound assignee write-back).
+  // Idempotent on UNIQUE(workspace_id, provider, cyborg_user_id) — re-mapping refreshes
+  // the external user/email. Returns the mapping id.
+  async upsertProviderUserConnection(opts: {
+    workspaceId: string;
+    provider: string;
+    cyborgUserId: string;
+    externalUserId: string;
+    externalEmail?: string | null;
+  }): Promise<string> {
+    const [row] = await this.db
+      .insert(schema.providerUserConnections)
+      .values({
+        id: `puconn_${randomUUID()}`,
+        workspaceId: opts.workspaceId,
+        provider: opts.provider,
+        cyborgUserId: opts.cyborgUserId,
+        externalUserId: opts.externalUserId,
+        externalEmail: opts.externalEmail ?? null,
+      })
+      .onConflictDoUpdate({
+        target: [
+          schema.providerUserConnections.workspaceId,
+          schema.providerUserConnections.provider,
+          schema.providerUserConnections.cyborgUserId,
+        ],
+        set: {
+          externalUserId: opts.externalUserId,
+          externalEmail: opts.externalEmail ?? null,
+        },
+      })
+      .returning({ id: schema.providerUserConnections.id });
+    return row.id;
+  }
+
+  // The provider-user mapping for a (workspace, provider, cyborg user), if any.
+  // Served by UNIQUE(workspace_id, provider, cyborg_user_id).
+  async getProviderUserConnection(
+    workspaceId: string,
+    provider: string,
+    cyborgUserId: string,
+  ): Promise<StoredProviderUserConnection | null> {
+    const [row] = await this.db
+      .select()
+      .from(schema.providerUserConnections)
+      .where(
+        and(
+          eq(schema.providerUserConnections.workspaceId, workspaceId),
+          eq(schema.providerUserConnections.provider, provider),
+          eq(schema.providerUserConnections.cyborgUserId, cyborgUserId),
+        ),
+      )
+      .limit(1);
+    return row ? mapProviderUserConnection(row) : null;
+  }
+
+  // ─── Atlassian Personal Data Reporting API support (jira-personal-data.ts) ──────
+  // provider_user_connections is the ONLY place we store a Jira accountId, so it is the
+  // source of truth for the subjects we report to (and erase from) Atlassian's
+  // report-accounts endpoint. See the user-privacy developer guide.
+
+  // App-wide (ALL workspaces) DISTINCT Jira accountIds with the OLDEST retrieval time, for
+  // the outbound Personal Data Reporting cycle. Keyset-paginated by external_user_id so the
+  // reporter can page the whole app in stable chunks. Returns [] past the last page.
+  async enumerateJiraPersonalDataSubjects(
+    afterAccountId: string | null,
+    limit: number,
+  ): Promise<{ accountId: string; updatedAt: number }[]> {
+    const rows = await this.db
+      .select({
+        accountId: schema.providerUserConnections.externalUserId,
+        // FLAG: created_at is the only timestamp on the row, so we use MIN(created_at) as the
+        // "personal data retrieved at" proxy; a dedicated retrieved_at column would be precise.
+        retrievedAt: sql<Date>`min(${schema.providerUserConnections.createdAt})`,
+      })
+      .from(schema.providerUserConnections)
+      .where(
+        afterAccountId === null
+          ? eq(schema.providerUserConnections.provider, "jira")
+          : and(
+              eq(schema.providerUserConnections.provider, "jira"),
+              gt(schema.providerUserConnections.externalUserId, afterAccountId),
+            ),
+      )
+      .groupBy(schema.providerUserConnections.externalUserId)
+      .orderBy(asc(schema.providerUserConnections.externalUserId))
+      .limit(limit);
+    return rows.map((r) => ({ accountId: r.accountId, updatedAt: r.retrievedAt.getTime() }));
+  }
+
+  // Erase ALL provider_user_connections rows for a Jira accountId across EVERY workspace (an
+  // Atlassian accountId is global), the erasure half of the Personal Data Reporting cycle
+  // when Atlassian reports an account "closed". Returns the number of rows deleted.
+  async eraseJiraPersonalDataSubject(accountId: string): Promise<number> {
+    const rows = await this.db
+      .delete(schema.providerUserConnections)
+      .where(
+        and(
+          eq(schema.providerUserConnections.provider, "jira"),
+          eq(schema.providerUserConnections.externalUserId, accountId),
+        ),
+      )
+      .returning({ id: schema.providerUserConnections.id });
+    return rows.length;
+  }
+
+  // App-wide list of installs for a provider (no workspace scope) — the Personal Data
+  // Reporting cycle needs any usable app bearer token, and all Jira installs share ONE OAuth
+  // app. Newest first, mirroring listIntegrationInstallations.
+  async listInstallationsByProvider(provider: string): Promise<StoredIntegrationInstallation[]> {
+    const rows = await this.db
+      .select()
+      .from(schema.integrationInstallations)
+      .where(eq(schema.integrationInstallations.provider, provider))
+      .orderBy(desc(schema.integrationInstallations.createdAt));
+    return rows.map(mapIntegrationInstallation);
+  }
 }
 
 // Map a github_repo_syncs row to the receiver/UI shape (epoch-ms createdAt).
@@ -12023,4 +12437,124 @@ function mapScheduleRunRow(r: typeof schema.scheduleRuns.$inferSelect): StoredSc
     agent_id: r.agentId,
     error: r.error,
   };
+}
+
+// ─── Provider-generic task-integration mappers (epoch-ms createdAt) ──────
+
+function mapProjectSync(r: typeof schema.projectSyncs.$inferSelect): StoredProjectSync {
+  return {
+    id: r.id,
+    workspaceId: r.workspaceId,
+    provider: r.provider,
+    installationId: r.installationId,
+    tasksProjectId: r.tasksProjectId,
+    externalProjectId: r.externalProjectId,
+    externalProjectName: r.externalProjectName,
+    externalUrl: r.externalUrl,
+    syncDirection: r.syncDirection,
+    createdBy: r.createdBy,
+    createdAt: r.createdAt.getTime(),
+  };
+}
+
+function mapTaskItemSync(r: typeof schema.taskItemSyncs.$inferSelect): StoredTaskItemSync {
+  return {
+    id: r.id,
+    projectSyncId: r.projectSyncId,
+    taskId: r.taskId,
+    provider: r.provider,
+    itemType: r.itemType,
+    itemNumber: r.itemNumber,
+    providerItemId: r.providerItemId,
+    itemUrl: r.itemUrl,
+    lastSyncedHash: r.lastSyncedHash,
+    createdAt: r.createdAt.getTime(),
+  };
+}
+
+function mapStatusMapping(r: typeof schema.statusMappings.$inferSelect): StoredStatusMapping {
+  return {
+    id: r.id,
+    workspaceId: r.workspaceId,
+    projectSyncId: r.projectSyncId,
+    provider: r.provider,
+    sourceStatusId: r.sourceStatusId,
+    sourceStatusName: r.sourceStatusName,
+    taskStateId: r.taskStateId,
+    skipBackward: r.skipBackward,
+    createdBy: r.createdBy,
+    createdAt: r.createdAt.getTime(),
+  };
+}
+
+function mapProviderUserConnection(
+  r: typeof schema.providerUserConnections.$inferSelect,
+): StoredProviderUserConnection {
+  return {
+    id: r.id,
+    workspaceId: r.workspaceId,
+    provider: r.provider,
+    cyborgUserId: r.cyborgUserId,
+    externalUserId: r.externalUserId,
+    externalEmail: r.externalEmail,
+    createdAt: r.createdAt.getTime(),
+  };
+}
+
+// A project_syncs row in the read shape (epoch-ms createdAt) — the Cyborg tasks-project
+// ↔ external provider project binding. installationId is nullable (loose, no FK).
+export interface StoredProjectSync {
+  id: string;
+  workspaceId: string;
+  provider: string;
+  installationId: string | null;
+  tasksProjectId: string;
+  externalProjectId: string;
+  externalProjectName: string | null;
+  externalUrl: string | null;
+  syncDirection: string;
+  createdBy: string;
+  createdAt: number;
+}
+
+// A task_item_syncs row — the external-item ↔ task back-link. itemNumber is the
+// external human key (TEXT); lastSyncedHash is the engine's durable echo backstop.
+export interface StoredTaskItemSync {
+  id: string;
+  projectSyncId: string;
+  taskId: string;
+  provider: string;
+  itemType: string;
+  itemNumber: string;
+  providerItemId: string;
+  itemUrl: string | null;
+  lastSyncedHash: string | null;
+  createdAt: number;
+}
+
+// A status_mappings row — one source-status → Cyborg task-state map per binding.
+// taskStateId is loose (no FK); NULL = not chosen yet.
+export interface StoredStatusMapping {
+  id: string;
+  workspaceId: string;
+  projectSyncId: string;
+  provider: string;
+  sourceStatusId: string | null;
+  sourceStatusName: string;
+  taskStateId: string | null;
+  skipBackward: boolean;
+  createdBy: string;
+  createdAt: number;
+}
+
+// A provider_user_connections row — reverse Cyborg-user → provider-user map for
+// outbound assignee write-back (wave 2).
+export interface StoredProviderUserConnection {
+  id: string;
+  workspaceId: string;
+  provider: string;
+  cyborgUserId: string;
+  externalUserId: string;
+  externalEmail: string | null;
+  createdAt: number;
 }
