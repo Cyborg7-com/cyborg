@@ -312,7 +312,10 @@ interface FormattableTask {
 // One task → a single compact line (handle + title + metadata). Shared by both the
 // flat and grouped renderers so they stay consistent.
 function formatTaskLine(t: FormattableTask): string {
-  const handle = t.sequence_id != null ? `#${t.sequence_id}` : t.id;
+  // The addressable `id` leads every line — it is the token update_task/delete_task
+  // resolve by. `#sequence` is a human-only reference and is NOT accepted by those
+  // tools, so it can never be the primary handle.
+  const handle = t.sequence_id != null ? `${t.id} (#${t.sequence_id})` : t.id;
   const meta: string[] = [];
   if (t.priority && t.priority !== "none") meta.push(`prio:${t.priority}`);
   if (t.assignee_id) meta.push(`-> ${t.assignee_id}`);
@@ -1113,8 +1116,10 @@ export function createCyborg7McpServer(deps: Cyborg7McpDeps, ctx: Cyborg7McpCont
     server.tool(
       "cyborg7_list_tasks",
       "List tasks in the workspace. Filter by status, assignee, project, workflow " +
-        "state, priority, or label. Each line shows the per-project sequence id, state/" +
-        "priority, and any label/module ids.",
+        "state, priority, or label. Each line STARTS WITH the task's id — that leading " +
+        "token is what you pass to cyborg7_update_task / cyborg7_delete_task. The `#N` " +
+        "shown after it is the per-project sequence, a human-facing reference only (NOT " +
+        "accepted by those tools). Lines also carry state/priority and any label/module ids.",
       {
         status: z.string().optional().describe(TASK_STATUS_HELP),
         assignee: z
@@ -1667,7 +1672,13 @@ export function createCyborg7McpServer(deps: Cyborg7McpDeps, ctx: Cyborg7McpCont
         "move it between projects/cycles, retag its labels/modules, or record a result. " +
         "Every field except taskId is optional; omitted fields are left unchanged.",
       {
-        taskId: z.string().describe("Task ID"),
+        taskId: z
+          .string()
+          .describe(
+            "The task's id (the leading `task…`/uuid token shown by cyborg7_list_tasks, " +
+              "or the id returned by cyborg7_create_task). The `#N` sequence shown in lists " +
+              "is NOT accepted.",
+          ),
         status: z
           .string()
           .optional()
@@ -1892,7 +1903,13 @@ export function createCyborg7McpServer(deps: Cyborg7McpDeps, ctx: Cyborg7McpCont
       "Archive (or restore) a task. Archived tasks are hidden from the active board " +
         "but kept (reversible). Pass archived=false to restore.",
       {
-        taskId: z.string().describe("Task ID"),
+        taskId: z
+          .string()
+          .describe(
+            "The task's id (the leading `task…`/uuid token shown by cyborg7_list_tasks, " +
+              "or the id returned by cyborg7_create_task). The `#N` sequence shown in lists " +
+              "is NOT accepted.",
+          ),
         archived: z
           .boolean()
           .optional()
@@ -1934,7 +1951,13 @@ export function createCyborg7McpServer(deps: Cyborg7McpDeps, ctx: Cyborg7McpCont
       "Permanently delete a task (irreversible). Prefer cyborg7_archive_task unless " +
         "the task must be removed entirely.",
       {
-        taskId: z.string().describe("Task ID"),
+        taskId: z
+          .string()
+          .describe(
+            "The task's id (the leading `task…`/uuid token shown by cyborg7_list_tasks, " +
+              "or the id returned by cyborg7_create_task). The `#N` sequence shown in lists " +
+              "is NOT accepted.",
+          ),
       },
       async ({ taskId }) => {
         // Cloud: dedicated delete_task kind (workspace-anchored relay-side).
@@ -1969,7 +1992,14 @@ export function createCyborg7McpServer(deps: Cyborg7McpDeps, ctx: Cyborg7McpCont
         "or reassign a batch). Every patch field except taskIds is optional; omitted " +
         "fields are left unchanged.",
       {
-        taskIds: z.array(z.string()).min(1).describe("Task IDs to update"),
+        taskIds: z
+          .array(z.string())
+          .min(1)
+          .describe(
+            "The ids of the tasks to update (each the leading `task…`/uuid token shown by " +
+              "cyborg7_list_tasks, or an id returned by cyborg7_create_task). The `#N` sequence " +
+              "shown in lists is NOT accepted.",
+          ),
         status: z
           .string()
           .optional()

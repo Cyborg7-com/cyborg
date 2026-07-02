@@ -1603,6 +1603,20 @@ describe("cyborg7_list_tasks — D1 taxonomy: returns every status incl. backlog
     expect(summed).toBe(total);
   });
 
+  // Regression: once tasks are backfilled with a per-project sequence_id, the line must
+  // STILL carry the raw `id` (the only token update_task/delete_task resolve by) — the
+  // `#seq` is a human hint, not a substitute. Before the fix the id was hidden behind
+  // `#51`, so a cybo could list a task but never address it.
+  it("the formatted line carries the raw id AND the #sequence when a sequence exists", () => {
+    const out = formatTasksByStatus([
+      { id: "task_abc", title: "T", status: "backlog", assignee_id: null, sequence_id: 51 },
+    ]);
+    expect(out).toContain("task_abc");
+    expect(out).toContain("#51");
+    // The id is the leading token of the task line (what you pass to update/delete).
+    expect(out).toContain("task_abc (#51): T");
+  });
+
   it("an unfiltered list_tasks returns ALL 85 tasks across every status (incl. backlog + pending)", async () => {
     const { tasks, total } = buildFixture();
     // Cloud daemon: the cybo's read round-trips to the relay's getTasks. With NO
@@ -1637,6 +1651,28 @@ describe("cyborg7_list_tasks — D1 taxonomy: returns every status incl. backlog
     // The full 85 are accounted for in the grouped output.
     const summed = [...text.matchAll(/\((\d+)\):/g)].reduce((a, m) => a + Number(m[1]), 0);
     expect(summed).toBe(total);
+  });
+
+  it("list_tasks renders the raw id even for a sequenced task (addressable by update/delete)", async () => {
+    // A backfilled task carries a sequence_id; the cybo must still see the raw id.
+    const cyboRead = async (req: Record<string, unknown>) => {
+      if (req.kind === "tasks") {
+        return {
+          ok: true,
+          tasks: [{ id: "task_seq_9", title: "Backfilled", status: "backlog", sequence_id: 9 }],
+        };
+      }
+      return { ok: false, error: "unexpected read" };
+    };
+    const deps = {
+      storage: { getChannels: () => [], getMessages: () => [], pg: null },
+      messageRouter: {},
+      cyboRead,
+    } as unknown as Cyborg7McpDeps;
+
+    const text = await callToolAsCybo(deps, "cyborg7_list_tasks", {});
+    expect(text).toContain("task_seq_9");
+    expect(text).toContain("#9");
   });
 
   it("the advertised status filter values are the REAL taxonomy (no `pending_review`/`todo`-only)", () => {
