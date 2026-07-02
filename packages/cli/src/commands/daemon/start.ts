@@ -5,6 +5,7 @@ import {
   startLocalDaemonForeground,
   startLocalDaemonDetached,
   resolveLocalDaemonState,
+  stopLocalDaemon,
   type DaemonStartOptions as StartOptions,
 } from "./local-daemon.js";
 import { getErrorMessage } from "../../utils/errors.js";
@@ -13,6 +14,7 @@ export type { DaemonStartOptions as StartOptions } from "./local-daemon.js";
 
 type RawStartCommandOptions = StartOptions & {
   allowedHosts?: string;
+  replace?: boolean;
 };
 
 export function startCommand(): Command {
@@ -30,16 +32,21 @@ export function startCommand(): Command {
       "--hostnames <hosts>",
       'Daemon hostnames (comma-separated, e.g. "myhost,.example.com" or "true" for any)',
     )
+    .option(
+      "--replace",
+      "Reap a daemon already running in this home (e.g. an older build after an update) and take over, instead of the idempotent no-op. Used by the installer and by systemd ExecStart so an update actually applies.",
+    )
     .addOption(new Option("--allowed-hosts <hosts>").hideHelp())
     .action(async (options: RawStartCommandOptions) => {
       await runStart({
         ...options,
         hostnames: options.hostnames ?? options.allowedHosts,
+        replace: options.replace,
       });
     });
 }
 
-export async function runStart(options: StartOptions): Promise<void> {
+export async function runStart(options: StartOptions & { replace?: boolean }): Promise<void> {
   if (options.listen && options.port) {
     console.error(chalk.red("Cannot use --listen and --port together"));
     process.exit(1);
@@ -70,9 +77,27 @@ export async function runStart(options: StartOptions): Promise<void> {
       );
       return;
     }
-    console.log(chalk.green(`A daemon is already running in this home (PID ${pid}${where}).`));
-    console.log(chalk.dim("Nothing to do. Use `cyborg daemon restart` to restart it."));
-    return;
+    // --replace: an update swapped the on-disk bundle but this old process keeps
+    // serving until it's cycled. The installer and a systemd ExecStart pass --replace
+    // so the update actually applies: reap the stale daemon (never the desktop-managed
+    // one, handled above) and fall through to bind fresh. Without the flag, stay
+    // idempotent (#733/#744 cross-install safety) — a plain `start` never fights an
+    // existing daemon.
+    if (options.replace) {
+      console.log(chalk.yellow(`Replacing the daemon already running in this home (PID ${pid}).`));
+      try {
+        await stopLocalDaemon({ home: options.home, force: true });
+      } catch (err) {
+        exitWithError(
+          `Failed to stop the existing daemon before replacing it: ${getErrorMessage(err)}`,
+        );
+      }
+      // fall through to start below
+    } else {
+      console.log(chalk.green(`A daemon is already running in this home (PID ${pid}${where}).`));
+      console.log(chalk.dim("Nothing to do. Use `cyborg daemon restart` to restart it."));
+      return;
+    }
   }
 
   if (!options.foreground) {
