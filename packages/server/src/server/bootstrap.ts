@@ -1842,13 +1842,26 @@ export async function createPaseoDaemon(
     // local SQLite (solo). Fail-OPEN: a transient relay/PG blip defaults to ENABLED
     // so a Tasks workspace's task tools aren't stripped mid-conversation (the cybo
     // tools degrade gracefully at execution); the external PAT server fails closed.
-    const resolveTasksEnabled = async (workspaceId: string, cyboId?: string): Promise<boolean> => {
+    const resolveTasksEnabled = async (
+      workspaceId: string,
+      cyboId?: string,
+      userId?: string,
+    ): Promise<boolean> => {
       try {
         if (cyborgStorage.pg) {
           return (await cyborgStorage.pg.getTasksProjects(workspaceId)).length > 0;
         }
-        if (cyborgRelayClient && cyboId) {
-          const res = await cyborgRelayClient.cyboRead({ workspaceId, cyboId, kind: "projects" });
+        // A cybo probes as itself; a NON-cybo workspace session probes as its
+        // spawning user (userId) — without this a plain session on a cloud daemon
+        // fell through to the near-empty local SQLite below, resolved false, and
+        // silently lost the task tools even though the workspace has Tasks.
+        if (cyborgRelayClient && (cyboId || userId)) {
+          const res = await cyborgRelayClient.cyboRead({
+            workspaceId,
+            cyboId,
+            userId: cyboId ? undefined : userId,
+            kind: "projects",
+          });
           // null = relay unreachable → fail-open ENABLED; a definite answer decides.
           return res ? res.ok && (res.projects?.length ?? 0) > 0 : true;
         }
@@ -1879,7 +1892,18 @@ export async function createPaseoDaemon(
           }
         }
       }
-      const tasksEnabled = await resolveTasksEnabled(workspaceId, binding?.cybo_id ?? undefined);
+      // A NON-cybo agent (no cybo binding) acts with its SPAWNING USER's authority:
+      // its task/schedule writes are owned by that user (the binding's initiated_by),
+      // not the ephemeral agent UUID — so a schedule's created_by is a real workspace
+      // member and the runner's isCreatorStillAuthorized passes. A cybo keeps its own
+      // owner attribution, so this stays undefined for cybos. The SAME identity scopes
+      // the tasksEnabled probe below.
+      const initiatedByUserId = binding?.cybo_id ? undefined : (binding?.initiated_by ?? undefined);
+      const tasksEnabled = await resolveTasksEnabled(
+        workspaceId,
+        binding?.cybo_id ?? undefined,
+        initiatedByUserId,
+      );
       const mcpServer = createCyborg7McpServer(
         {
           storage: cyborgStorage,
@@ -1909,13 +1933,8 @@ export async function createPaseoDaemon(
           agentId,
           cyboId: binding?.cybo_id ?? undefined,
           platformPermissions,
-          // A NON-cybo agent (no cybo binding) acts with its SPAWNING USER's
-          // authority: its task/schedule writes are owned by that user (the
-          // binding's initiated_by), not the ephemeral agent UUID — so a schedule's
-          // created_by is a real workspace member and the runner's
-          // isCreatorStillAuthorized passes. A cybo keeps its own owner attribution
-          // (the cybo's owner), so this stays undefined for cybos.
-          initiatedByUserId: binding?.cybo_id ? undefined : (binding?.initiated_by ?? undefined),
+          // The spawning user behind a NON-cybo agent — see the const above.
+          initiatedByUserId,
           // The channel this agent is bound to, so create_task can auto-resolve the
           // channel's Tasks-project when the cybo doesn't pass an explicit channelId.
           channelId: binding?.channel_id ?? undefined,

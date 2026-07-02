@@ -1186,10 +1186,14 @@ export function createCyborg7McpServer(deps: Cyborg7McpDeps, ctx: Cyborg7McpCont
         // read returns the workspace's full set (its response carries no archived
         // flag), so `includeArchived` narrows only the local fallback.
         try {
-          if (cyboRead && ctx.cyboId) {
+          // A non-cybo workspace session reads with its spawning user's identity —
+          // same relay round-trip as readTasks, otherwise it only ever sees the
+          // near-empty local catalog.
+          if (cyboRead && (ctx.cyboId || ctx.initiatedByUserId)) {
             const res = await cyboRead({
               workspaceId: ctx.workspaceId,
               cyboId: ctx.cyboId,
+              userId: ctx.cyboId ? undefined : ctx.initiatedByUserId,
               kind: "projects",
             });
             if (res) {

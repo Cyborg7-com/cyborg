@@ -836,6 +836,52 @@ describe("cyborg7_list_tasks — non-cybo session reads via the relay with the u
   });
 });
 
+// Same non-cybo relay routing for the projects catalog — it also backs the daemon's
+// tasksEnabled probe, so a non-cybo session falling to the empty local catalog would
+// silently strip the task tools.
+describe("cyborg7_list_projects — non-cybo session reads via the relay with the user id", () => {
+  it("routes the projects read through the relay attributed to the spawning user", async () => {
+    const reads: Array<Record<string, unknown>> = [];
+    const deps = {
+      storage: { getTasksProjects: () => [], pg: null },
+      messageRouter: {},
+      cyboRead: async (req: Record<string, unknown>) => {
+        reads.push(req);
+        if (req.kind === "projects") {
+          return {
+            ok: true,
+            projects: [{ id: "p1", identifier: "INBOX", name: "Inbox", isInbox: true }],
+          };
+        }
+        return null;
+      },
+    } as unknown as Cyborg7McpDeps;
+
+    const server = createCyborg7McpServer(deps, {
+      workspaceId: "ws_1",
+      agentId: "ag_1",
+      initiatedByUserId: "user_1",
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    const client = new Client({ name: "test", version: "1.0.0" });
+    await client.connect(clientTransport);
+    try {
+      const res = (await client.callTool({ name: "cyborg7_list_projects", arguments: {} })) as {
+        content: Array<{ text: string }>;
+      };
+      const text = res.content.map((c) => c.text).join("\n");
+      expect(reads).toHaveLength(1);
+      expect(reads[0]).toMatchObject({ kind: "projects", userId: "user_1" });
+      expect(reads[0].cyboId).toBeUndefined();
+      expect(text).toContain("Inbox");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+});
+
 // react + search reconciliation (audit follow-ups; same relay-aware pattern
 // as the #421 reads above): the message row IS synced locally, but the channel
 // catalog + membership live in the relay's PG on cloud daemons.

@@ -1137,6 +1137,54 @@ export class WorkspaceRelay {
     this.send(ws, reply);
   }
 
+  // Serve a kind:"projects" cybo_read. The Tasks-projects catalog is workspace-scoped
+  // (no per-user ACL), but the requester's identity is validated the same way as the
+  // tasks read: a cybo read resolves the cybo in THIS workspace to its owner, a
+  // non-cybo read carries its user directly, and either way the effective user must
+  // be a current workspace member — so an arbitrary/foreign cyboId can't enumerate
+  // another workspace's projects. This read also backs the daemon's tasksEnabled
+  // probe for plain (non-cybo) workspace sessions — failing it closed for them would
+  // strip their task tools.
+  private async handleCyboReadProjects(
+    ws: WebSocket,
+    msg: { requestId: string; workspaceId: string; cyboId?: string; userId?: string },
+    fail: (error: string) => void,
+  ): Promise<void> {
+    if (!this.pg) {
+      fail("cybo reads need the shared workspace store (relay has no PG)");
+      return;
+    }
+    let userId = msg.userId;
+    if (msg.cyboId) {
+      const cybo = (await this.pg.getCybos(msg.workspaceId)).find((c) => c.id === msg.cyboId);
+      if (!cybo) {
+        fail("cybo not found in this workspace");
+        return;
+      }
+      userId = cybo.created_by;
+    }
+    if (!userId) {
+      fail("cybo_read requires cyboId or userId for this kind");
+      return;
+    }
+    if (!(await this.pg.isMember(msg.workspaceId, userId))) {
+      fail(
+        msg.cyboId
+          ? "cybo owner is no longer a member of this workspace"
+          : "user is no longer a member of this workspace",
+      );
+      return;
+    }
+    const projects = await this.pg.getTasksProjects(msg.workspaceId);
+    const reply: CyboReadResponse = {
+      type: "cybo_read_response",
+      requestId: msg.requestId,
+      ok: true,
+      projects,
+    };
+    this.send(ws, reply);
+  }
+
   private async handleCyboRead(
     ws: WebSocket,
     msg: {
@@ -1185,12 +1233,19 @@ export class WorkspaceRelay {
       return;
     }
     try {
-      // kind:"tasks" supports a user-attributed (non-cybo) read via msg.userId, so it
-      // is handled BEFORE the cyboId requirement below. Every OTHER kind is cybo-scoped
-      // and dereferences a concrete cyboId, so fail closed without one — this guard
-      // also narrows msg.cyboId to `string` for the handlers that follow.
+      // kind:"tasks" and kind:"projects" support a user-attributed (non-cybo) read via
+      // msg.userId, so they are handled BEFORE the cyboId requirement below. The
+      // projects read also backs the daemon's tasksEnabled probe for plain (non-cybo)
+      // workspace sessions — failing it closed would strip the task tools from every
+      // such session. Every OTHER kind is cybo-scoped and dereferences a concrete
+      // cyboId, so fail closed without one — this guard also narrows msg.cyboId to
+      // `string` for the handlers that follow.
       if (msg.kind === "tasks") {
         await this.handleCyboReadTasks(ws, msg, fail);
+        return;
+      }
+      if (msg.kind === "projects") {
+        await this.handleCyboReadProjects(ws, msg, fail);
         return;
       }
       if (!msg.cyboId) {
@@ -1251,22 +1306,8 @@ export class WorkspaceRelay {
         this.send(ws, reply);
         return;
       }
-      if (msg.kind === "projects") {
-        // Workspace-wide Tasks-projects from the SHARED PG — the same projects the
-        // UI/board see. Not channel-gated: any cybo in the workspace can list them
-        // (mirrors the workspace-wide tasks/roster reads). This is why
-        // cyborg7_list_projects on a cloud daemon (no PG handle) must round-trip here
-        // instead of reading its near-empty local SQLite cache.
-        const projects = await this.pg.getTasksProjects(msg.workspaceId);
-        const reply: CyboReadResponse = {
-          type: "cybo_read_response",
-          requestId: msg.requestId,
-          ok: true,
-          projects,
-        };
-        this.send(ws, reply);
-        return;
-      }
+      // kind:"projects" is handled before the cyboId guard above (it supports both the
+      // cybo and non-cybo user path), so it never reaches here.
       if (msg.kind === "pages" || msg.kind === "page") {
         // Documented Pages read — owner-ACL gated. Extracted to keep handleCyboRead
         // under the complexity cap.
