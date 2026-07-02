@@ -1934,7 +1934,15 @@ class ClaudeAgentSession implements AgentSession {
   async respondToPermission(requestId: string, response: AgentPermissionResponse): Promise<void> {
     const pending = this.pendingPermissions.get(requestId);
     if (!pending) {
-      throw new Error(`No pending permission request with id '${requestId}'`);
+      // A stale/duplicate permission reply — the request already resolved or timed
+      // out, or a relay reconnect replayed it — is benign and must NOT throw: this is
+      // reached fire-and-forget from the relay inbound path, where an unhandled
+      // rejection crashed the daemon. Warn and no-op instead of throwing.
+      this.logger.warn(
+        { requestId },
+        "respondToPermission: no pending request (stale/duplicate reply) — ignoring",
+      );
+      return;
     }
     this.pendingPermissions.delete(requestId);
     pending.cleanup?.();

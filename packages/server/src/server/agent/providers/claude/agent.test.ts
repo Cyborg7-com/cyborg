@@ -1703,3 +1703,27 @@ describe("ClaudeAgentSession context window usage", () => {
     ]);
   });
 });
+
+describe("ClaudeAgentSession.respondToPermission", () => {
+  const logger = createTestLogger();
+
+  test("a stale/unknown permission id is ignored, not thrown", async () => {
+    // Regression: a duplicate/late permission reply (request already resolved, or a
+    // relay reconnect replayed it) reaches this fire-and-forget from the relay inbound
+    // path. Throwing here surfaced as an unhandled rejection that crashed the daemon
+    // worker (wiping in-process state → duplicate cybo sessions). Must warn+noop.
+    const queryFactory = vi.fn(() => ({ close: vi.fn(), return: vi.fn() }));
+    const client = new ClaudeAgentClient({
+      logger,
+      queryFactory,
+      resolveBinary: async () => "/test/claude/bin",
+    });
+    const session = await client.createSession({ provider: "claude", cwd: process.cwd() });
+
+    await expect(
+      session.respondToPermission("does-not-exist", { behavior: "deny" } as never),
+    ).resolves.toBeUndefined();
+
+    await session.close();
+  });
+});

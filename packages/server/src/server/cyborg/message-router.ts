@@ -1648,11 +1648,20 @@ export class MessageRouter {
 
     const localAgent = this.agentManager.getAgent(agentId);
     if (localAgent) {
-      void this.agentManager.respondToPermission(
-        agentId,
-        requestId,
-        response as import("../agent/agent-sdk-types.js").AgentPermissionResponse,
-      );
+      // Fire-and-forget, but a rejection must NEVER escape as an unhandled promise
+      // rejection: this runs inside the relay inbound handler, so a throw here — e.g.
+      // a stale/duplicate permission reply after a relay reconnect/replay — crashed
+      // the whole daemon worker, wiping in-process session-reuse + the @mention/watch
+      // dedup Sets → duplicate cybo sessions. Swallow-and-log instead of `void`.
+      this.agentManager
+        .respondToPermission(
+          agentId,
+          requestId,
+          response as import("../agent/agent-sdk-types.js").AgentPermissionResponse,
+        )
+        .catch((err) => {
+          this.logger?.warn({ err, agentId, requestId }, "respondToPermission failed — ignoring");
+        });
       return;
     }
 
