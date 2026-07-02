@@ -254,6 +254,19 @@ interface TaskSearchRow {
   userImageUrl: string | null;
 }
 
+// The set of assignee ids a tasks page should match: the identity-aware
+// `assigneeIds` (a human's canonical + aliased local ids) when present, else the
+// single `assigneeId`, else null (no assignee filter). Extracted so getTasksPage
+// stays a single branch under the complexity cap.
+function assigneeFilterIds(filter?: {
+  assigneeId?: string;
+  assigneeIds?: string[];
+}): string[] | null {
+  if (filter?.assigneeIds?.length) return filter.assigneeIds;
+  if (filter?.assigneeId) return [filter.assigneeId];
+  return null;
+}
+
 export class PgSync {
   private db: NodePgDatabase<typeof schema>;
 
@@ -280,6 +293,45 @@ export class PgSync {
       })
       .returning({ id: schema.users.id });
     return row.id;
+  }
+
+  // Record a proven local→canonical identity link (see user_identity_aliases).
+  // Idempotent: a re-claim re-points the alias to the current canonical id. Never
+  // links an id to itself (a no-op that would only add a self-referential tombstone).
+  async upsertUserIdentityAlias(
+    localId: string,
+    canonicalId: string,
+    email?: string | null,
+  ): Promise<void> {
+    if (!localId || !canonicalId || localId === canonicalId) return;
+    await this.db
+      .insert(schema.userIdentityAliases)
+      .values({ localId, canonicalId, email: email ?? null })
+      .onConflictDoUpdate({
+        target: schema.userIdentityAliases.localId,
+        set: { canonicalId, email: email ?? null, mergedAt: sql`now()` },
+      });
+  }
+
+  // Resolve EVERY id that belongs to the same human as `userId`: the canonical id
+  // itself plus any local ids aliased to it (and, if `userId` is itself an alias,
+  // its canonical + siblings). Used by ownership reads so "assigned to me" and
+  // visibility match a viewer against all of their ids. Always includes the input
+  // id, so a caller with no aliases just gets `[userId]` (a plain single-id match).
+  async getIdentityIdsForUser(userId: string): Promise<string[]> {
+    const ids = new Set<string>([userId]);
+    const [asAlias] = await this.db
+      .select({ canonicalId: schema.userIdentityAliases.canonicalId })
+      .from(schema.userIdentityAliases)
+      .where(eq(schema.userIdentityAliases.localId, userId));
+    const canonical = asAlias?.canonicalId ?? userId;
+    ids.add(canonical);
+    const locals = await this.db
+      .select({ localId: schema.userIdentityAliases.localId })
+      .from(schema.userIdentityAliases)
+      .where(eq(schema.userIdentityAliases.canonicalId, canonical));
+    for (const l of locals) ids.add(l.localId);
+    return Array.from(ids);
   }
 
   async getUserByEmail(email: string): Promise<{
@@ -2225,6 +2277,11 @@ export class PgSync {
     filter?: {
       status?: string;
       assigneeId?: string;
+      // Identity-aware assignee filter: match ANY of these ids (a human's canonical
+      // id + its aliased local ids, resolved by the caller via getIdentityIdsForUser).
+      // Takes precedence over the single `assigneeId` so "assigned to me" surfaces a
+      // task assigned to the viewer's OTHER (local/legacy) identity too.
+      assigneeIds?: string[];
       limit?: number;
       cursor?: string;
       userId?: string;
@@ -2235,7 +2292,11 @@ export class PgSync {
   ): Promise<{ tasks: StoredTask[]; nextCursor: string | null }> {
     const conditions = [eq(schema.tasks.workspaceId, workspaceId)];
     if (filter?.status) conditions.push(eq(schema.tasks.status, filter.status));
-    if (filter?.assigneeId) conditions.push(eq(schema.tasks.assigneeId, filter.assigneeId));
+    // assigneeIds (the identity-aware set) wins over the single assigneeId; a
+    // one-element inArray is equivalent to eq. Resolution lives in a helper so this
+    // hot method stays a single branch (under the complexity cap).
+    const assigneeIds = assigneeFilterIds(filter);
+    if (assigneeIds) conditions.push(inArray(schema.tasks.assigneeId, assigneeIds));
     if (filter?.projectId) conditions.push(eq(schema.tasks.projectId, filter.projectId));
     if (filter?.userId) conditions.push(this.taskVisibilityCondition(workspaceId, filter.userId)!);
 

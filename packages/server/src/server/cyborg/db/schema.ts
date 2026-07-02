@@ -55,6 +55,33 @@ export const users = pgTable("users", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
+// ─── User identity aliases (local↔canonical merge) ────────────────
+// A single human ends up with TWO user rows: their daemon-LOCAL id (for which
+// ensureUser mints a synthetic `<id>@remote.local` placeholder) and their real
+// CLOUD account id. This table records the proven link `local_id → canonical_id`
+// so ownership reads (tasks "assigned to me", membership, session visibility) can
+// match a viewer against ALL of their ids, and a one-time backfill can re-point
+// legacy rows onto the canonical id. The link is written ONLY where both ids are
+// simultaneously known and verified (the daemon-claim / adoptCanonicalUserId seam),
+// NEVER inferred by email similarity. The alias row also acts as the tombstone for
+// the retired local id: a stray legacy row still resolves to its canonical owner.
+export const userIdentityAliases = pgTable(
+  "user_identity_aliases",
+  {
+    // The retired daemon-local (or otherwise non-canonical) user id.
+    localId: text("local_id").primaryKey(),
+    // The surviving canonical (cloud account) user id this local id resolves to.
+    canonicalId: text("canonical_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    // Snapshot of the shared email at merge time (audit / debugging only — the merge
+    // is authorized by the claim handshake, not by this value).
+    email: text("email"),
+    mergedAt: timestamp("merged_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("idx_user_identity_aliases_canonical").on(t.canonicalId)],
+);
+
 // ─── Email OTP (signup verification) ──────────────────────────────
 // One pending verification per email. A re-request overwrites the row
 // (resets code + attempts). The hashed code, plus the pending account's

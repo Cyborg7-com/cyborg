@@ -4301,9 +4301,17 @@ async function main() {
             }
             ftProjectId = resolved;
           }
+          // Identity-aware "assigned to X": expand the assignee filter to every id
+          // that belongs to the same human (canonical + aliased local ids), so a task
+          // assigned to the viewer's OTHER identity still shows under "assigned to me".
+          // A cybo/agent id (no aliases) just resolves to itself — a plain single match.
+          const ftAssigneeId = inner.assigneeId as string | undefined;
+          const ftAssigneeIds = ftAssigneeId
+            ? await pg.getIdentityIdsForUser(ftAssigneeId)
+            : undefined;
           const { tasks, nextCursor } = await pg.getTasksPage(workspaceId, {
             status: inner.status as string | undefined,
-            assigneeId: inner.assigneeId as string | undefined,
+            assigneeIds: ftAssigneeIds,
             limit: inner.limit as number | undefined,
             cursor: inner.cursor as string | undefined,
             // Tasks Redesign — scope to the resolved tasks_projects.id when given.

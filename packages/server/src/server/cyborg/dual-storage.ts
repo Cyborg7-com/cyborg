@@ -101,10 +101,26 @@ export class DualStorage {
   // payload) for an email already present locally under a different id. Re-keys
   // the SQLite row (migrating its child data) and mirrors the upsert to PG.
   adoptCanonicalUserId(email: string, canonicalId: string, name?: string | null): StoredUser {
+    // The SQLite row's id BEFORE the re-key is the local id we're retiring — capture
+    // it so we can record the local→canonical alias in PG (the daemon re-keys its
+    // own SQLite, but the shared PG still holds rows stamped with the old local id).
+    const priorLocalId = this.sqlite.getUserByEmail(email)?.id;
     const user = this.sqlite.adoptCanonicalUserId(email, canonicalId, name);
     if (this._pg) {
-      this._pg
+      const pg = this._pg;
+      // Record the proven link so ownership reads match the viewer against both ids
+      // and a backfill can re-point legacy rows (only when the ids actually differ).
+      // CHAINED after upsertUser: the alias FK references users.canonical_id, so
+      // firing both concurrently could insert the alias before the canonical user row
+      // exists → FK violation. Wait for the user, then write the alias.
+      void pg
         .upsertUser(canonicalId, email, name)
+        .then(() => {
+          if (priorLocalId && priorLocalId !== canonicalId) {
+            return pg.upsertUserIdentityAlias(priorLocalId, canonicalId, email);
+          }
+          return undefined;
+        })
         .catch(this.logSyncError("adoptCanonicalUserId"));
     }
     return user;
