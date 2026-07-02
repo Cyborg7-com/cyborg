@@ -1047,12 +1047,104 @@ export class WorkspaceRelay {
   // here. Mirrors what the UI's fetch_channels does, scoped to the cybo:
   // channels come with the cybo's membership flag; history requires membership
   // (same fail-safe as the daemon-side requireChannelMembership gate).
+  // Serve a kind:"tasks" cybo_read, scoped to the task visibility of ONE user:
+  //  - cybo read (msg.cyboId): the cybo's OWNER (cybos.created_by) — a cybo inherits
+  //    its owner's visibility.
+  //  - non-cybo read (msg.userId): the SPAWNING USER directly — a plain Claude/Codex
+  //    workspace session acts with its user's authority.
+  // The effective user must be a current workspace member, and getTasks(userId)
+  // applies taskVisibilityCondition so a project-restricted task never leaks.
+  private async handleCyboReadTasks(
+    ws: WebSocket,
+    msg: {
+      requestId: string;
+      workspaceId: string;
+      cyboId?: string;
+      userId?: string;
+      status?: string;
+      assigneeId?: string;
+      projectId?: string;
+      state?: string;
+      priority?: string;
+      label?: string;
+    },
+    fail: (error: string) => void,
+  ): Promise<void> {
+    if (!this.pg) {
+      fail("cybo reads need the shared workspace store (relay has no PG)");
+      return;
+    }
+    let userId: string | undefined;
+    if (msg.cyboId) {
+      userId = (await this.pg.getCybos(msg.workspaceId)).find(
+        (c) => c.id === msg.cyboId,
+      )?.created_by;
+      if (!userId) {
+        fail("cybo not found in this workspace");
+        return;
+      }
+    } else if (msg.userId) {
+      userId = msg.userId;
+    }
+    if (!userId) {
+      fail("cybo_read tasks requires cyboId or userId");
+      return;
+    }
+    if (!(await this.pg.isMember(msg.workspaceId, userId))) {
+      fail(
+        msg.cyboId
+          ? "cybo owner is no longer a member of this workspace"
+          : "user is no longer a member of this workspace",
+      );
+      return;
+    }
+    // status/assigneeId are the only filters the shared getTasks read applies (same as
+    // the UI's cyborg:fetch_tasks path). The Tasks Redesign filters
+    // (projectId/state/priority/label) aren't part of the getTasks API, so apply them
+    // in-memory over the rich rows it already returns.
+    const tasks = await this.pg.getTasks(msg.workspaceId, {
+      status: msg.status,
+      assigneeId: msg.assigneeId,
+      userId,
+    });
+    const filtered = tasks.filter((t) => {
+      if (msg.projectId && t.project_id !== msg.projectId) return false;
+      if (msg.priority && t.priority !== msg.priority) return false;
+      if (msg.state && t.state_id !== msg.state) return false;
+      if (msg.label && !(t.label_ids ?? []).includes(msg.label)) return false;
+      return true;
+    });
+    const reply: CyboReadResponse = {
+      type: "cybo_read_response",
+      requestId: msg.requestId,
+      ok: true,
+      tasks: filtered.map((t) => ({
+        id: t.id,
+        title: t.title,
+        status: t.status,
+        assignee_id: t.assignee_id ?? null,
+        description: t.description ?? null,
+        due_at: t.due_at ?? null,
+        created_at: t.created_at,
+        sequence_id: t.sequence_id ?? null,
+        state_id: t.state_id ?? null,
+        priority: t.priority ?? null,
+        project_id: t.project_id ?? null,
+        label_ids: t.label_ids ?? [],
+        module_ids: t.module_ids ?? [],
+      })),
+    };
+    this.send(ws, reply);
+  }
+
   private async handleCyboRead(
     ws: WebSocket,
     msg: {
       requestId: string;
       workspaceId: string;
-      cyboId: string;
+      // A cybo read sends cyboId; a non-cybo (user-attributed) read sends userId.
+      cyboId?: string;
+      userId?: string;
       kind:
         | "channels"
         | "history"
@@ -1093,13 +1185,29 @@ export class WorkspaceRelay {
       return;
     }
     try {
+      // kind:"tasks" supports a user-attributed (non-cybo) read via msg.userId, so it
+      // is handled BEFORE the cyboId requirement below. Every OTHER kind is cybo-scoped
+      // and dereferences a concrete cyboId, so fail closed without one — this guard
+      // also narrows msg.cyboId to `string` for the handlers that follow.
+      if (msg.kind === "tasks") {
+        await this.handleCyboReadTasks(ws, msg, fail);
+        return;
+      }
+      if (!msg.cyboId) {
+        fail("cybo_read requires cyboId for this kind");
+        return;
+      }
+      // Capture the now-narrowed cyboId so it survives into the async map closure
+      // below (TS drops property narrowing inside closures) and the extracted helpers
+      // whose signatures require a concrete cyboId.
+      const cyboId = msg.cyboId;
       if (msg.kind === "channels") {
         const channels = await this.pg.getChannels(msg.workspaceId);
         const withMembership = await Promise.all(
           channels.map(async (c) => ({
             id: c.id,
             name: c.name,
-            isMember: await this.pg!.isCyboChannelMember(c.id, msg.cyboId).catch(() => false),
+            isMember: await this.pg!.isCyboChannelMember(c.id, cyboId).catch(() => false),
           })),
         );
         const reply: CyboReadResponse = {
@@ -1162,83 +1270,17 @@ export class WorkspaceRelay {
       if (msg.kind === "pages" || msg.kind === "page") {
         // Documented Pages read — owner-ACL gated. Extracted to keep handleCyboRead
         // under the complexity cap.
-        await this.handleCyboPagesRead(ws, msg, fail);
+        await this.handleCyboPagesRead(ws, { ...msg, cyboId }, fail);
         return;
       }
       if (msg.kind === "members") {
         // channel-scoped + membership-gated; extracted to keep handleCyboRead under
         // the complexity cap (behavior unchanged).
-        await this.handleCyboMembersRead(ws, msg, fail);
+        await this.handleCyboMembersRead(ws, { ...msg, cyboId }, fail);
         return;
       }
-      if (msg.kind === "tasks") {
-        // SECURITY (owner ACL): a cybo inherits its OWNER's task visibility — it
-        // must never see a project-restricted task the owning user can't see. The
-        // owner is the cybo's creator (cybos.created_by). We resolve it and scope
-        // the read with `userId: ownerId`, so getTasks → getTasksPage applies
-        // taskVisibilityCondition (project_id IS NULL, OR a project the owner may
-        // see) — the SAME gate the UI's cyborg:fetch_tasks path applies for its
-        // guest user. Without this the read ran UNSCOPED and leaked every workspace
-        // task, including project-restricted ones the owner can't see.
-        const ownerId = (await this.pg.getCybos(msg.workspaceId)).find(
-          (c) => c.id === msg.cyboId,
-        )?.created_by;
-        if (!ownerId) {
-          fail("cybo not found in this workspace");
-          return;
-        }
-        // Defense in depth: if the owner was REMOVED from the workspace, deny — a
-        // cybo must not outlive its owner's access. Otherwise the owner-scoped read
-        // would still surface project-less tasks (taskVisibilityCondition admits
-        // project_id IS NULL for any userId), and a removed owner can see nothing.
-        if (!(await this.pg.isMember(msg.workspaceId, ownerId))) {
-          fail("cybo owner is no longer a member of this workspace");
-          return;
-        }
-        // status/assigneeId are the only filters the shared getTasks read applies
-        // (same as the UI's cyborg:fetch_tasks path). The Tasks Redesign filters
-        // (projectId/state/priority/label) are not part of the getTasks API, so we
-        // apply them in-memory over the rich rows getTasks already returns —
-        // matching the id-bearing fields each StoredTask carries (project_id,
-        // state_id, priority, label_ids). Without this the cloud read ignored these
-        // filters entirely and dropped the rich fields the UI sees via mapTask.
-        const tasks = await this.pg.getTasks(msg.workspaceId, {
-          status: msg.status,
-          assigneeId: msg.assigneeId,
-          userId: ownerId,
-        });
-        const filtered = tasks.filter((t) => {
-          if (msg.projectId && t.project_id !== msg.projectId) return false;
-          if (msg.priority && t.priority !== msg.priority) return false;
-          if (msg.state && t.state_id !== msg.state) return false;
-          if (msg.label && !(t.label_ids ?? []).includes(msg.label)) return false;
-          return true;
-        });
-        const reply: CyboReadResponse = {
-          type: "cybo_read_response",
-          requestId: msg.requestId,
-          ok: true,
-          // Mirror the relay's mapTask snake_case readback so the cybo's list_tasks
-          // surfaces the same rich shape the UI gets.
-          tasks: filtered.map((t) => ({
-            id: t.id,
-            title: t.title,
-            status: t.status,
-            assignee_id: t.assignee_id ?? null,
-            description: t.description ?? null,
-            due_at: t.due_at ?? null,
-            created_at: t.created_at,
-            sequence_id: t.sequence_id ?? null,
-            state_id: t.state_id ?? null,
-            priority: t.priority ?? null,
-            project_id: t.project_id ?? null,
-            label_ids: t.label_ids ?? [],
-            module_ids: t.module_ids ?? [],
-          })),
-        };
-        this.send(ws, reply);
-        return;
-      }
+      // kind:"tasks" is handled by handleCyboReadTasks above (it supports both the
+      // cybo-owner and non-cybo user path), so it never reaches here.
       // kind === "history" | "search" — both are channel-scoped and
       // membership-gated (same fail-safe as the daemon-side gate).
       if (!msg.channelId) {

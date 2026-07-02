@@ -59,7 +59,10 @@ export interface Cyborg7McpDeps {
   // Undefined in solo mode (local SQLite serves every read).
   cyboRead?: (req: {
     workspaceId: string;
-    cyboId: string;
+    // A cybo read sends cyboId; a non-cybo (user-attributed) read sends userId. The
+    // relay scopes a userId read to that user's task visibility (currently kind:"tasks").
+    cyboId?: string;
+    userId?: string;
     kind:
       | "channels"
       | "history"
@@ -587,10 +590,15 @@ export function createCyborg7McpServer(deps: Cyborg7McpDeps, ctx: Cyborg7McpCont
     priority?: string;
     label?: string;
   }): Promise<TaskRow[]> => {
-    if (cyboRead && ctx.cyboId) {
+    // A non-cybo workspace session (no cyboId) reads with its spawning user's identity
+    // so the relay scopes tasks to that user's visibility — without this a non-cybo
+    // session fell through to the empty local store (cloud daemons have no PG) and saw
+    // no tasks.
+    if (cyboRead && (ctx.cyboId || ctx.initiatedByUserId)) {
       const res = await cyboRead({
         workspaceId: ctx.workspaceId,
         cyboId: ctx.cyboId,
+        userId: ctx.cyboId ? undefined : ctx.initiatedByUserId,
         kind: "tasks",
         status: filter.status,
         assigneeId: filter.assigneeId,
@@ -607,7 +615,17 @@ export function createCyborg7McpServer(deps: Cyborg7McpDeps, ctx: Cyborg7McpCont
     }
     // Local stores only support the status/assignee filter shape.
     const localFilter = { status: filter.status, assigneeId: filter.assigneeId };
-    if (storage.pg) return await storage.pg.getTasks(ctx.workspaceId, localFilter);
+    // Direct-PG fallback (relay unreachable on a daemon that carries DATABASE_URL):
+    // scope to the same user the relay path would, so a project-restricted task is
+    // never leaked to a non-cybo session that runs this fallback UNSCOPED. A cybo's
+    // owner isn't resolvable client-side, so cybo reads keep their prior fallback. The
+    // SQLite path below is solo/local (single user), so no cross-user scoping applies.
+    if (storage.pg) {
+      return await storage.pg.getTasks(ctx.workspaceId, {
+        ...localFilter,
+        userId: ctx.cyboId ? undefined : ctx.initiatedByUserId,
+      });
+    }
     return storage.getTasks(ctx.workspaceId, localFilter);
   };
 

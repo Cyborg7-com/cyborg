@@ -784,6 +784,58 @@ async function callToolAsCybo(
   }
 }
 
+// A NON-cybo workspace session (a plain Claude/Codex session, no cyboId) reads
+// tasks with its SPAWNING USER's identity so the relay scopes them to that user's
+// visibility. Before the fix `readTasks` only took the relay path when a cyboId was
+// present, so a non-cybo session on a cloud daemon (no PG handle) fell through to the
+// empty local store and saw NO tasks.
+describe("cyborg7_list_tasks — non-cybo session reads via the relay with the user id", () => {
+  it("routes the task read through the relay attributed to the spawning user", async () => {
+    const reads: Array<Record<string, unknown>> = [];
+    const deps = {
+      // Cloud daemon: no PG handle, and the local task store is EMPTY.
+      storage: { getTasks: () => [], pg: null },
+      messageRouter: {},
+      cyboRead: async (req: Record<string, unknown>) => {
+        reads.push(req);
+        if (req.kind === "tasks") {
+          return {
+            ok: true,
+            tasks: [
+              { id: "t1", title: "Ship it", status: "pending", assignee_id: null, created_at: 1 },
+            ],
+          };
+        }
+        return null;
+      },
+    } as unknown as Cyborg7McpDeps;
+
+    const server = createCyborg7McpServer(deps, {
+      workspaceId: "ws_1",
+      agentId: "ag_1",
+      // No cyboId — but the binding's spawning user is threaded through.
+      initiatedByUserId: "user_1",
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    const client = new Client({ name: "test", version: "1.0.0" });
+    await client.connect(clientTransport);
+    try {
+      const res = (await client.callTool({ name: "cyborg7_list_tasks", arguments: {} })) as {
+        content: Array<{ text: string }>;
+      };
+      const text = res.content.map((c) => c.text).join("\n");
+      expect(reads).toHaveLength(1);
+      expect(reads[0]).toMatchObject({ kind: "tasks", userId: "user_1" });
+      expect(reads[0].cyboId).toBeUndefined();
+      expect(text).toContain("Ship it");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+});
+
 // react + search reconciliation (audit follow-ups; same relay-aware pattern
 // as the #421 reads above): the message row IS synced locally, but the channel
 // catalog + membership live in the relay's PG on cloud daemons.

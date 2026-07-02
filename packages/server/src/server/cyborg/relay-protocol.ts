@@ -88,7 +88,15 @@ export const CyboReadRequestSchema = z.object({
   type: z.literal("cybo_read_request"),
   requestId: z.string(),
   workspaceId: z.string(),
-  cyboId: z.string(),
+  // A cybo read carries `cyboId`; the read is scoped to the cybo OWNER's task/page
+  // visibility. A NON-cybo agent (a plain Claude/Codex workspace session) has no
+  // cybo, so it sends `userId` instead — its spawning user (agent_bindings.initiated_by)
+  // — and the read is scoped to THAT user's visibility. Exactly one is set. Both
+  // optional on the wire for backward compat: an old daemon always sends cyboId, and
+  // a relay that predates userId simply won't see it (a non-cybo read then fails
+  // closed rather than leaking). Currently honored only by kind:"tasks".
+  cyboId: z.string().optional(),
+  userId: z.string().optional(),
   kind: z.enum([
     "channels",
     "history",
