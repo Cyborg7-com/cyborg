@@ -134,8 +134,24 @@ describe("buildCyboPrompt", () => {
     const cybo = makeCybo();
     const prompt = buildCyboPrompt(cybo, { channelName: "random" });
     expect(prompt).toContain('group channel "random"');
-    expect(prompt).toMatch(/Reply in this channel/i);
+    expect(prompt).toMatch(/Answer directly in your response/i);
+    expect(prompt).toMatch(/do not call cyborg7_send_message to post your reply here/i);
     expect(prompt).toMatch(/not post to another channel or DM/i);
+  });
+
+  it("AUTONOMOUS run: instructs the OPPOSITE — response text is dropped, tool is the delivery", () => {
+    // Scheduled/unattended turns never auto-post: emitAgentStream tags them
+    // `autonomous` and the relay accumulator DROPS the prose, so the ONLY way the
+    // run reaches a channel/DM is an explicit cyborg7_send_message call. The
+    // interactive "don't call send_message" framing would silence every cron.
+    const cybo = makeCybo();
+    const prompt = buildCyboPrompt(cybo, { channelName: "general", autonomous: true });
+    expect(prompt).toContain("autonomous (scheduled/unattended) run");
+    expect(prompt).toMatch(/response text is NOT delivered anywhere/i);
+    expect(prompt).toMatch(/MUST call cyborg7_send_message/i);
+    // And it must NOT carry the interactive no-tool instruction.
+    expect(prompt).not.toMatch(/do not call cyborg7_send_message to post your reply here/i);
+    expect(prompt).not.toMatch(/posted to that channel automatically/i);
   });
 
   it("combines all elements in order", () => {

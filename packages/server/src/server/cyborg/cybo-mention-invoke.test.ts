@@ -372,7 +372,8 @@ describe("buildMentionPrompt", () => {
     expect(p).toContain("You were @-mentioned in #general.");
     expect(p).toContain("Recent messages:\n@bob: hi");
     expect(p).toContain("Alice mentioned you: @apex hola");
-    expect(p).toContain("Reply in this channel.");
+    expect(p).toContain("it is posted to this channel automatically");
+    expect(p).toContain("Do NOT call cyborg7_send_message to post your reply here");
   });
 
   it("omits the transcript block when empty", () => {

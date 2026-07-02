@@ -795,7 +795,7 @@ export function createCyborg7McpServer(deps: Cyborg7McpDeps, ctx: Cyborg7McpCont
   if (allows("send_message")) {
     server.tool(
       "cyborg7_send_message",
-      "Send a message to a channel or DM in the workspace",
+      "Send a message to ANOTHER channel or user in the workspace (cross-context messaging — e.g. asked in a DM to post something to #general, or to DM a third person). Do NOT use it to answer the conversation you are currently in: your response text is delivered there automatically, so tool-sending it creates a duplicate. EXCEPTION: in an autonomous (scheduled/unattended) run your response text is NOT delivered anywhere, so there this tool IS how you post the result.",
       {
         channel: z.string().optional().describe("Channel name or ID to send to"),
         to: z.string().optional().describe("User or agent ID for DM"),

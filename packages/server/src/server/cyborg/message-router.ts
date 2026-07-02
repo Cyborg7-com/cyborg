@@ -2335,10 +2335,15 @@ export class MessageRouter {
   }
 
   // Build the Layer-A (prompt scoping) framing for a 1:1 DM turn: tell the cybo this
-  // is a PRIVATE direct message and it must reply by DMing the user back, never to a
-  // channel. A scheduled cybo's session still has "Current channel: …" baked into its
-  // system prompt, so be explicit. Shared by the local + cloud DM entry points so both
-  // frame identically.
+  // is a PRIVATE direct message and that its RESPONSE TEXT is the reply — the armed
+  // DM turn (routeDmTurn → emitAgentStream privateToEmail → relay flush) delivers it
+  // to the user automatically, so the model must NOT call cyborg7_send_message to
+  // answer (an earlier framing instructed exactly that, which trained cybos to reply
+  // via tool call — clunky transcripts and a duplicate: tool DM + auto-flushed text).
+  // The tool stays reserved for messaging OTHER channels/users. A scheduled cybo's
+  // session still has "Current channel: …" baked into its system prompt, so stay
+  // explicit about not posting to channels. Shared by the local + cloud DM entry
+  // points so both frame identically.
   //
   // PRIVACY (must stay): the framing is wrapped in the <paseo-system>…</paseo-system>
   // envelope (formatSystemNotificationPrompt). This is ONLY the model's turn INPUT —
@@ -2360,8 +2365,11 @@ export class MessageRouter {
   buildDmPrompt(recipient: { userId: string; name: string; text: string }): string {
     return formatSystemNotificationPrompt(
       `[PRIVATE DM from ${recipient.name} (user id: ${recipient.userId})]: ${recipient.text}\n\n` +
-        `This is a private 1:1 direct message. Reply ONLY by DMing the user back ` +
-        `(cyborg7_send_message with to: "${recipient.userId}"). Do NOT post to any channel for this turn.`,
+        `This is a private 1:1 direct message. Answer directly in your response — it is ` +
+        `delivered to the user as your DM reply automatically. Do NOT call ` +
+        `cyborg7_send_message to answer this conversation (that sends a duplicate); use ` +
+        `it ONLY if asked to message a DIFFERENT user or channel. Do NOT post to any ` +
+        `channel for this turn.`,
     );
   }
 

@@ -383,7 +383,9 @@ export function buildMentionPrompt(opts: {
     `If the request is recurring or at a future time (e.g. "every Monday", ` +
     `"daily at 9am", "remind us weekly"), use cyborg7_schedule_create to set up a ` +
     `real schedule rather than just a one-off task. ` +
-    `Reply in this channel.`
+    `Answer directly in your response — it is posted to this channel automatically. ` +
+    `Do NOT call cyborg7_send_message to post your reply here (that double-posts); ` +
+    `use it only if asked to message a DIFFERENT channel or user.`
   );
 }
 

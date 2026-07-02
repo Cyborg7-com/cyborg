@@ -135,6 +135,12 @@ export interface SpawnCyboContext {
   channelName?: string;
   channelId?: string;
   cwd?: string;
+  // Autonomous (scheduled/unattended) run: the stream accumulator DROPS the
+  // model's response prose (message-router emitAgentStream), so the ONLY way
+  // this session reaches a channel/DM is an explicit cyborg7_send_message call.
+  // The channel framing below must instruct the OPPOSITE of the interactive
+  // case (where the reply auto-posts and tool-sending it would duplicate).
+  autonomous?: boolean;
 }
 
 // Always-on docs-awareness contribution (mirrors OpenClaw's "read local docs
@@ -201,11 +207,25 @@ export function buildCyboPrompt(cybo: StoredCybo, context?: SpawnCyboContext): s
     // DM turn reuses a channel-bound session, so its medium is injected per-turn in
     // MessageRouter.handleDm instead of baked into this spawn-time system prompt.)
     parts.push(`Current channel: ${context.channelName}.`);
-    parts.push(
-      `You are speaking in the group channel "${context.channelName}" — your reply is ` +
-        `posted to that channel, visible to everyone in it. Reply in this channel; do ` +
-        `not post to another channel or DM unless explicitly asked.`,
-    );
+    if (context.autonomous) {
+      // Autonomous/scheduled run: the accumulator drops response prose, so the
+      // tool IS the delivery mechanism — instruct the opposite of interactive.
+      parts.push(
+        `This is an autonomous (scheduled/unattended) run bound to the group channel ` +
+          `"${context.channelName}". Your response text is NOT delivered anywhere — ` +
+          `to communicate a result you MUST call cyborg7_send_message explicitly ` +
+          `(to this channel, or to the user/DM your instructions name). Do not ` +
+          `message other channels or users unless asked.`,
+      );
+    } else {
+      parts.push(
+        `You are speaking in the group channel "${context.channelName}" — your reply is ` +
+          `posted to that channel automatically, visible to everyone in it. Answer ` +
+          `directly in your response; do not call cyborg7_send_message to post your ` +
+          `reply here (that double-posts), and do not post to another channel or DM ` +
+          `unless explicitly asked.`,
+      );
+    }
   }
 
   // Always-on: point the cybo at the product docs (and, in a checkout, its source)
@@ -468,6 +488,7 @@ export async function spawnCybo(opts: {
   const enrichedContext: SpawnCyboContext = {
     workspaceName: workspace?.name,
     ...context,
+    autonomous: autonomous || context?.autonomous,
   };
 
   const systemPrompt = buildCyboPrompt(cybo, enrichedContext);
