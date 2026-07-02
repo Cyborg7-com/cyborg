@@ -10,7 +10,8 @@
   } from "$lib/state/app.svelte.js";
   import { cyboState } from "$lib/plugins/agents/state.svelte.js";
   import { loadMoreMessages } from "$lib/state/app.svelte.js";
-  import { formatDate, isSameDay } from "$lib/utils.js";
+  import { formatDate } from "$lib/utils.js";
+  import { isGroupedWith, isNewDay } from "./grouping.js";
   import ChatMessage from "./ChatMessage.svelte";
   import SystemMessage from "./SystemMessage.svelte";
   import MessageActionSheet from "./MessageActionSheet.svelte";
@@ -198,19 +199,11 @@
   }
 
   function isGrouped(index: number): boolean {
-    if (index === 0) return false;
-    const prev = resolvedMessages[index - 1];
-    const curr = resolvedMessages[index];
-    if (prev.fromId !== curr.fromId) return false;
-    if (prev.fromType !== curr.fromType) return false;
-    return curr.createdAt - prev.createdAt < groupingWindowMs;
+    return index > 0 && isGroupedWith(resolvedMessages[index - 1], resolvedMessages[index], groupingWindowMs);
   }
 
   function shouldShowDate(index: number): boolean {
-    if (index === 0) return true;
-    const prev = resolvedMessages[index - 1];
-    const curr = resolvedMessages[index];
-    return !isSameDay(prev.createdAt, curr.createdAt);
+    return index === 0 || isNewDay(resolvedMessages[index - 1], resolvedMessages[index]);
   }
 
   // ─── Item 12: cursor-based unread divider ───
@@ -581,7 +574,7 @@
         {:else}
           <ChatMessage
             {message}
-            grouped={isGrouped(i) && i !== unreadDividerIndex && !shouldShowDate(i)}
+            grouped={isGrouped(i) && i !== unreadDividerIndex}
             showAvatar={showAvatars}
             showRoleBadge={showRoleBadges}
             showHoverToolbar={!readOnly}

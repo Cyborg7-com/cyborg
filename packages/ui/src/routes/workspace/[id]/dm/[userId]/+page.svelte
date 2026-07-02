@@ -4,6 +4,7 @@
   import { authState, workspaceState, dmState, selectDm, sendDmMessage, retrySendDmMessage, loadMoreDmMessages, userStatusState, toggleReaction, editMessage, deleteMessage, messageFocusState, closeThread, presenceState } from "$lib/state/app.svelte.js";
   import Avatar from "$lib/components/Avatar.svelte";
   import ChatMessage from "$lib/components/message/ChatMessage.svelte";
+  import { isGroupedWith, isNewDay } from "$lib/components/message/grouping.js";
   import UnreadDivider from "$lib/components/message/UnreadDivider.svelte";
   import MessageInput from "$lib/components/message/MessageInput.svelte";
   import TypingIndicator from "$lib/components/message/TypingIndicator.svelte";
@@ -19,6 +20,7 @@
     installIosKeyboardScrollPreserve,
   } from "$lib/mobile/chatScroll.js";
   import type { Attachment } from "$lib/core/types.js";
+  import { formatDate } from "$lib/utils.js";
 
   const peerId = $derived(page.params.userId);
   const myId = $derived(authState.user?.id);
@@ -258,8 +260,11 @@
   }
 
   function isGrouped(idx: number): boolean {
-    if (idx === 0) return false;
-    return messages[idx].fromId === messages[idx - 1].fromId;
+    return idx > 0 && isGroupedWith(messages[idx - 1], messages[idx]);
+  }
+
+  function shouldShowDate(idx: number): boolean {
+    return idx === 0 || isNewDay(messages[idx - 1], messages[idx]);
   }
 
   function getStatusEmoji(userId: string): string | null {
@@ -367,6 +372,17 @@
           </div>
         {/if}
         {#each messages as msg, idx (msg.id)}
+          {#if shouldShowDate(idx)}
+            <!-- ponytail: DM divider omits the channel's jump-to-date menu; add if DMs need it.
+                 Otherwise identical to MessageList's centered pill (bg-surface-alt/text-content-muted). -->
+            <div class="my-4 flex select-none items-center justify-center">
+              <span
+                class="rounded-full bg-surface-alt px-3 py-1 text-[13px] font-medium text-content-muted shadow-sm"
+              >
+                {formatDate(msg.createdAt)}
+              </span>
+            </div>
+          {/if}
           {#if idx === unreadDividerIndex}
             <UnreadDivider />
           {/if}
