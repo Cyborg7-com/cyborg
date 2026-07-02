@@ -88,14 +88,27 @@ describe("assertProdJwtSecret", () => {
     expect(() => assertProdJwtSecret("cyborg7-dev-secret-change-in-production")).toThrow();
   });
 
-  it("does not throw in production with a custom secret", () => {
+  it("throws in production when the secret is under the 32-char entropy floor", () => {
     process.env.NODE_ENV = "production";
-    expect(() => assertProdJwtSecret("a-strong-secret")).not.toThrow();
+    // Previously "a-strong-secret" (15 chars) PASSED — a short secret is brute-forceable
+    // and defeats the guard. Now rejected.
+    expect(() => assertProdJwtSecret("a-strong-secret")).toThrow();
+    expect(() => assertProdJwtSecret("x".repeat(31))).toThrow();
   });
 
-  it("does not throw outside production even with the default/missing secret", () => {
+  it("does not throw in production with a strong (>=32 char) custom secret", () => {
+    process.env.NODE_ENV = "production";
+    expect(() => assertProdJwtSecret("x".repeat(32))).not.toThrow();
+    // A real `openssl rand -base64 48` value (64 chars).
+    expect(() =>
+      assertProdJwtSecret("N3vJ8pQ2rZ7wK1mB4tY6uX9aC5eD0fG8hL2nM4pR6sT8vW0xZ1cE3gI5kO7qU9y"),
+    ).not.toThrow();
+  });
+
+  it("does not throw outside production even with the default/missing/short secret", () => {
     process.env.NODE_ENV = "development";
     expect(() => assertProdJwtSecret(undefined)).not.toThrow();
     expect(() => assertProdJwtSecret("cyborg7-dev-secret-change-in-production")).not.toThrow();
+    expect(() => assertProdJwtSecret("short")).not.toThrow();
   });
 });

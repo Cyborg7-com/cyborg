@@ -43,13 +43,25 @@ export function timingSafeEqualStr(a: string, b: string): boolean {
   return timingSafeEqual(ab, bb);
 }
 
-// Fail-fast: never run in production with the public/source-visible default secret
-// (or none). Outside production the dev default is allowed for local convenience.
+// Minimum entropy floor for the prod HMAC secret. 32 chars ≈ the 256-bit HMAC-SHA256
+// block; a shorter secret is brute-forceable and defeats the whole guard. `openssl
+// rand -base64 48` yields 64 chars, comfortably above this.
+const MIN_PROD_JWT_SECRET_LEN = 32;
+
+// Fail-fast: never run in production with a weak/default/missing secret. A prod relay
+// signs EVERY user + daemon JWT with this one HMAC key, so a guessable secret is a
+// full account-takeover + daemon-RCE vector (SEC-AUDIT P0). Reject when NODE_ENV is
+// production AND the secret is missing, equals the public source-visible default, or
+// is under the entropy floor. Outside production the dev default is allowed for local
+// convenience. Throws → the relay/daemon import path (relay-auth.ts calls this at
+// module load) fails CLOSED at boot instead of serving forgeable tokens.
 export function assertProdJwtSecret(secret: string | undefined | null): void {
-  const isDefaultOrMissing = !secret || secret === DEFAULT_DEV_SECRET;
-  if (isDefaultOrMissing && process.env.NODE_ENV === "production") {
+  if (process.env.NODE_ENV !== "production") return;
+  const tooWeak =
+    !secret || secret === DEFAULT_DEV_SECRET || secret.length < MIN_PROD_JWT_SECRET_LEN;
+  if (tooWeak) {
     throw new Error(
-      "CYBORG7_JWT_SECRET must be set to a strong secret in production — refusing to boot with the public dev default.",
+      `CYBORG7_JWT_SECRET must be a strong secret (>=${MIN_PROD_JWT_SECRET_LEN} chars, not the public dev default) in production — refusing to boot with a forgeable token key.`,
     );
   }
 }
