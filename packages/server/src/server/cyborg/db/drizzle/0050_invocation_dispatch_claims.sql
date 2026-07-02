@@ -1,4 +1,4 @@
--- 0049_invocation_dispatch_claims.sql
+-- 0050_invocation_dispatch_claims.sql
 -- Cross-daemon exactly-once guard for the @MENTION + channel-WATCHER paths (#16).
 --
 -- Twin of 0046_schedule_dispatch_claims.sql (the cron path). The mention/watch
