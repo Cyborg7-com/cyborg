@@ -365,6 +365,13 @@
       "when": 1783100028000,
       "tag": "0051_user_identity_aliases",
       "breakpoints": true
+    },
+    {
+      "idx": 52,
+      "version": "7",
+      "when": 1783200028000,
+      "tag": "0052_backfill_identity_merge",
+      "breakpoints": true
     }
   ]
 }
