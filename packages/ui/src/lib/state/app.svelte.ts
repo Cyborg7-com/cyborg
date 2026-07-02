@@ -895,8 +895,21 @@ async function handleReconnect(): Promise<void> {
     // swallow so the existing backoff loop keeps retrying (prior behavior).
     const msg = e instanceof Error ? e.message : String(e);
     if (/unauthor/i.test(msg)) {
-      clearSavedSession();
-      void goto("/login");
+      // The stored token can no longer be verified (session expired, or the relay's
+      // JWT secret was rotated so tokens signed with the old one are rejected). Tear
+      // the socket DOWN — not just clear the saved session — so its auto-reconnect
+      // loop stops retrying the dead token. Otherwise every reconnect cycle opens a
+      // socket, re-authenticates, fails "unauthorized", and re-runs the navigation
+      // below; while the user sits on /login typing their email/password, each cycle
+      // remounts the login route and steals focus mid-keystroke (the "it kept
+      // dropping my focus" bug after a forced re-login). disconnectFromServer()
+      // already clears the saved session. Only navigate if we're not already on
+      // /login — a redundant goto to the current route remounts it for the same
+      // focus-stealing reason.
+      disconnectFromServer();
+      if (typeof window === "undefined" || window.location.pathname !== "/login") {
+        void goto("/login");
+      }
     }
     // else: transient — will retry on the next reconnect.
   }
@@ -3324,6 +3337,14 @@ export function disconnectFromServer(): void {
   sessionState.list = [];
   sessionState.fetched = false;
   connectionState.status = "disconnected";
+  // Reset the "has connected at least once" gate too. The ConnectionStatus banner
+  // shows whenever status !== "connected" AND hasConnectedOnce — so without this a
+  // full teardown (logout, or an auth-rejected reconnect) would leave a stuck
+  // "Disconnected — reconnecting…" banner over the /login screen even though the
+  // socket is intentionally down. A fresh sign-in re-sets it on the next connect.
+  connectionState.hasConnectedOnce = false;
+  connectionState.reconnectAttempt = 0;
+  connectionState.reconnectDelayMs = 0;
   // Wipe the warm projects cache so the next account's workspaces start cold
   // (no stale project headers from the previous session).
   projectsCache.clear();
