@@ -336,7 +336,30 @@ async function ensureSyntheticAuthor(
 ): Promise<string> {
   const syntheticId = `${SLACK_PROVIDER}:${teamId}:${userId}`;
   const existing = await pg.getSlackUserMap(teamId, userId);
-  if (existing) return existing.displayName ?? userId;
+  if (existing) {
+    // Avatar backfill: a row created before the avatar was captured (older code, or a
+    // pre-users:read install) is frozen — getSlackUserMap short-circuits, so resolveUser
+    // never runs again and the profile stays image-less forever. If we hold a token and
+    // the stored image is NULL (never attempted), re-resolve ONCE and update.
+    // We write "" when there's no avatar OR the resolve failed — "" is falsy (the UI still
+    // falls back to initials) but is NOT null, so we do NOT re-hit users.info on every
+    // subsequent message (avoids a per-message API storm / rate-limit). Keep the stored
+    // name: a transient resolveUser failure returns name=userId, and upsertSyntheticUser
+    // coalesces on non-null, so passing it would clobber the already-correct display name.
+    if (token) {
+      const stored = await pg.getUserById(syntheticId);
+      if (stored && stored.imageUrl === null) {
+        const resolved = await slackAdapter.resolveUser(token, userId);
+        await pg.upsertSyntheticUser(
+          syntheticId,
+          stored.email,
+          stored.name ?? resolved.name,
+          resolved.imageUrl ?? "",
+        );
+      }
+    }
+    return existing.displayName ?? userId;
+  }
 
   let displayName = userId;
   let imageUrl: string | null = null;

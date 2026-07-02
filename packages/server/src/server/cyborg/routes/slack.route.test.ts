@@ -67,6 +67,8 @@ interface FakeState {
   msgIntegrationLookups: { provider: string; externalId: string; workspaceId: string }[];
   injects: InjectCall[];
   ensuredUsers: { id: string; email: string; name?: string | null; imageUrl?: string | null }[];
+  // The stored users row getUserById returns (for the avatar-backfill path). null = absent.
+  storedUser?: { id: string; email: string; name: string | null; imageUrl: string | null } | null;
   userMapUpserts: { syntheticUserId: string; slackUserId: string; displayName?: string | null }[];
   msgIntegrationUpserts: {
     messageId: string;
@@ -95,6 +97,9 @@ function makeDeps(state: FakeState): {
     },
     async getSlackUserMap() {
       return state.userMap ?? null;
+    },
+    async getUserById() {
+      return state.storedUser ?? null;
     },
     async upsertSyntheticUser(
       id: string,
@@ -368,6 +373,144 @@ describe("handleInboundMessage — inbound Slack → injectMessage mapping", () 
         imageUrl: "https://slack/img_512.png",
       },
     ]);
+    vi.restoreAllMocks();
+  });
+
+  it("backfills a KNOWN guest's avatar when the stored user has no image", async () => {
+    // The regression: a guest created before the avatar was captured is frozen — the map
+    // exists so the resolve path was skipped forever, leaving image_url NULL. With a token
+    // + a stored image-less user, we re-resolve ONCE and update.
+    const state = newState({
+      install: {
+        id: "ins_1",
+        workspaceId: "ws_1",
+        provider: "slack",
+        externalId: "T1",
+        config: {},
+        accessToken: "xoxb-token",
+        botUserId: "UBOT",
+        scopes: null,
+        installedBy: "u1",
+        createdAt: 0,
+      },
+      userMap: {
+        id: "slku_1",
+        workspaceId: "ws_1",
+        slackTeamId: "T1",
+        slackUserId: "U1",
+        syntheticUserId: "slack:T1:U1",
+        displayName: "Ada Lovelace",
+        createdAt: 0,
+      },
+      storedUser: {
+        id: "slack:T1:U1",
+        email: "slack_T1_U1@remote.local",
+        name: "Ada Lovelace",
+        imageUrl: null, // frozen: never captured
+      },
+    });
+    const spy = vi
+      .spyOn(slackAdapter, "resolveUser")
+      .mockResolvedValue({ name: "Ada Lovelace", imageUrl: "https://slack/img_512.png" });
+    const { pg, relay, deps } = makeDeps(state);
+    await handleInboundMessage(pg, relay, deps, inbound());
+    expect(spy).toHaveBeenCalledWith("xoxb-token", "U1");
+    expect(state.ensuredUsers).toEqual([
+      {
+        id: "slack:T1:U1",
+        email: "slack_T1_U1@remote.local",
+        name: "Ada Lovelace",
+        imageUrl: "https://slack/img_512.png",
+      },
+    ]);
+    vi.restoreAllMocks();
+  });
+
+  it("writes an empty-string sentinel (not null) + keeps the stored name when resolve yields no avatar", async () => {
+    // The Gemini-caught storm: if resolveUser returns imageUrl:null (no custom avatar OR a
+    // transient users.info failure, which also returns name=userId), we must NOT leave
+    // image_url NULL — else every later message re-hits users.info. We write "" (falsy, UI
+    // shows initials; non-null, so no retry) and KEEP the stored display name (never clobber
+    // it with the userId fallback).
+    const state = newState({
+      install: {
+        id: "ins_1",
+        workspaceId: "ws_1",
+        provider: "slack",
+        externalId: "T1",
+        config: {},
+        accessToken: "xoxb-token",
+        botUserId: "UBOT",
+        scopes: null,
+        installedBy: "u1",
+        createdAt: 0,
+      },
+      userMap: {
+        id: "slku_1",
+        workspaceId: "ws_1",
+        slackTeamId: "T1",
+        slackUserId: "U1",
+        syntheticUserId: "slack:T1:U1",
+        displayName: "Ada Lovelace",
+        createdAt: 0,
+      },
+      storedUser: {
+        id: "slack:T1:U1",
+        email: "slack_T1_U1@remote.local",
+        name: "Ada Lovelace",
+        imageUrl: null,
+      },
+    });
+    // resolveUser's failure/no-avatar shape: name falls back to the raw user id, image null.
+    vi.spyOn(slackAdapter, "resolveUser").mockResolvedValue({ name: "U1", imageUrl: null });
+    const { pg, relay, deps } = makeDeps(state);
+    await handleInboundMessage(pg, relay, deps, inbound());
+    expect(state.ensuredUsers).toEqual([
+      {
+        id: "slack:T1:U1",
+        email: "slack_T1_U1@remote.local",
+        name: "Ada Lovelace", // stored name preserved, NOT clobbered with "U1"
+        imageUrl: "", // sentinel: attempted, none — stops the retry loop
+      },
+    ]);
+    vi.restoreAllMocks();
+  });
+
+  it("does NOT re-resolve a known guest that already has an avatar (cheap short-circuit)", async () => {
+    const state = newState({
+      install: {
+        id: "ins_1",
+        workspaceId: "ws_1",
+        provider: "slack",
+        externalId: "T1",
+        config: {},
+        accessToken: "xoxb-token",
+        botUserId: "UBOT",
+        scopes: null,
+        installedBy: "u1",
+        createdAt: 0,
+      },
+      userMap: {
+        id: "slku_1",
+        workspaceId: "ws_1",
+        slackTeamId: "T1",
+        slackUserId: "U1",
+        syntheticUserId: "slack:T1:U1",
+        displayName: "Ada Lovelace",
+        createdAt: 0,
+      },
+      storedUser: {
+        id: "slack:T1:U1",
+        email: "slack_T1_U1@remote.local",
+        name: "Ada Lovelace",
+        imageUrl: "https://slack/existing.png", // already has an avatar
+      },
+    });
+    const spy = vi.spyOn(slackAdapter, "resolveUser");
+    const { pg, relay, deps } = makeDeps(state);
+    await handleInboundMessage(pg, relay, deps, inbound());
+    expect(spy).not.toHaveBeenCalled();
+    expect(state.ensuredUsers).toHaveLength(0);
     vi.restoreAllMocks();
   });
 });
