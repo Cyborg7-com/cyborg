@@ -1,7 +1,8 @@
 import { createHmac } from "node:crypto";
 import { describe, it, expect, afterEach } from "vitest";
 
-import { verifyJwt, timingSafeEqualStr, assertProdJwtSecret } from "./auth.js";
+import { verifyJwt, timingSafeEqualStr, assertProdJwtSecret, mintDaemonToken } from "./auth.js";
+import { validateDaemonToken as relayValidateDaemonToken } from "./relay-auth.js";
 
 const SECRET = "test-secret";
 
@@ -110,5 +111,56 @@ describe("assertProdJwtSecret", () => {
     expect(() => assertProdJwtSecret(undefined)).not.toThrow();
     expect(() => assertProdJwtSecret("cyborg7-dev-secret-change-in-production")).not.toThrow();
     expect(() => assertProdJwtSecret("short")).not.toThrow();
+  });
+});
+
+describe("daemon-token secret decoupling (CYBORG-58)", () => {
+  const origJwt = process.env.CYBORG7_JWT_SECRET;
+  const origDaemon = process.env.CYBORG7_DAEMON_TOKEN_SECRET;
+  afterEach(() => {
+    if (origJwt === undefined) delete process.env.CYBORG7_JWT_SECRET;
+    else process.env.CYBORG7_JWT_SECRET = origJwt;
+    if (origDaemon === undefined) delete process.env.CYBORG7_DAEMON_TOKEN_SECRET;
+    else process.env.CYBORG7_DAEMON_TOKEN_SECRET = origDaemon;
+  });
+
+  it("a daemon token SURVIVES a user-JWT-secret rotation when the daemon secret is pinned", () => {
+    // This is the CYBORG-58 acceptance criterion: rotating CYBORG7_JWT_SECRET (the
+    // SEC-AUDIT P0 rotation) must NOT orphan daemons.
+    process.env.CYBORG7_DAEMON_TOKEN_SECRET = "pinned-daemon-secret-aaaaaaaaaaaaaaaaaa";
+    process.env.CYBORG7_JWT_SECRET = "user-secret-A-bbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const token = mintDaemonToken("srv_test", "owner_1");
+    expect(relayValidateDaemonToken(token)).toEqual({ daemonId: "srv_test", ownerId: "owner_1" });
+    // Rotate ONLY the user secret; the pinned daemon secret is untouched.
+    process.env.CYBORG7_JWT_SECRET = "user-secret-B-cccccccccccccccccccccccccc";
+    expect(relayValidateDaemonToken(token)).toEqual({ daemonId: "srv_test", ownerId: "owner_1" });
+  });
+
+  it("rejects a daemon token once the pinned daemon secret itself changes", () => {
+    process.env.CYBORG7_DAEMON_TOKEN_SECRET = "pinned-A-dddddddddddddddddddddddddddddd";
+    const token = mintDaemonToken("srv_x", "owner_x");
+    process.env.CYBORG7_DAEMON_TOKEN_SECRET = "pinned-B-eeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    expect(relayValidateDaemonToken(token)).toBeNull();
+  });
+
+  it("falls back to the user-JWT secret when the daemon secret is unset (transition seam)", () => {
+    delete process.env.CYBORG7_DAEMON_TOKEN_SECRET;
+    process.env.CYBORG7_JWT_SECRET = "shared-strong-secret-ffffffffffffffffff";
+    const token = mintDaemonToken("srv_t", "owner_t");
+    expect(relayValidateDaemonToken(token)).toEqual({ daemonId: "srv_t", ownerId: "owner_t" });
+  });
+
+  it("never accepts a USER-shaped token as a daemon token (type gate), even correctly signed", () => {
+    process.env.CYBORG7_DAEMON_TOKEN_SECRET = "pinned-daemon-secret-gggggggggggggggggg";
+    const h = b64url({ alg: "HS256", typ: "JWT" });
+    const p = b64url({
+      email: "u@x.com",
+      sub: "user_1",
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    });
+    const sig = createHmac("sha256", "pinned-daemon-secret-gggggggggggggggggg")
+      .update(`${h}.${p}`)
+      .digest("base64url");
+    expect(relayValidateDaemonToken(`${h}.${p}.${sig}`)).toBeNull();
   });
 });

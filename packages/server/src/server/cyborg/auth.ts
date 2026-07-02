@@ -75,6 +75,53 @@ export function resolveCyborgJwtSecret(): string {
   return secret || DEFAULT_DEV_SECRET;
 }
 
+// The DAEMON-token signing secret, PINNED SEPARATELY from the user-JWT secret
+// (CYBORG-58). Rotating CYBORG7_JWT_SECRET (user login tokens, the SEC-AUDIT P0
+// rotation) must NEVER invalidate daemon relay tokens — the coupling that took the
+// whole fleet offline on 2026-07-02. When CYBORG7_DAEMON_TOKEN_SECRET is unset this
+// FALLS BACK to the user-JWT secret: that is the transition seam — set
+// CYBORG7_DAEMON_TOKEN_SECRET = the CURRENT strong CYBORG7_JWT_SECRET value on the
+// first deploy so already-connected daemons (self-minting with the strong secret)
+// keep validating against an identical value with zero interruption, then leave it
+// UNTOUCHED on future user-secret rotations. Never the public dev default in prod
+// (same fail-closed guard as the user secret).
+export function resolveDaemonTokenSecret(): string {
+  const pinned = process.env.CYBORG7_DAEMON_TOKEN_SECRET;
+  if (pinned) {
+    assertProdJwtSecret(pinned);
+    return pinned;
+  }
+  return resolveCyborgJwtSecret();
+}
+
+// Mint a relay-signed daemon token (CYBORG-58). Standalone so the relay's enroll
+// endpoint can issue one from an authenticated USER request without a CyborgAuth
+// instance — the daemon never self-signs on the relay path. Signed with the pinned
+// daemon-token secret, so a user-secret rotation never invalidates it. `type:"daemon"`
+// is what validateDaemonToken requires (a user token can never pass as a daemon token).
+export function mintDaemonToken(
+  daemonId: string,
+  ownerId: string,
+  expiresInSecs = 86400 * 365,
+): string {
+  const header = { alg: "HS256", typ: "JWT" };
+  const now = Math.floor(Date.now() / 1000);
+  const payload = {
+    sub: daemonId,
+    type: "daemon" as const,
+    owner: ownerId,
+    email: `daemon-${daemonId}@local`,
+    exp: now + expiresInSecs,
+    iat: now,
+  };
+  const headerB64 = base64UrlEncode(JSON.stringify(header));
+  const payloadB64 = base64UrlEncode(JSON.stringify(payload));
+  const signature = createHmac("sha256", resolveDaemonTokenSecret())
+    .update(`${headerB64}.${payloadB64}`)
+    .digest("base64url");
+  return `${headerB64}.${payloadB64}.${signature}`;
+}
+
 // Single source of truth for HS256 verification used by both CyborgAuth and the
 // standalone relay. Timing-safe signature check + a REQUIRED, numeric, unexpired
 // `exp` (a missing or non-numeric exp must NOT pass — otherwise tokens never die).
@@ -160,27 +207,13 @@ export class CyborgAuth {
   }
 
   createDaemonToken(daemonId: string, ownerId: string, expiresInSecs = 86400 * 365): string {
-    const header = { alg: "HS256", typ: "JWT" };
-    const payload = {
-      sub: daemonId,
-      type: "daemon" as const,
-      owner: ownerId,
-      email: `daemon-${daemonId}@local`,
-      exp: Math.floor(Date.now() / 1000) + expiresInSecs,
-      iat: Math.floor(Date.now() / 1000),
-    };
-
-    const headerB64 = base64UrlEncode(JSON.stringify(header));
-    const payloadB64 = base64UrlEncode(JSON.stringify(payload));
-    const signature = createHmac("sha256", this.jwtSecret)
-      .update(`${headerB64}.${payloadB64}`)
-      .digest("base64url");
-
-    return `${headerB64}.${payloadB64}.${signature}`;
+    return mintDaemonToken(daemonId, ownerId, expiresInSecs);
   }
 
   validateDaemonToken(token: string): DaemonTokenPayload | null {
-    const payload = this.decodeAndVerifyJwt(token);
+    // Verify against the daemon-token secret (CYBORG-58), decoupled from the user
+    // secret. NOT decodeAndVerifyJwt (that uses this.jwtSecret = the user secret).
+    const payload = verifyJwt(token, resolveDaemonTokenSecret()) as JwtPayload | null;
     if (!payload) return null;
     if (payload.exp < Date.now() / 1000) return null;
     if (payload.type !== "daemon" || !payload.sub || !payload.owner) return null;

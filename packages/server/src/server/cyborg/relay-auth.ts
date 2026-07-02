@@ -5,7 +5,7 @@
 import { createHmac, randomBytes, scrypt, timingSafeEqual } from "node:crypto";
 import { promisify } from "node:util";
 
-import { assertProdJwtSecret, verifyJwt } from "./auth.js";
+import { assertProdJwtSecret, resolveDaemonTokenSecret, verifyJwt } from "./auth.js";
 import { isScopeAllowed, type DaemonScope } from "./daemon-scopes.js";
 import type { PgSync } from "./db/pg-sync.js";
 
@@ -19,7 +19,9 @@ export function decodeJwt(token: string): Record<string, unknown> | null {
 }
 
 export function validateDaemonToken(token: string): { daemonId: string; ownerId: string } | null {
-  const payload = decodeJwt(token);
+  // Verify with the PINNED daemon-token secret (CYBORG-58), decoupled from the
+  // user-JWT secret so a user-secret rotation never rejects daemon registrations.
+  const payload = verifyJwt(token, resolveDaemonTokenSecret());
   if (!payload) return null;
   if (payload.type !== "daemon" || !payload.sub || !payload.owner) return null;
   return { daemonId: payload.sub as string, ownerId: payload.owner as string };

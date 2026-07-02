@@ -139,6 +139,7 @@ import {
 } from "./slack-outbound.js";
 import { synthesizeReleaseCard } from "./webhook-card.js";
 import { createAuthRoutes } from "./routes/auth.js";
+import { createDaemonEnrollRoutes } from "./routes/daemon-enroll.js";
 import { createPasskeyRoutes } from "./routes/passkey.js";
 import { createAssetRoutes, uploadBufferToS3 } from "./routes/assets.js";
 import type { AgentImageAttachment, UploadedAgentImage } from "./codex-image-attachment.js";
@@ -10865,6 +10866,11 @@ async function main() {
     "/",
     createPasskeyRoutes({ pg, createUserToken, validateUserToken, broadcastToGuests }),
   );
+
+  // ─── Daemon enrollment (CYBORG-58) ────────────────────────────
+  // Exchange an authenticated user token for a relay-SIGNED daemon token so daemons
+  // stop self-minting with a shared secret — see ./routes/daemon-enroll.ts.
+  app.route("/", createDaemonEnrollRoutes({ requireAuth }));
 
   // ─── Protected workspace REST (extracted) ─────────────────────
   // Read-only authenticated workspace fetches — see ./routes/workspace-rest.ts.

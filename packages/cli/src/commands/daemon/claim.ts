@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Command } from "commander";
-import { resolvePaseoHome } from "@getpaseo/server";
+import { resolvePaseoHome, getOrCreateServerId } from "@getpaseo/server";
 import { authConfigPath } from "../cyborg/login.js";
 import type {
   CommandOptions,
@@ -35,6 +35,37 @@ function resolveHome(options: CommandOptions): string {
   return resolvePaseoHome();
 }
 
+// CYBORG-58 enrollment: POST the user's bearer token to the relay, which mints a
+// daemon token bound to (this daemon's serverId, the authenticated user) and returns
+// it. Persist it as `cyborg-relay-token` (0600) — bootstrap prefers it over
+// self-minting. Best-effort + fully guarded: no throw escapes (a claim must never
+// fail because enrollment couldn't reach the relay).
+async function enrollDaemonToken(
+  home: string,
+  auth: { token?: string; url?: string },
+): Promise<void> {
+  if (!auth.token || !auth.url) return;
+  try {
+    const serverId = getOrCreateServerId(home);
+    const base = auth.url.replace(/\/$/, "");
+    const resp = await fetch(`${base}/api/cyborg/daemon/enroll`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${auth.token}`,
+      },
+      body: JSON.stringify({ daemonId: serverId }),
+    });
+    if (!resp.ok) return;
+    const data = (await resp.json()) as { token?: unknown };
+    if (typeof data.token === "string" && data.token) {
+      writeFileSync(join(home, "cyborg-relay-token"), data.token + "\n", { mode: 0o600 });
+    }
+  } catch {
+    // best-effort; never fail the claim on an enrollment error
+  }
+}
+
 export async function runDaemonClaimCommand(
   options: CommandOptions,
   _command: Command,
@@ -51,6 +82,8 @@ export async function runDaemonClaimCommand(
     userId?: string;
     relayWs?: string;
     email?: string;
+    token?: string;
+    url?: string;
   };
   if (!auth.userId) {
     const e: CommandError = {
@@ -92,6 +125,12 @@ export async function runDaemonClaimCommand(
   writeFileSync(ownerPath, auth.userId + "\n", { mode: 0o600 });
   if (auth.relayWs)
     writeFileSync(join(home, "cyborg-relay-url"), auth.relayWs + "\n", { mode: 0o600 });
+
+  // CYBORG-58: exchange the user token for a RELAY-SIGNED daemon token so the daemon
+  // stops self-minting with a shared secret (the coupling that orphaned the fleet on
+  // a user-secret rotation). Best-effort — a failure never fails the claim; the daemon
+  // still boots and re-enrolls on the next claim/login.
+  await enrollDaemonToken(home, auth);
 
   return {
     type: "single",

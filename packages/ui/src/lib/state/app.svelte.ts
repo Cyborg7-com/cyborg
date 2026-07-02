@@ -2688,7 +2688,9 @@ export async function connectToServer(url: string, token: string): Promise<void>
       const wsProto = u.protocol === "https:" || u.protocol === "wss:" ? "wss" : "ws";
       const relayUrl = `${wsProto}://${u.host}/relay`;
       void desktop
-        .invoke("claim_desktop_daemon", { ownerId: authResp.user.id, relayUrl })
+        // Pass the guest token so the daemon enrolls a relay-signed token
+        // (CYBORG-58) instead of self-minting with a shared secret.
+        .invoke("claim_desktop_daemon", { ownerId: authResp.user.id, relayUrl, userToken: token })
         // intentional: desktop-only daemon claim is fire-and-forget; the daemon's own status heartbeat is the source of truth.
         .catch(() => {});
     }

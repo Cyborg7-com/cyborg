@@ -69,6 +69,16 @@ function relayUrlFilePath(): string {
   return path.join(getCyborg7Home(), "cyborg-relay-url");
 }
 
+// CYBORG-58: the relay-signed daemon token obtained at enrollment (claim). The
+// daemon reads it (via CYBORG_RELAY_TOKEN at spawn) instead of self-minting.
+function relayTokenFilePath(): string {
+  return path.join(getCyborg7Home(), "cyborg-relay-token");
+}
+
+function serverIdFilePath(): string {
+  return path.join(getCyborg7Home(), "server-id");
+}
+
 // Validate a renderer-supplied relay URL before persisting it as the spawned
 // daemon's CYBORG_RELAY_URL. A compromised renderer must not be able to point the
 // daemon (and its auth/token flow) at an attacker-controlled relay: require a
@@ -547,6 +557,12 @@ async function startDaemon(): Promise<CyborgDaemonStatus> {
   };
   const relayUrl = readTrimmedFile(relayUrlFilePath());
   if (relayUrl) envOverlay.CYBORG_RELAY_URL = relayUrl;
+  // CYBORG-58: pass the RELAY-SIGNED daemon token (written by claim/enrollment) as
+  // CYBORG_RELAY_TOKEN so the embedded daemon authenticates WITHOUT sharing the
+  // relay's user-JWT secret — which a desktop bundle cannot safely hold. When absent
+  // (never enrolled yet) the daemon falls back to self-minting, exactly as before.
+  const relayToken = readTrimmedFile(relayTokenFilePath());
+  if (relayToken) envOverlay.CYBORG_RELAY_TOKEN = relayToken;
   // FIX A (Windows auto-update lock): forward the external native dir the main
   // process relocated node-pty/better-sqlite3 into, so the daemon (and the
   // pty-host it spawns, which inherits the daemon's env) loads those .node images
@@ -796,9 +812,56 @@ function getDaemonLogs(): { logPath: string; contents: string } {
 // changed, so it (re)connects to the cloud relay as that user. Subsequent app
 // launches read the persisted files at spawn and connect immediately. A stale or
 // foreign claim self-heals (see decideDaemonClaim) instead of silently no-op-ing.
+// CYBORG-58: exchange the logged-in user's token for a RELAY-SIGNED daemon token and
+// persist it as `cyborg-relay-token`. Returns true when a NEW token was written (so
+// the caller restarts the daemon to pick it up). Best-effort + fully guarded — a
+// failure never breaks the claim; enrollment retries on the next login. Skips when
+// the daemon has not yet created its server-id (first-ever launch): it enrolls on the
+// next claim once the id exists.
+async function enrollDesktopDaemonToken(relayUrl: string, userToken: string): Promise<boolean> {
+  try {
+    const serverId = readTrimmedFile(serverIdFilePath());
+    if (!serverId) return false;
+    let base: string;
+    try {
+      const u = new URL(relayUrl);
+      // wss/https → https, ws/http → http (loopback dev). Don't assume a WS scheme.
+      const secure = u.protocol === "wss:" || u.protocol === "https:";
+      base = `${secure ? "https:" : "http:"}//${u.host}`;
+    } catch {
+      return false;
+    }
+    const resp = await fetch(`${base}/api/cyborg/daemon/enroll`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${userToken}` },
+      body: JSON.stringify({ daemonId: serverId }),
+    });
+    if (!resp.ok) return false;
+    const data = (await resp.json()) as { token?: unknown };
+    if (typeof data.token !== "string" || !data.token) return false;
+    if (readTrimmedFile(relayTokenFilePath()) === data.token.trim()) return false;
+    writeFileSync(relayTokenFilePath(), `${data.token}\n`, { mode: 0o600 });
+    logDaemonLifecycle("enrolled relay-signed daemon token (CYBORG-58)", { relayUrl });
+    return true;
+  } catch (err) {
+    logDaemonLifecycle("daemon enrollment failed (non-fatal, will retry next login)", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return false;
+  }
+}
+
+// Bind the embedded daemon to the logged-in user + cloud relay. The UI calls this
+// after login with the user id, the relay WS URL (derived from the server it
+// connected to), and the user's bearer token (for CYBORG-58 enrollment). We persist
+// owner + relay, enroll a relay-signed daemon token, and restart the daemon when
+// anything changed, so it (re)connects to the cloud relay as that user. Subsequent
+// app launches read the persisted files at spawn and connect immediately. A stale or
+// foreign claim self-heals (see decideDaemonClaim) instead of silently no-op-ing.
 async function claimDesktopDaemon(args?: Record<string, unknown>): Promise<CyborgDaemonStatus> {
   const ownerId = typeof args?.ownerId === "string" ? args.ownerId.trim() : "";
   const relayUrl = typeof args?.relayUrl === "string" ? args.relayUrl.trim() : "";
+  const userToken = typeof args?.userToken === "string" ? args.userToken.trim() : "";
   if (!ownerId || !relayUrl) {
     throw new Error("claim_desktop_daemon requires ownerId and relayUrl");
   }
@@ -811,30 +874,44 @@ async function claimDesktopDaemon(args?: Record<string, unknown>): Promise<Cybor
 
   if (decision.action === "defer") {
     // A different user is actively running this device's daemon on the same Cyborg
-    // relay — respect first-claim (the relay is the owner-of-record).
+    // relay — respect first-claim (the relay is the owner-of-record). Never enroll a
+    // token for a non-owner.
     logDaemonLifecycle(`claim deferred — ${decision.reason}`, {
       currentOwner,
       attemptedBy: ownerId,
     });
     return resolveStatus();
   }
-  if (decision.action === "noop") {
+
+  // Enroll even on a "noop" claim (owner + relay unchanged): after a relay user-secret
+  // rotation the daemon's self-minted token is rejected, so the FIRST recovery is
+  // obtaining a relay-signed token here — there is no owner/relay change to trigger it
+  // otherwise. A newly-written token forces a restart so the daemon picks it up.
+  const tokenChanged = userToken ? await enrollDesktopDaemonToken(relayUrl, userToken) : false;
+
+  if (decision.action === "noop" && !tokenChanged) {
     return resolveStatus();
   }
 
-  writeFileSync(daemonOwnerFilePath(), `${ownerId}\n`, { mode: 0o600 });
-  writeFileSync(relayUrlFilePath(), `${relayUrl}\n`, { mode: 0o600 });
-  logDaemonLifecycle(
-    decision.healed
-      ? "auto-healed stale/foreign daemon claim — rebound to logged-in user + cloud relay"
-      : "claimed by user, restarting to connect to cloud relay",
-    {
-      ownerId,
-      relayUrl,
-      previousOwner: currentOwner || null,
-      previousRelay: currentRelay || null,
-    },
-  );
+  if (decision.action !== "noop") {
+    writeFileSync(daemonOwnerFilePath(), `${ownerId}\n`, { mode: 0o600 });
+    writeFileSync(relayUrlFilePath(), `${relayUrl}\n`, { mode: 0o600 });
+  }
+  let claimMsg: string;
+  if (decision.action === "noop") {
+    claimMsg = "re-enrolled daemon token, restarting to reconnect to cloud relay";
+  } else if (decision.healed) {
+    claimMsg = "auto-healed stale/foreign daemon claim — rebound to logged-in user + cloud relay";
+  } else {
+    claimMsg = "claimed by user, restarting to connect to cloud relay";
+  }
+  logDaemonLifecycle(claimMsg, {
+    ownerId,
+    relayUrl,
+    previousOwner: currentOwner || null,
+    previousRelay: currentRelay || null,
+    tokenChanged,
+  });
   return restartDaemon();
 }
 

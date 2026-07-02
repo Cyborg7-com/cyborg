@@ -1023,9 +1023,29 @@ export async function createPaseoDaemon(
     cyborgWebhookDeliverySweep.unref();
   }
 
-  // Cyborg7: generate daemon token for relay auth
+  // Cyborg7: resolve the daemon's relay token (CYBORG-58). Preference order:
+  //   1. CYBORG_RELAY_TOKEN env — explicit override (CI, tests, the desktop passes
+  //      the enrolled token here at spawn).
+  //   2. `cyborg-relay-token` file — a RELAY-SIGNED token written by `cyborg daemon
+  //      claim` / desktop enrollment. This is the path that survives a user-JWT-secret
+  //      rotation: the relay signs it with the pinned daemon-token secret, so the
+  //      daemon never needs to share the user secret.
+  //   3. Self-mint fallback — only when neither exists (fresh/unclaimed, or a solo
+  //      local daemon). Requires the daemon's local secret to match the relay's, so a
+  //      rotated cloud relay will reject it; it is kept only so a never-enrolled daemon
+  //      still boots. Enrollment (step 2) is the durable path.
+  const relayTokenFilePath = path.join(config.paseoHome, "cyborg-relay-token");
+  let enrolledRelayToken: string | null = null;
+  if (existsSync(relayTokenFilePath)) {
+    try {
+      enrolledRelayToken = readFileSync(relayTokenFilePath, "utf8").trim() || null;
+    } catch (err) {
+      logger.warn({ err, relayTokenFilePath }, "Failed to read cyborg-relay-token file");
+    }
+  }
   const cyborgDaemonToken =
     process.env.CYBORG_RELAY_TOKEN ??
+    enrolledRelayToken ??
     cyborgAuth.createDaemonToken(serverId, daemonOwnerId ?? "unclaimed");
 
   // A PRIVATE agent session may only be prompted by the user who started it. EVERY
@@ -1203,8 +1223,24 @@ export async function createPaseoDaemon(
               { workspaceId, innerType, guestId: rpc.guestId },
               "Daemon received relay_rpc forward",
             );
-            const authCtx = cyborgAuth.validateToken(rpc.token);
-            if (!authCtx) return;
+            let authCtx = cyborgAuth.validateToken(rpc.token);
+            if (!authCtx) {
+              // CYBORG-58: the daemon could not verify the guest token locally. This
+              // is EXPECTED after the user-JWT secret was rotated on the relay — the
+              // daemon's local secret no longer matches, validateToken returns null,
+              // and every forwarded RPC used to be silently DROPPED (daemon "Online"
+              // but list_agents returned 0 sessions — the 2026-07-02 fleet incident).
+              // TRUST the identity the relay already authenticated and attached to the
+              // forward: rpc.guestId/role are set by the relay from its OWN PG session
+              // state (NOT guest-supplied) and arrive over the daemon's authenticated,
+              // TLS-pinned relay socket — so an attacker can neither be the peer nor
+              // forge these fields. Fail CLOSED when there is no guestId (an
+              // unattributable forward must never be dispatched). The canonical cloud
+              // email is stamped by resolveCanonicalEmail() (PG-by-guestId) before
+              // dispatch, exactly as on the validated path.
+              if (!rpc.guestId) return;
+              authCtx = { user: { id: rpc.guestId, email: "", name: null }, workspaces: [] };
+            }
             // Attribute forwarded ops to the relay's CLOUD user id (guestId), not the
             // daemon's token-decoded id. The relay inserts normal channel messages
             // with fromId = guest.userId, and the client resolves avatars by that id
