@@ -117,9 +117,11 @@ describe("@cyborg7/docs-lib — nav manifest", () => {
     const nav = getNav(baseDir);
     expect(labels(nav)).toEqual([
       "Getting Started",
+      "Concepts",
       "Guides",
       "Integrations",
       "Architecture",
+      "Reference",
       "Cybos",
       "Self-Hosting",
       "Contributing",
